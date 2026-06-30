@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+*.tsbuildinfo
+.vite/
+.cache/
+
+# Local app data
+/data/
+apps/api/data/
+logs/
+*.log
+*.pid
+
+# Environment files
+.env
+.env.*
+!.env.example
+.npmrc
+
+# TypeScript emit accidentally written next to source
+packages/db/src/**/*.js
+packages/db/src/**/*.js.map
+packages/db/src/**/*.d.ts
+packages/db/src/**/*.d.ts.map
+packages/shared/src/**/*.js
+packages/shared/src/**/*.js.map
+packages/shared/src/**/*.d.ts
+packages/shared/src/**/*.d.ts.map
+
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local tool state
+.pi/
+.claude/
+.codex/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

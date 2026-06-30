@@ -1,0 +1,38 @@
+{
+  "name": "@yarc/api",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "pretypecheck": "pnpm --filter @yarc/db generate",
+    "typecheck": "tsc --rootDir ../.. --noEmit",
+    "prebuild": "pnpm --filter @yarc/db generate",
+    "build": "tsc --rootDir ../.. --noEmit",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@hono/node-server": "^1.14.3",
+    "@hono/node-ws": "^1.1.1",
+    "@sinclair/typebox": "^0.34.49",
+    "@yarc/db": "workspace:*",
+    "@yarc/shared": "workspace:*",
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^16.5.0",
+    "hono": "^4.7.11",
+    "jsonwebtoken": "^9.0.2",
+    "mime-types": "^2.1.35",
+    "typebox": "^1.2.10",
+    "uuid": "^11.1.0",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/mime-types": "^2.1.4",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.7.3"
+  }
+}

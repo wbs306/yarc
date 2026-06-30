@@ -1,0 +1,33 @@
+{
+  "name": "yarc",
+  "version": "2.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.6.0",
+  "description": "Yet Another Research Claw - PDF-centered research workbench",
+  "scripts": {
+    "dev": "pnpm --filter @yarc/web build && concurrently -k -n web,api -c blue,green \"pnpm --filter @yarc/web dev\" \"pnpm dev:api\"",
+    "dev:api": "apps/api/node_modules/.bin/tsx watch apps/api/src/index.ts",
+    "dev:web": "pnpm --filter @yarc/web dev",
+    "build": "pnpm --filter @yarc/web build && pnpm --filter @yarc/api build",
+    "start": "apps/api/node_modules/.bin/tsx apps/api/src/index.ts",
+    "db:migrate": "pnpm --filter @yarc/db migrate",
+    "db:deploy": "pnpm --filter @yarc/db migrate:deploy",
+    "db:generate": "pnpm --filter @yarc/db generate",
+    "db:seed": "pnpm --filter @yarc/db seed",
+    "docker:dev": "pnpm docker:db:up && pnpm dev",
+    "docker:dev:up": "pnpm docker:db:up",
+    "docker:up": "pnpm docker:db:up",
+    "docker:down": "docker compose stop db",
+    "docker:logs": "docker compose logs -f db",
+    "docker:db": "pnpm docker:db:up",
+    "docker:db:up": "docker compose up -d db",
+    "docker:db:stop": "docker compose stop db",
+    "docker:db:migrate": "pnpm db:migrate",
+    "docker:db:deploy": "pnpm db:deploy",
+    "docker:db:seed": "pnpm db:seed"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,143 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+model Paper {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title             String
+  abstract          String?
+  authors           String[]     @default([])
+  year              Int?
+  doi               String?
+  arxivId           String?      @map("arxiv_id")
+  url               String?
+  filePath          String?      @map("file_path")
+  fileSize          Int?         @map("file_size")
+  categoryId        String?      @map("category_id") @db.Uuid
+  parseStatus       String       @default("pending") @map("parse_status")
+  parseResult       Json?        @map("parse_result")
+  parsedAt          DateTime?    @map("parsed_at")
+  embeddingStatus   String       @default("pending") @map("embedding_status")
+  embeddingProgress Float        @default(0) @map("embedding_progress")
+  embeddedAt        DateTime?    @map("embedded_at")
+  summaryStatus     String       @default("pending") @map("summary_status")
+  summary           String?
+  summarizedAt      DateTime?    @map("summarized_at")
+  metadata          Json         @default("{}")
+  tags              String[]     @default([])
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @default(now()) @map("updated_at")
+  notes             Note[]
+  chunks            PaperChunk[]
+  category          Category?    @relation(fields: [categoryId], references: [id])
+  tasks             Task[]
+
+  @@index([categoryId])
+  @@index([createdAt(sort: Desc)])
+  @@map("papers")
+}
+
+model Category {
+  id        String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  parentId  String?    @map("parent_id") @db.Uuid
+  color     String?
+  createdAt DateTime   @default(now()) @map("created_at")
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children  Category[] @relation("CategoryTree")
+  papers    Paper[]
+
+  @@map("categories")
+}
+
+model Note {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paperId       String   @map("paper_id") @db.Uuid
+  title         String   @default("")
+  content       String   @default("")
+  pageNumber    Int?     @map("page_number")
+  highlightText String?  @map("highlight_text")
+  highlightRect Json?    @map("highlight_rect")
+  kind          String   @default("note")
+  filePath      String?  @map("file_path")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @map("updated_at")
+  paper         Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+
+  @@index([paperId])
+  @@index([paperId, pageNumber])
+  @@map("notes")
+}
+
+model Conversation {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paperId       String?  @map("paper_id") @db.Uuid
+  title         String   @default("新对话")
+  model         String?
+  systemPrompt  String?  @map("system_prompt")
+  metadata      Json     @default("{}")
+  // metadata 结构:
+  // {
+  //   "pi": {
+  //     "sessions": {
+  //       "main": { "sessionFile": "/path/to/session.jsonl", "leafEntryId": "xxx" },
+  //       "edit-123": { "sessionFile": "/path/to/branch.jsonl", "leafEntryId": "yyy" }
+  //     }
+  //   }
+  // }
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @map("updated_at")
+
+  @@map("conversations")
+}
+
+
+
+
+
+model PaperChunk {
+  id         String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paperId    String                 @map("paper_id") @db.Uuid
+  content    String
+  pageNumber Int?                   @map("page_number")
+  chunkIndex Int?                   @map("chunk_index")
+  embedding  Unsupported("vector(1536)")?
+  createdAt  DateTime               @default(now()) @map("created_at")
+  paper      Paper                  @relation(fields: [paperId], references: [id], onDelete: Cascade)
+
+  @@index([paperId])
+  @@map("paper_chunks")
+}
+
+model Task {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paperId     String    @map("paper_id") @db.Uuid
+  type        String
+  status      String    @default("pending")
+  progress    Float     @default(0)
+  result      Json?
+  error       String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  completedAt DateTime? @map("completed_at")
+  paper       Paper     @relation(fields: [paperId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@map("tasks")
+}
+
+
+
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("settings")
+}

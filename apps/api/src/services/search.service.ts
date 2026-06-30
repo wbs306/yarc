@@ -1,0 +1,837 @@
+import { lookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
+import { prisma } from '@yarc/db'
+import { config } from '../lib/config.js'
+import { parseVectorLiteral, type SearchPaper } from '@yarc/shared'
+import { cleanSnippetForDisplay } from '../lib/text-cleaning.js'
+import { embeddingService } from './embedding.service.js'
+
+interface SearchResult {
+  id: string
+  paperId: string
+  title: string
+  snippet: string
+  similarity: number
+  pageNumber: number | null
+}
+
+interface SearchResponse {
+  papers: SearchPaper[]
+  total: number
+  page: number
+  limit: number
+  error?: string
+}
+
+const S2_API_BASE = 'https://api.semanticscholar.org/graph/v1'
+const IEEE_ARTICLES_ENDPOINT = 'https://ieeexploreapi.ieee.org/api/v1/search/articles'
+const IEEE_REST_SEARCH_ENDPOINT = 'https://ieeexplore.ieee.org/rest/search'
+const IEEE_BASE_URL = 'https://ieeexplore.ieee.org'
+
+const S2_FIELDS = [
+  'paperId',
+  'title',
+  'abstract',
+  'year',
+  'venue',
+  'publicationVenue',
+  'publicationTypes',
+  'publicationDate',
+  'url',
+  'openAccessPdf',
+  'authors',
+  'externalIds',
+  'citationCount',
+  'referenceCount',
+  'fieldsOfStudy',
+  's2FieldsOfStudy',
+  'tldr',
+].join(',')
+
+const IEEE_FIELD_MAP: Record<string, string> = {
+  all: 'querytext',
+  title: 'article_title',
+  author: 'author',
+  abstract: 'abstract',
+  journal: 'publication_title',
+  venue: 'publication_title',
+  doi: 'doi',
+}
+
+const IEEE_TOP_PUBLICATIONS: Record<string, string> = {
+  tmc: 'IEEE Transactions on Mobile Computing',
+  tpds: 'IEEE Transactions on Parallel and Distributed Systems',
+  twc: 'IEEE Transactions on Wireless Communications',
+  ton: 'IEEE/ACM Transactions on Networking',
+  tc: 'IEEE Transactions on Computers',
+  jsac: 'IEEE Journal on Selected Areas in Communications',
+  tcc: 'IEEE Transactions on Cloud Computing',
+  tsc: 'IEEE Transactions on Services Computing',
+  tnsm: 'IEEE Transactions on Network and Service Management',
+  tdsc: 'IEEE Transactions on Dependable and Secure Computing',
+  tkde: 'IEEE Transactions on Knowledge and Data Engineering',
+  tpami: 'IEEE Transactions on Pattern Analysis and Machine Intelligence',
+  tnnls: 'IEEE Transactions on Neural Networks and Learning Systems',
+  tvt: 'IEEE Transactions on Vehicular Technology',
+  tii: 'IEEE Transactions on Industrial Informatics',
+  tits: 'IEEE Transactions on Intelligent Transportation Systems',
+  tccn: 'IEEE Transactions on Cognitive Communications and Networking',
+  tcom: 'IEEE Transactions on Communications',
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function fetchJsonWithRetry(
+  url: string,
+  init: RequestInit = {},
+  retries = 2
+): Promise<any> {
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        signal: init.signal || AbortSignal.timeout(30000),
+      })
+
+      if (res.ok) return res.json()
+
+      const body = await res.text().catch(() => '')
+      const retryable = [429, 500, 502, 503, 504].includes(res.status)
+      if (retryable && attempt < retries) {
+        await sleep(1500 * (attempt + 1))
+        continue
+      }
+
+      throw new Error(`HTTP ${res.status}${body ? `: ${body}` : ''}`)
+    } catch (err) {
+      lastError = err as Error
+      if (attempt < retries) {
+        await sleep(1500 * (attempt + 1))
+        continue
+      }
+      throw lastError
+    }
+  }
+
+  throw lastError || new Error('Request failed')
+}
+
+const cleanText = (value: unknown) => {
+  if (value === null || value === undefined) return null
+  const text = String(value).replace(/\s+/g, ' ').trim()
+  return text || null
+}
+
+const numberOrNull = (value: unknown) => {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+const parseCount = (value: unknown) => {
+  const n = Number(String(value ?? '').replace(/,/g, ''))
+  return Number.isFinite(n) ? n : 0
+}
+
+const decodeHtml = (value: string) => value
+  .replace(/&nbsp;/g, ' ')
+  .replace(/&amp;/g, '&')
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"')
+  .replace(/&#39;/g, "'")
+  .replace(/&#x27;/g, "'")
+
+const stripHtml = (value: unknown) => cleanText(
+  removeIEEEHighlights(decodeHtml(String(value ?? '').replace(/<[^>]+>/g, ' ')))
+)
+
+const absoluteIEEEUrl = (value: unknown) => {
+  const path = cleanText(value)
+  if (!path) return null
+  if (/^https?:\/\//i.test(path)) return path
+  return `${IEEE_BASE_URL}${path.startsWith('/') ? '' : '/'}${path}`
+}
+
+const extractIEEEArticleNumber = (value: unknown) => {
+  const text = cleanText(value)
+  if (!text) return null
+  const direct = text.match(/(?:arnumber=|\/document\/)(\d+)/i)?.[1]
+  if (direct) return direct
+  return /^\d{4,}$/.test(text) ? text : null
+}
+
+const ieeePdfUrlForArticle = (articleNumber: unknown) => {
+  const arnumber = extractIEEEArticleNumber(articleNumber)
+  return arnumber ? `${IEEE_BASE_URL}/stampPDF/getPDF.jsp?tp=&arnumber=${arnumber}` : null
+}
+
+const normalizeForSearch = (value: unknown) => String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+
+const removeIEEEHighlights = (value: string) => value.replace(/\[::|::\]/g, '')
+
+const normalizeIEEEPublication = (value: unknown) => {
+  const text = cleanText(value)
+  if (!text) return null
+  const key = text.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  return IEEE_TOP_PUBLICATIONS[key] || text
+}
+
+const readSetCookieHeaders = (headers: Headers) => {
+  const values = (headers as any).getSetCookie?.()
+  if (Array.isArray(values)) return values as string[]
+  const combined = headers.get('set-cookie')
+  return combined ? combined.split(/,(?=\s*[^;,=]+=[^;,]+)/g) : []
+}
+
+const addResponseCookies = (headers: Headers, jar: Map<string, string>) => {
+  for (const cookie of readSetCookieHeaders(headers)) {
+    const pair = cookie.split(';')[0]?.trim()
+    if (!pair) continue
+    const eq = pair.indexOf('=')
+    if (eq <= 0) continue
+    jar.set(pair.slice(0, eq), pair.slice(eq + 1))
+  }
+}
+
+const cookieHeader = (jar: Map<string, string>) => Array.from(jar.entries())
+  .map(([key, value]) => `${key}=${value}`)
+  .join('; ')
+
+const isPrivateIPv4 = (address: string) => {
+  const parts = address.split('.').map(Number)
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return true
+  const [a, b] = parts
+  return a === 10 || a === 127 || a === 0 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254)
+}
+
+const isPrivateIPv6 = (address: string) => {
+  const normalized = address.toLowerCase()
+  return normalized === '::1' ||
+    normalized === '::' ||
+    normalized.startsWith('fc') ||
+    normalized.startsWith('fd') ||
+    normalized.startsWith('fe8') ||
+    normalized.startsWith('fe9') ||
+    normalized.startsWith('fea') ||
+    normalized.startsWith('feb') ||
+    normalized.startsWith('::ffff:127.') ||
+    normalized.startsWith('::ffff:10.') ||
+    normalized.startsWith('::ffff:192.168.') ||
+    /^::ffff:172\.(1[6-9]|2\d|3[01])\./.test(normalized)
+}
+
+const isBlockedAddress = (address: string) => {
+  const version = isIP(address)
+  if (version === 4) return isPrivateIPv4(address)
+  if (version === 6) return isPrivateIPv6(address)
+  return true
+}
+
+async function assertSafePdfDownloadUrl(rawUrl: string): Promise<void> {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    throw new Error('Invalid PDF URL')
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Only HTTPS PDF URLs are allowed')
+  }
+
+  const hostname = parsed.hostname.toLowerCase()
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
+    throw new Error('Localhost PDF URLs are not allowed')
+  }
+
+  const directIpVersion = isIP(hostname)
+  const addresses = directIpVersion
+    ? [{ address: hostname }]
+    : await lookup(hostname, { all: true, verbatim: true })
+
+  if (!addresses.length || addresses.some(({ address }) => isBlockedAddress(address))) {
+    throw new Error('Private or local network PDF URLs are not allowed')
+  }
+}
+
+async function fetchWithCookieJar(
+  url: string,
+  init: RequestInit = {},
+  maxRedirects = 5
+): Promise<Response> {
+  const jar = new Map<string, string>()
+  let currentUrl = url
+  let response: Response | null = null
+
+  for (let redirect = 0; redirect <= maxRedirects; redirect++) {
+    await assertSafePdfDownloadUrl(currentUrl)
+    const headers = new Headers(init.headers)
+    if (jar.size) headers.set('Cookie', cookieHeader(jar))
+    response = await fetch(currentUrl, {
+      ...init,
+      headers,
+      redirect: 'manual',
+    })
+    addResponseCookies(response.headers, jar)
+
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response
+    const location = response.headers.get('location')
+    if (!location) return response
+    currentUrl = new URL(location, currentUrl).toString()
+  }
+
+  return response || fetch(url, init)
+}
+
+export class SearchService {
+  // ── Local Vector Search (pgvector) ──────────────────────────────────────
+
+  async searchLocalVector(
+    query: string,
+    limit = 20,
+    threshold = 0.5,
+    paperId?: string
+  ): Promise<SearchResponse> {
+    try {
+      const embedding = await embeddingService.generate(query)
+      const results = await this._vectorQuery(embedding, limit, threshold, paperId)
+
+      const paperMap = new Map<string, SearchResult>()
+      for (const r of results) {
+        const existing = paperMap.get(r.paperId)
+        if (!existing || r.similarity > existing.similarity) paperMap.set(r.paperId, r)
+      }
+
+      const papers: SearchPaper[] = Array.from(paperMap.values()).map((r) => ({
+        id: r.paperId,
+        title: r.title,
+        abstract: r.snippet,
+        authors: [],
+        source: 'local' as const,
+        similarity: r.similarity,
+        pageNumber: r.pageNumber,
+      }))
+
+      return { papers, total: papers.length, page: 1, limit }
+    } catch (err) {
+      console.error('Local vector search failed:', err)
+      return { papers: [], total: 0, page: 1, limit, error: (err as Error).message }
+    }
+  }
+
+  // Backward-compatible vector search used by papers/chat routes.
+  async searchLocal(
+    _query: string,
+    embedding: number[],
+    limit = 20,
+    threshold = 0.5,
+    paperId?: string
+  ): Promise<SearchResult[]> {
+    return this._vectorQuery(embedding, limit, threshold, paperId)
+  }
+
+  private async _vectorQuery(
+    embedding: number[],
+    limit: number,
+    threshold: number,
+    paperId?: string
+  ): Promise<SearchResult[]> {
+    const vectorLiteral = parseVectorLiteral(embedding)
+    const values = paperId
+      ? [vectorLiteral, threshold, limit, paperId]
+      : [vectorLiteral, threshold, limit]
+
+    const rows = await prisma.$queryRawUnsafe<SearchResult[]>(
+      `
+      SELECT
+        pc.id,
+        pc.paper_id AS "paperId",
+        p.title,
+        pc.content AS snippet,
+        pc.page_number AS "pageNumber",
+        1 - (pc.embedding <=> $1::vector) AS similarity
+      FROM paper_chunks pc
+      JOIN papers p ON pc.paper_id = p.id
+      WHERE pc.embedding IS NOT NULL
+        AND 1 - (pc.embedding <=> $1::vector) > $2
+        ${paperId ? 'AND p.id = $4::uuid' : ''}
+      ORDER BY similarity DESC
+      LIMIT $3
+      `,
+      ...values
+    )
+
+    return rows.map((row) => ({
+      ...row,
+      snippet: cleanSnippetForDisplay(row.snippet),
+    }))
+  }
+
+  // ── Local Keyword Search (Prisma) ──────────────────────────────────────
+
+  async searchLocalKeyword(
+    query: string,
+    field = 'all',
+    limit = 20,
+    offset = 0,
+    paperId?: string
+  ): Promise<SearchResponse> {
+    const pattern = `%${query}%`
+    const compactPattern = `%${query.replace(/\s+/g, '')}%`
+    const year = Number(query)
+    const clauses: string[] = []
+    const values: unknown[] = []
+
+    const addClause = (sql: string, ...params: unknown[]) => {
+      let paramIndex = 0
+      clauses.push(sql.replace(/\?/g, () => {
+        values.push(params[paramIndex++])
+        return `$${values.length}`
+      }))
+    }
+
+    if (field === 'all' || field === 'title') {
+      addClause(`p.title ILIKE ?`, pattern)
+    }
+    if (field === 'all' || field === 'author') {
+      addClause(
+        `EXISTS (
+          SELECT 1
+          FROM unnest(p.authors) AS author
+          WHERE replace(lower(author), ' ', '') LIKE lower(?)
+             OR author ILIKE ?
+        )`,
+        compactPattern,
+        pattern
+      )
+    }
+    if (field === 'all' || field === 'abstract') {
+      addClause(`p.abstract ILIKE ?`, pattern)
+    }
+    if ((field === 'all' || field === 'year') && Number.isInteger(year)) {
+      addClause(`p.year = ?`, year)
+    }
+    if (field === 'all' || field === 'journal' || field === 'venue') {
+      addClause(`(p.metadata->>'journal' ILIKE ? OR p.metadata->>'venue' ILIKE ?)`, pattern, pattern)
+    }
+
+    if (clauses.length === 0) {
+      addClause(`p.title ILIKE ?`, pattern)
+    }
+
+    const whereSql = paperId
+      ? `(${clauses.join(' OR ')}) AND p.id = $${values.push(paperId)}`
+      : clauses.join(' OR ')
+
+    values.push(limit, offset)
+    const limitParam = values.length - 1
+    const offsetParam = values.length
+
+    const papers = await prisma.$queryRawUnsafe<any[]>(
+      `
+      SELECT
+        p.*,
+        p.metadata->>'journal' AS journal,
+        p.metadata->>'venue' AS venue,
+        COUNT(*) OVER()::int AS "__total"
+      FROM papers p
+      WHERE ${whereSql}
+      ORDER BY p.created_at DESC
+      LIMIT $${limitParam}
+      OFFSET $${offsetParam}
+      `,
+      ...values
+    )
+    const total = papers[0]?.__total || 0
+
+    return {
+      papers: papers.map((p) => ({
+        id: p.id,
+        title: p.title,
+        abstract: p.abstract,
+        authors: p.authors,
+        year: p.year,
+        url: p.url,
+        doi: p.doi,
+        arxivId: p.arxivId,
+        journal: p.journal || null,
+        venue: p.venue || null,
+        source: 'local' as const,
+      })),
+      total,
+      page: Math.floor(offset / limit) + 1,
+      limit,
+    }
+  }
+
+  // ── IEEE Xplore Search ────────────────────────────────────────────────
+
+  async searchIEEE(
+    query: string,
+    field = 'all',
+    page = 1,
+    limit = 25,
+    yearFrom?: number,
+    yearTo?: number,
+    options?: { earlyAccess?: boolean; publication?: string }
+  ): Promise<SearchResponse> {
+    if (options?.publication || !config.ieeeApiKey) {
+      return this.searchIEEECrawler(query, field, page, limit, yearFrom, yearTo, options)
+    }
+
+    const boundedLimit = Math.min(Math.max(limit, 1), 200)
+    const startRecord = (Math.max(page, 1) - 1) * boundedLimit + 1
+    const ieeeField = IEEE_FIELD_MAP[field] || 'querytext'
+
+    const params = new URLSearchParams({
+      apikey: config.ieeeApiKey,
+      format: 'json',
+      max_records: String(boundedLimit),
+      start_record: String(startRecord),
+      sort_order: 'desc',
+      sort_field: 'publication_year',
+    })
+
+    params.set(ieeeField, query)
+    if (yearFrom) params.set('start_year', String(yearFrom))
+    if (yearTo) params.set('end_year', String(yearTo))
+
+    try {
+      const data = await fetchJsonWithRetry(`${IEEE_ARTICLES_ENDPOINT}?${params}`, {
+        headers: { Accept: 'application/json' },
+      })
+
+      const papers = (data.articles || []).map((article: any): SearchPaper => {
+        const authors = Array.isArray(article.authors)
+          ? article.authors
+              .map((a: any) => cleanText(a.full_name || a.name))
+              .filter((a: string | null): a is string => !!a)
+          : []
+        const doi = cleanText(article.doi)
+        const title = cleanText(article.article_title) || ''
+        const url =
+          cleanText(article.html_url) ||
+          cleanText(article.pdf_url) ||
+          (doi ? `https://doi.org/${doi}` : null)
+        const venue = cleanText(article.publication_title) || cleanText(article.conference_location)
+
+        return {
+          id: cleanText(article.article_number) || doi || title,
+          title,
+          abstract: cleanText(article.abstract),
+          authors,
+          year: numberOrNull(article.publication_year),
+          url,
+          doi,
+          arxivId: null,
+          journal: cleanText(article.publication_title),
+          venue,
+          source: 'ieee' as const,
+          articleNumber: cleanText(article.article_number),
+          publicationNumber: cleanText(article.publication_number),
+          contentType: cleanText(article.content_type),
+          citationCount: null,
+          pdfUrl: cleanText(article.pdf_url) || ieeePdfUrlForArticle(article.article_number),
+          provider: 'ieee_xplore_api',
+          isEarlyAccess: /early access/i.test(String(article.content_type || '')),
+        }
+      }).filter((paper: SearchPaper) => !options?.earlyAccess || !!paper.isEarlyAccess)
+      const apiTotal = Number(data.total_records || 0)
+
+      if (!papers.length) {
+        console.warn('IEEE API returned no papers, falling back to crawler')
+        const fallback = await this.searchIEEECrawler(query, field, page, limit, yearFrom, yearTo, options)
+        if (fallback.papers.length || !fallback.error) return fallback
+        return {
+          papers: [],
+          total: apiTotal,
+          page,
+          limit: boundedLimit,
+          error: `IEEE API returned no papers; crawler fallback failed: ${fallback.error}`,
+        }
+      }
+
+      return {
+        papers,
+        total: options?.earlyAccess ? papers.length : apiTotal,
+        page,
+        limit: boundedLimit,
+      }
+    } catch (err) {
+      console.error('IEEE API search failed, falling back to crawler:', err)
+      const fallback = await this.searchIEEECrawler(query, field, page, limit, yearFrom, yearTo, options)
+      if (fallback.papers.length || !fallback.error) return fallback
+      return {
+        papers: [],
+        total: 0,
+        page,
+        limit: boundedLimit,
+        error: `IEEE search failed: ${(err as Error).message}; crawler fallback failed: ${fallback.error}`,
+      }
+    }
+  }
+
+  private async searchIEEECrawler(
+    query: string,
+    field = 'all',
+    page = 1,
+    limit = 25,
+    yearFrom?: number,
+    yearTo?: number,
+    options?: { earlyAccess?: boolean; publication?: string }
+  ): Promise<SearchResponse> {
+    const boundedLimit = Math.min(Math.max(limit, 1), 25)
+    const pageNumber = Math.max(page, 1)
+    const publication = normalizeIEEEPublication(options?.publication)
+    const publicationOnlyList = !!publication && options?.earlyAccess && (!query.trim() || normalizeIEEEPublication(query) === publication)
+    const refinements = [
+      ...(options?.earlyAccess ? ['ContentType:Early Access Articles'] : []),
+      ...(publication ? [`PublicationTitle:${publication}`] : []),
+    ]
+    const requestBody = {
+      newsearch: true,
+      queryText: publicationOnlyList ? publication : query,
+      highlight: true,
+      returnFacets: ['ALL'],
+      returnType: 'SEARCH',
+      matchPubs: true,
+      pageNumber,
+      rowsPerPage: boundedLimit,
+      sortType: 'newest',
+      ...(refinements.length ? { refinements } : {}),
+    }
+
+    try {
+      const data = await fetchJsonWithRetry(IEEE_REST_SEARCH_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          Origin: IEEE_BASE_URL,
+          Referer: `${IEEE_BASE_URL}/search/searchresult.jsp?queryText=${encodeURIComponent(query)}&sortType=newest`,
+          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        },
+        body: JSON.stringify(requestBody),
+      })
+
+      const papers = (Array.isArray(data.records) ? data.records : [])
+        .map((record: any): SearchPaper => this.mapIEEERestRecord(record, data.userInfo))
+        .filter((paper: SearchPaper) => this.matchesIEEECrawlerFilters(paper, publicationOnlyList ? '' : query, field, yearFrom, yearTo, options))
+      const remoteTotal = parseCount(data.totalRecords || data.total_records || data.total)
+      const locallyFiltered = field !== 'all' || !!yearFrom || !!yearTo
+
+      return {
+        papers,
+        total: locallyFiltered ? papers.length : remoteTotal || papers.length,
+        page: pageNumber,
+        limit: boundedLimit,
+      }
+    } catch (err) {
+      console.error('IEEE crawler search failed:', err)
+      return {
+        papers: [],
+        total: 0,
+        page: pageNumber,
+        limit: boundedLimit,
+        error: `IEEE crawler search failed: ${(err as Error).message}`,
+      }
+    }
+  }
+
+  private mapIEEERestRecord(record: any, userInfo: any): SearchPaper {
+    const authors = Array.isArray(record.authors)
+      ? record.authors
+          .map((a: any) => cleanText(a.preferredName || a.fullName || a.name || a.normalizedName))
+          .filter((a: string | null): a is string => !!a)
+      : []
+    const doi = cleanText(record.doi)
+    const title = stripHtml(record.articleTitle) || ''
+    const articleNumber = cleanText(record.articleNumber)
+    const documentUrl = absoluteIEEEUrl(record.documentLink || record.htmlLink)
+      || (articleNumber ? `${IEEE_BASE_URL}/document/${articleNumber}/` : null)
+    const pdfUrl = ieeePdfUrlForArticle(articleNumber) || absoluteIEEEUrl(record.pdfLink)
+    const venue = stripHtml(record.displayPublicationTitle || record.publicationTitle)
+
+    return {
+      id: articleNumber || doi || title,
+      title,
+      abstract: stripHtml(record.abstract),
+      authors,
+      year: numberOrNull(record.publicationYear),
+      url: documentUrl,
+      doi,
+      arxivId: null,
+      journal: venue,
+      venue,
+      source: 'ieee' as const,
+      articleNumber,
+      publicationNumber: cleanText(record.publicationNumber),
+      contentType: cleanText(record.contentType),
+      citationCount: numberOrNull(record.citationCount),
+      downloadCount: numberOrNull(record.downloadCount),
+      accessType: cleanText(record.accessType?.type || record.accessType?.message),
+      pdfUrl,
+      provider: 'ieee_xplore_rest_crawler',
+      isEarlyAccess: record.isEarlyAccess === true || /early access/i.test(String(record.displayContentType || record.contentType || record.articleContentType || '')),
+      institutionName: cleanText(userInfo?.institutionName),
+    }
+  }
+
+  private matchesIEEECrawlerFilters(
+    paper: SearchPaper,
+    query: string,
+    field: string,
+    yearFrom?: number,
+    yearTo?: number,
+    options?: { earlyAccess?: boolean; publication?: string }
+  ) {
+    if (yearFrom && paper.year && paper.year < yearFrom) return false
+    if (yearTo && paper.year && paper.year > yearTo) return false
+    if (options?.earlyAccess && !paper.isEarlyAccess) return false
+    const publication = normalizeIEEEPublication(options?.publication)
+    if (publication) {
+      const venue = normalizeForSearch(`${paper.journal || ''} ${paper.venue || ''}`)
+      if (!venue.includes(normalizeForSearch(publication))) return false
+    }
+
+    const needle = normalizeForSearch(query)
+    if (!needle || field === 'all') return true
+
+    if (field === 'title') return normalizeForSearch(paper.title).includes(needle)
+    if (field === 'author') return normalizeForSearch(paper.authors.join(' ')).includes(needle)
+    if (field === 'abstract') return normalizeForSearch(paper.abstract).includes(needle)
+    if (field === 'journal' || field === 'venue') {
+      return normalizeForSearch(`${paper.journal || ''} ${paper.venue || ''}`).includes(needle)
+    }
+    if (field === 'doi') return normalizeForSearch(paper.doi).includes(needle)
+    if (field === 'year') return paper.year === Number(query)
+    return true
+  }
+
+  // ── Semantic Scholar Search (direct TypeScript integration) ────────────
+
+  async searchSemanticScholar(
+    query: string,
+    _field = 'all',
+    page = 1,
+    limit = 20,
+    yearFrom?: number,
+    yearTo?: number,
+    options?: {
+      venue?: string
+      minCitations?: number
+      publicationTypes?: string
+      fieldsOfStudy?: string
+      openAccess?: boolean
+    }
+  ): Promise<SearchResponse> {
+    const boundedLimit = Math.min(Math.max(limit, 1), 100)
+    const offset = (Math.max(page, 1) - 1) * boundedLimit
+
+    const params = new URLSearchParams({
+      query,
+      limit: String(boundedLimit),
+      offset: String(offset),
+      fields: S2_FIELDS,
+    })
+
+    if (yearFrom || yearTo) params.set('year', `${yearFrom || ''}-${yearTo || ''}`)
+    if (options?.venue) params.set('venue', options.venue)
+    if (options?.minCitations) params.set('minCitationCount', String(options.minCitations))
+    if (options?.publicationTypes) params.set('publicationTypes', options.publicationTypes)
+    if (options?.fieldsOfStudy) params.set('fieldsOfStudy', options.fieldsOfStudy)
+    if (options?.openAccess) params.set('openAccessPdf', '')
+
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'User-Agent': 'YARC/2.0 SemanticScholarSearch',
+    }
+    if (config.semanticScholarApiKey) headers['x-api-key'] = config.semanticScholarApiKey
+
+    try {
+      const data = await fetchJsonWithRetry(`${S2_API_BASE}/paper/search?${params}`, { headers })
+      const papers = (data.data || []).map((p: any): SearchPaper => {
+        const externalIds = p.externalIds || {}
+        const publicationVenue = p.publicationVenue || {}
+        return {
+          id: p.paperId,
+          title: cleanText(p.title) || '',
+          abstract: cleanText(p.abstract),
+          authors: Array.isArray(p.authors)
+            ? p.authors
+                .map((a: any) => cleanText(a.name))
+                .filter((a: string | null): a is string => !!a)
+            : [],
+          year: numberOrNull(p.year),
+          url: cleanText(p.url),
+          doi: cleanText(externalIds.DOI),
+          arxivId: cleanText(externalIds.ArXiv),
+          journal: cleanText(publicationVenue.name),
+          venue: cleanText(p.venue) || cleanText(publicationVenue.name),
+          source: 'semantic_scholar' as const,
+          citationCount: numberOrNull(p.citationCount),
+          referenceCount: numberOrNull(p.referenceCount),
+          publicationDate: cleanText(p.publicationDate),
+          publicationTypes: p.publicationTypes || [],
+          fieldsOfStudy: p.fieldsOfStudy || [],
+          openAccessPdf: p.openAccessPdf || null,
+          tldr: cleanText(p.tldr?.text),
+        }
+      })
+
+      return {
+        papers,
+        total: Number(data.total || 0),
+        page,
+        limit: boundedLimit,
+      }
+    } catch (err) {
+      console.error('Semantic Scholar search failed:', err)
+      return {
+        papers: [],
+        total: 0,
+        page,
+        limit: boundedLimit,
+        error: `Semantic Scholar search failed: ${(err as Error).message}`,
+      }
+    }
+  }
+
+  // ── PDF Download ───────────────────────────────────────────────────────
+
+  async downloadPdf(url: string): Promise<Buffer | null> {
+    try {
+      const downloadUrl = ieeePdfUrlForArticle(url) || url
+      const response = await fetchWithCookieJar(downloadUrl, {
+        headers: {
+          Accept: 'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8',
+          Referer: IEEE_BASE_URL,
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        signal: AbortSignal.timeout(60000),
+      })
+
+      if (!response.ok) throw new Error(`Failed to download: ${response.status}`)
+
+      const contentType = response.headers.get('content-type') || ''
+      const buffer = Buffer.from(await response.arrayBuffer())
+      const isPdf = buffer.subarray(0, 5).toString('utf-8') === '%PDF-'
+      if (!isPdf && !contentType.toLowerCase().includes('pdf')) {
+        throw new Error('URL did not return a PDF file')
+      }
+
+      return buffer
+    } catch (err) {
+      console.error('PDF download failed:', err)
+      return null
+    }
+  }
+}
+
+export const searchService = new SearchService()
