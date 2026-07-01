@@ -163,8 +163,7 @@ export class ChatService {
       try {
         const queryText = context?.selectedText || userContent
         const embedding = await embeddingService.generate(queryText)
-        const results = (await searchService.searchLocal(queryText, embedding, 8, 0.3))
-          .filter((r: any) => r.paperId === paperId)
+        const results = (await searchService.searchLocal(queryText, embedding, 8, 0.3, paperId))
           .slice(0, 5)
 
         if (results.length > 0) {

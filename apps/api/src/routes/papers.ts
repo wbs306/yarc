@@ -25,13 +25,14 @@ papers.get('/search', async (c) => {
 
   const limit = parseInt(c.req.query('limit') || '20')
   const threshold = parseFloat(c.req.query('threshold') || '0.5')
+  const paperId = c.req.query('paperId') || undefined
 
   try {
     // Generate embedding for query
     const { embeddingService } = await import('../services/embedding.service.js')
     const embedding = await embeddingService.generate(query)
     const { searchService } = await import('../services/search.service.js')
-    const results = await searchService.searchLocal(query, embedding, limit, threshold)
+    const results = await searchService.searchLocal(query, embedding, limit, threshold, paperId)
     return c.json({ results })
   } catch (err) {
     return c.json({ results: [], error: (err as Error).message })

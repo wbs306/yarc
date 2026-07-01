@@ -55,7 +55,7 @@ export const CHAT_TOOLS_BLOCK = `# YARC 内置研究 Agent 指南
 
 3. yarc_categories - 统一分类管理。action 为 list、create、update、delete；type 为 library（本地文献库，默认）或 search（外部搜索收藏）；常用参数 name、parentId、color、id、ids。删除前确认影响：library 分类删除会使其中论文变未分类并处理子分类父级；search 分类删除会移除该收藏分类及其中收藏论文。
 
-4. yarc_papers - 统一论文管理。action 为 list、save、classify、update、delete；type 为 library（默认）或 search。list 支持 categoryId、query、page、limit、includeAbstract，并默认返回每篇论文的 rankings（ccf/sci，无法匹配时为 null/unranked）；整理/分类前通常设置 includeAbstract=true。save 使用 papers[] 批量保存，可用 category + parentCategory 自动创建/复用分类；保存到 library 时可设置 importPdf=true 让后端创建后台任务导入 PDF 并入库，进度会通过 SSE 显示在顶部搜索栏。PDF 来源按优先级使用每个 paper 的 pdfBase64/file、pdfPath、pdfUrl、openAccessPdf.url、url；pdfUrl/url 可为 HTTP(S)、file:// 或 data 工作区内本地路径。requirePdf=true 表示导入失败则跳过；extractMetadata=false 会保留传入元数据，跳过上传阶段元数据提取和解析后的元数据补全，只进行 MinerU 解析与 embedding。classify 使用 paperIds[] 批量移动本地论文。update 可批量更新 title、authors、year、abstract、doi、arxivId、url。delete 删除 search 收藏项或 library 文献；library 删除会级联删除 PDF、chunks、notes、tasks，必须先确认。
+4. yarc_papers - 统一论文管理。action 为 list、read、save、classify、update、delete；type 为 library（默认）或 search。list 支持 categoryId、query、page、limit、includeAbstract，并默认返回每篇论文的 rankings（ccf/sci，无法匹配时为 null/unranked）；整理/分类前通常设置 includeAbstract=true。read 按 paperId 读取本地 PDF 的已解析内容，mode 可为 metadata、summary、pages、chunks、full_text，支持 page/startPage/endPage/limit/maxChars，用于在通过标题/元数据找到论文后读取正文、页文本、向量 chunk 或已保存总结。save 使用 papers[] 批量保存，可用 category + parentCategory 自动创建/复用分类；保存到 library 时可设置 importPdf=true 让后端创建后台任务导入 PDF 并入库，进度会通过 SSE 显示在顶部搜索栏。PDF 来源按优先级使用每个 paper 的 pdfBase64/file、pdfPath、pdfUrl、openAccessPdf.url、url；pdfUrl/url 可为 HTTP(S)、file:// 或 data 工作区内本地路径。requirePdf=true 表示导入失败则跳过；extractMetadata=false 会保留传入元数据，跳过上传阶段元数据提取和解析后的元数据补全，只进行 MinerU 解析与 embedding。classify 使用 paperIds[] 批量移动本地论文。update 可批量更新 title、authors、year、abstract、doi、arxivId、url。delete 删除 search 收藏项或 library 文献；library 删除会级联删除 PDF、chunks、notes、tasks，必须先确认。
 
 5. yarc_system - 查询后端状态与维护队列。action=status 可读取论文解析/向量/总结状态、任务队列、chunks、MinerU artifacts 概况。action=maintenance 可入队维护任务：maintenanceAction=mineru 重新 MinerU 解析，maintenanceAction=embeddings 重新向量化，maintenanceAction=summaries 重新总结；scope 可为 needed、all、paperIds。批量 all 操作前除非用户已明确授权，先用 dryRun=true 查看 matched/targetIds 并确认。
 
@@ -83,7 +83,7 @@ PDF 入库统一使用 yarc_papers action=save type=library importPdf=true。
 ### 回答学术问题
 
 1. 判断是否需要当前论文、某篇论文、搜索结果或文件上下文。
-2. 需要全文时读取对应 papers/<paperId>/mineru/result.json；如果解析结果不存在或信息不足，说明限制。
+2. 不知道 paperId 时先用 yarc_search_papers 或 yarc_papers list 通过标题/作者/关键词定位论文；需要正文证据时用 yarc_papers action=read 读取 pages、chunks 或 full_text。如果解析结果不存在或信息不足，说明限制。
 3. 回答时区分“论文明确提到”“根据内容推断”“需要进一步确认”。
 4. 不要把未读取的外部知识伪装成论文内容。
 

@@ -17,6 +17,7 @@ import { applyAgentWorkspaceEnv, ensureAgentWorkspace, readAgentSettings } from 
 import { getPiSessionMetadata, savePiSessionMetadata } from '../lib/pi-metadata.js'
 import { DEFAULT_CHAT_SYSTEM_PROMPT } from '../lib/prompts.js'
 import { agentInteractionRegistry } from '../lib/agent-interaction-registry.js'
+import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/mineru-content-v2.js'
 import type { AgentInteractionResponse, ChatEvent } from '@yarc/shared'
 
 export class PiService {
@@ -741,7 +742,7 @@ export class PiService {
             const { query, source = 'semantic_scholar', field = 'all', page = 1, limit = 20, yearFrom, yearTo, earlyAccess, publication, paperId } = params
             let results
             if (source === 'local') {
-              results = await searchService.searchLocalKeyword(query, field, limit, (page - 1) * limit, paperId)
+              results = await searchService.searchLocalHybrid(query, field, limit, (page - 1) * limit, 0.5, paperId)
             } else if (source === 'ieee') {
               results = await searchService.searchIEEE(query, field, page, limit, yearFrom, yearTo, { earlyAccess, publication })
             } else {
@@ -893,15 +894,16 @@ export class PiService {
       defineTool({
         name: 'yarc_papers',
         label: 'Manage Papers',
-        description: 'Unified paper management. Actions: list (query papers), save (batch save to library/search), classify (batch move to category), update (batch update metadata), delete (batch delete with cascade). Use type="library" for uploaded PDFs or type="search" for search collections.',
+        description: 'Unified paper management. Actions: list (query papers), read (read local parsed PDF content), save (batch save to library/search), classify (batch move to category), update (batch update metadata), delete (batch delete with cascade). Use type="library" for uploaded PDFs or type="search" for search collections.',
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal('list'),
+            Type.Literal('read'),
             Type.Literal('save'),
             Type.Literal('classify'),
             Type.Literal('update'),
             Type.Literal('delete')
-          ], { description: 'Action: list, save, classify, update, or delete' }),
+          ], { description: 'Action: list, read, save, classify, update, or delete' }),
           type: Type.Optional(Type.Union([Type.Literal('library'), Type.Literal('search')], { description: 'Paper type: "library" (default) or "search"' })),
           // For list
           categoryId: Type.Optional(Type.String({ description: 'Filter by category ID' })),
@@ -909,6 +911,17 @@ export class PiService {
           page: Type.Optional(Type.Number()),
           limit: Type.Optional(Type.Number()),
           includeAbstract: Type.Optional(Type.Boolean()),
+          // For read
+          mode: Type.Optional(Type.Union([
+            Type.Literal('metadata'),
+            Type.Literal('summary'),
+            Type.Literal('pages'),
+            Type.Literal('chunks'),
+            Type.Literal('full_text'),
+          ], { description: 'For action=read: metadata, summary, pages, chunks, or full_text' })),
+          startPage: Type.Optional(Type.Number({ description: 'For action=read mode=pages: start page' })),
+          endPage: Type.Optional(Type.Number({ description: 'For action=read mode=pages: end page' })),
+          maxChars: Type.Optional(Type.Number({ description: 'For action=read: maximum returned characters; capped at 40000' })),
           // For save
           papers: Type.Optional(Type.Array(paperSchema, { description: 'Papers to save (batch)' })),
           category: Type.Optional(Type.String({ description: 'Category name (auto-create)' })),
@@ -981,6 +994,118 @@ export class PiService {
                 }
                 return { content: [{ type: 'text' as const, text }], details: { papers, total, type: paperType } }
               }
+            }
+
+            // === READ ===
+            if (action === 'read') {
+              if (paperType !== 'library') return { content: [{ type: 'text' as const, text: 'read is only available for type="library" local papers' }], isError: true, details: { type: paperType } }
+              const paperId = String(params.paperId || '').trim()
+              if (!paperId) return { content: [{ type: 'text' as const, text: 'paperId is required for read' }], isError: true, details: {} }
+
+              const mode = params.mode || 'metadata'
+              const maxChars = Math.min(Math.max(Number(params.maxChars || 12000), 1000), 40000)
+              const truncate = (text: string) => {
+                const normalized = text.trim()
+                if (normalized.length <= maxChars) return { text: normalized, truncated: false }
+                return { text: `${normalized.slice(0, maxChars).trim()}\n\n[truncated: content exceeded ${maxChars} chars]`, truncated: true }
+              }
+
+              const paper = await prisma.paper.findUnique({
+                where: { id: paperId },
+                select: {
+                  id: true,
+                  title: true,
+                  authors: true,
+                  year: true,
+                  doi: true,
+                  arxivId: true,
+                  abstract: true,
+                  summary: true,
+                  parseStatus: true,
+                  embeddingStatus: true,
+                  metadata: true,
+                  parseResult: true,
+                },
+              })
+              if (!paper) return { content: [{ type: 'text' as const, text: `Paper not found: ${paperId}` }], isError: true, details: {} }
+
+              const meta = (paper.metadata || {}) as any
+              const header = [
+                `Title: ${paper.title}`,
+                paper.authors?.length ? `Authors: ${paper.authors.join(', ')}` : '',
+                paper.year ? `Year: ${paper.year}` : '',
+                paper.doi ? `DOI: ${paper.doi}` : '',
+                paper.arxivId ? `arXiv: ${paper.arxivId}` : '',
+                meta.journal || meta.venue ? `Venue: ${meta.journal || meta.venue}` : '',
+                `ID: ${paper.id}`,
+              ].filter(Boolean).join('\n')
+
+              if (mode === 'metadata') {
+                const text = `${header}\nParse: ${paper.parseStatus}; Embedding: ${paper.embeddingStatus}${paper.abstract ? `\n\nAbstract:\n${paper.abstract}` : ''}`
+                return { content: [{ type: 'text' as const, text }], details: { paper, mode, type: paperType } }
+              }
+
+              if (mode === 'summary') {
+                if (!paper.summary) return { content: [{ type: 'text' as const, text: `${header}\n\nNo saved summary is available for this paper.` }], details: { paperId, mode, available: false, type: paperType } }
+                const out = truncate(paper.summary)
+                return { content: [{ type: 'text' as const, text: `${header}\n\n${out.text}` }], details: { paperId, mode, truncated: out.truncated, type: paperType } }
+              }
+
+              if (mode === 'chunks') {
+                const take = Math.min(Math.max(Number(params.limit || 20), 1), 100)
+                const chunks = await prisma.paperChunk.findMany({
+                  where: {
+                    paperId,
+                    ...(params.page ? { pageNumber: Number(params.page) } : {}),
+                  },
+                  select: { content: true, pageNumber: true, chunkIndex: true },
+                  orderBy: [{ pageNumber: 'asc' }, { chunkIndex: 'asc' }],
+                  take,
+                })
+                if (!chunks.length) return { content: [{ type: 'text' as const, text: `${header}\n\nNo chunks found for this paper/page.` }], details: { paperId, mode, chunks: [], type: paperType } }
+                const body = chunks.map((chunk) => `[page ${chunk.pageNumber ?? '?'} chunk ${chunk.chunkIndex ?? '?'}]\n${chunk.content}`).join('\n\n')
+                const out = truncate(body)
+                return { content: [{ type: 'text' as const, text: `${header}\n\n${out.text}` }], details: { paperId, mode, count: chunks.length, truncated: out.truncated, type: paperType } }
+              }
+
+              if (!paper.parseResult) {
+                return { content: [{ type: 'text' as const, text: `${header}\n\nParsed content is unavailable. Parse status: ${paper.parseStatus}` }], isError: true, details: { paperId, mode, type: paperType } }
+              }
+
+              if (mode === 'pages') {
+                const parseResult = paper.parseResult as any
+                const pages = Array.isArray(parseResult.pages) ? parseResult.pages : []
+                const startPage = Number(params.page || params.startPage || 1)
+                const endPage = Number(params.page || params.endPage || startPage)
+                const selected = pages.filter((page: any) => Number(page.page || page.pageNumber) >= startPage && Number(page.page || page.pageNumber) <= endPage)
+                if (!selected.length) return { content: [{ type: 'text' as const, text: `${header}\n\nNo parsed page text found for page range ${startPage}-${endPage}.` }], details: { paperId, mode, startPage, endPage, type: paperType } }
+                const body = selected.map((page: any) => `[page ${page.page || page.pageNumber || '?'}]\n${page.text || page.content || page.md || ''}`).join('\n\n')
+                const out = truncate(body)
+                return { content: [{ type: 'text' as const, text: `${header}\n\n${out.text}` }], details: { paperId, mode, startPage, endPage, truncated: out.truncated, type: paperType } }
+              }
+
+              if (mode === 'full_text') {
+                let body = ''
+                try {
+                  const contentListV2 = await loadMineruContentListV2(paper.parseResult)
+                  body = renderSummaryMarkdownFromV2(contentListV2, {
+                    includeReferences: false,
+                    includePageFootnotes: false,
+                    includeImages: true,
+                    includeEquations: true,
+                    includeTables: true,
+                    includeAlgorithms: true,
+                  })
+                } catch {
+                  const parseResult = paper.parseResult as any
+                  body = String(parseResult.text || parseResult.full_text || parseResult.markdown || '')
+                }
+                if (!body.trim()) return { content: [{ type: 'text' as const, text: `${header}\n\nNo full text could be rendered from parseResult.` }], isError: true, details: { paperId, mode, type: paperType } }
+                const out = truncate(body)
+                return { content: [{ type: 'text' as const, text: `${header}\n\n${out.text}` }], details: { paperId, mode, truncated: out.truncated, type: paperType } }
+              }
+
+              return { content: [{ type: 'text' as const, text: `Invalid read mode: ${mode}` }], isError: true, details: { type: paperType } }
             }
 
             // === SAVE ===

@@ -31,27 +31,16 @@ search.get('/', async (c) => {
 
     switch (source) {
       case 'local':
-        // Local search prioritizes pgvector semantic search. For explicitly
-        // structured fields, use keyword search because vector chunks do not
-        // carry field-level metadata such as author or title.
-        if (field === 'all' || field === 'abstract') {
-          results = await searchService.searchLocalVector(query, limit)
-          if (!results.papers.length) {
-            results = await searchService.searchLocalKeyword(
-              query,
-              field,
-              limit,
-              (page - 1) * limit
-            )
-          }
-        } else {
-          results = await searchService.searchLocalKeyword(
-            query,
-            field,
-            limit,
-            (page - 1) * limit
-          )
-        }
+        // Hybrid local search combines metadata/keyword matching (title,
+        // authors, abstract, full-text chunks) with pgvector semantic chunks.
+        // This lets exact paper-title queries find the paper while still
+        // returning a useful PDF snippet instead of an empty abstract.
+        results = await searchService.searchLocalHybrid(
+          query,
+          field,
+          limit,
+          (page - 1) * limit
+        )
         break
 
       case 'vector':

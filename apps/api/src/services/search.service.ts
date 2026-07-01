@@ -13,6 +13,13 @@ interface SearchResult {
   snippet: string
   similarity: number
   pageNumber: number | null
+  authors?: string[]
+  year?: number | null
+  url?: string | null
+  doi?: string | null
+  arxivId?: string | null
+  journal?: string | null
+  venue?: string | null
 }
 
 interface SearchResponse {
@@ -311,7 +318,13 @@ export class SearchService {
         id: r.paperId,
         title: r.title,
         abstract: r.snippet,
-        authors: [],
+        authors: r.authors || [],
+        year: r.year,
+        url: r.url,
+        doi: r.doi,
+        arxivId: r.arxivId,
+        journal: r.journal,
+        venue: r.venue,
         source: 'local' as const,
         similarity: r.similarity,
         pageNumber: r.pageNumber,
@@ -352,6 +365,13 @@ export class SearchService {
         pc.id,
         pc.paper_id AS "paperId",
         p.title,
+        p.authors,
+        p.year,
+        p.url,
+        p.doi,
+        p.arxiv_id AS "arxivId",
+        p.metadata->>'journal' AS journal,
+        p.metadata->>'venue' AS venue,
         pc.content AS snippet,
         pc.page_number AS "pageNumber",
         1 - (pc.embedding <=> $1::vector) AS similarity
@@ -370,6 +390,54 @@ export class SearchService {
       ...row,
       snippet: cleanSnippetForDisplay(row.snippet),
     }))
+  }
+
+  async searchLocalHybrid(
+    query: string,
+    field = 'all',
+    limit = 20,
+    offset = 0,
+    threshold = 0.5,
+    paperId?: string
+  ): Promise<SearchResponse> {
+    const normalizedField = field || 'all'
+    const shouldUseVector = normalizedField === 'all' || normalizedField === 'abstract'
+    const responses: SearchResponse[] = []
+
+    if (shouldUseVector) {
+      try {
+        responses.push(await this.searchLocalVector(query, Math.max(limit + offset, limit), threshold, paperId))
+      } catch (err) {
+        console.warn('Local hybrid vector branch failed:', err)
+      }
+    }
+
+    responses.push(await this.searchLocalKeyword(query, normalizedField, Math.max(limit + offset, limit), 0, paperId))
+
+    const merged = new Map<string, SearchPaper>()
+    for (const response of responses) {
+      for (const paper of response.papers) {
+        const existing = merged.get(paper.id)
+        if (!existing) {
+          merged.set(paper.id, paper)
+          continue
+        }
+
+        merged.set(paper.id, {
+          ...existing,
+          ...Object.fromEntries(Object.entries(paper).filter(([, value]) => value !== undefined && value !== null && value !== '')),
+          abstract: existing.abstract || paper.abstract || null,
+          similarity: Math.max(Number(existing.similarity || 0), Number(paper.similarity || 0)) || undefined,
+          pageNumber: existing.pageNumber ?? paper.pageNumber ?? null,
+        })
+      }
+    }
+
+    const papers = Array.from(merged.values())
+      .sort((a, b) => Number(b.similarity || 0) - Number(a.similarity || 0))
+      .slice(offset, offset + limit)
+
+    return { papers, total: merged.size, page: Math.floor(offset / limit) + 1, limit }
   }
 
   // ── Local Keyword Search (Prisma) ──────────────────────────────────────
@@ -412,6 +480,15 @@ export class SearchService {
     }
     if (field === 'all' || field === 'abstract') {
       addClause(`p.abstract ILIKE ?`, pattern)
+      addClause(
+        `EXISTS (
+          SELECT 1
+          FROM paper_chunks pc
+          WHERE pc.paper_id = p.id
+            AND pc.content ILIKE ?
+        )`,
+        pattern
+      )
     }
     if ((field === 'all' || field === 'year') && Number.isInteger(year)) {
       addClause(`p.year = ?`, year)
@@ -448,25 +525,70 @@ export class SearchService {
       ...values
     )
     const total = papers[0]?.__total || 0
+    const snippets = await this.getLocalPaperSnippets(papers.map((p) => p.id), pattern)
+    const normalizedQuery = normalizeForSearch(query)
 
     return {
-      papers: papers.map((p) => ({
-        id: p.id,
-        title: p.title,
-        abstract: p.abstract,
-        authors: p.authors,
-        year: p.year,
-        url: p.url,
-        doi: p.doi,
-        arxivId: p.arxivId,
-        journal: p.journal || null,
-        venue: p.venue || null,
-        source: 'local' as const,
-      })),
+      papers: papers.map((p) => {
+        const snippet = snippets.get(p.id)
+        const titleMatches = normalizeForSearch(p.title).includes(normalizedQuery)
+        return {
+          id: p.id,
+          title: p.title,
+          abstract: cleanSnippetForDisplay(p.abstract || snippet?.content || '', 700) || null,
+          authors: p.authors,
+          year: p.year,
+          url: p.url,
+          doi: p.doi,
+          arxivId: p.arxiv_id || p.arxivId,
+          journal: p.journal || null,
+          venue: p.venue || null,
+          source: 'local' as const,
+          similarity: titleMatches ? 1 : snippet?.matched ? 0.65 : undefined,
+          pageNumber: snippet?.pageNumber ?? null,
+        }
+      }),
       total,
       page: Math.floor(offset / limit) + 1,
       limit,
     }
+  }
+
+  private async getLocalPaperSnippets(
+    paperIds: string[],
+    pattern: string
+  ): Promise<Map<string, { content: string; pageNumber: number | null; matched: boolean }>> {
+    if (paperIds.length === 0) return new Map()
+
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      paperId: string
+      content: string
+      pageNumber: number | null
+      matched: boolean
+    }>>(
+      `
+      SELECT DISTINCT ON (pc.paper_id)
+        pc.paper_id::text AS "paperId",
+        pc.content,
+        pc.page_number AS "pageNumber",
+        (pc.content ILIKE $2) AS matched
+      FROM paper_chunks pc
+      WHERE pc.paper_id::text = ANY($1)
+      ORDER BY
+        pc.paper_id,
+        CASE WHEN pc.content ILIKE $2 THEN 0 ELSE 1 END,
+        pc.chunk_index NULLS LAST,
+        pc.created_at ASC
+      `,
+      paperIds,
+      pattern
+    )
+
+    return new Map(rows.map((row) => [row.paperId, {
+      content: cleanSnippetForDisplay(row.content, 700),
+      pageNumber: row.pageNumber,
+      matched: row.matched,
+    }]))
   }
 
   // ── IEEE Xplore Search ────────────────────────────────────────────────
