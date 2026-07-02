@@ -478,6 +478,7 @@ const send = async () => {
   }
   historyIndex.value = -1
   historyDraft.value = ''
+  historyDraftSelection.value = null
   autoScroll.value = true
   const editMessageId = editingMessageId.value || undefined
   const editingMsg = editMessageId ? chatStore.messages.find(m => m.id === editMessageId) : null
