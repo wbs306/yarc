@@ -899,6 +899,23 @@ const cancelTaskRunning = ref('')
 const maintenanceRunning = ref('')
 const maintenanceMessage = ref('')
 const maintenanceError = ref('')
+type QueueConcurrency = {
+  maxConcurrent: number
+  maxConcurrentSummaries: number
+  maxConcurrentEmbeddings: number
+  maxConcurrentParses: number
+}
+const defaultQueueConcurrency: QueueConcurrency = {
+  maxConcurrent: 4,
+  maxConcurrentSummaries: 1,
+  maxConcurrentEmbeddings: 1,
+  maxConcurrentParses: 3,
+}
+const queueConcurrency = ref<QueueConcurrency>({ ...defaultQueueConcurrency })
+const queueConcurrencyDraft = ref<QueueConcurrency>({ ...defaultQueueConcurrency })
+const queueConcurrencySaving = ref(false)
+const queueConcurrencySaved = ref(false)
+const queueConcurrencyError = ref('')
 const pendingQueueTotal = computed(() => {
   const rows = systemStatus.value?.tasks?.byTypeStatus || []
   const total = rows
@@ -907,6 +924,12 @@ const pendingQueueTotal = computed(() => {
   return total || pendingQueueTasks.value.length
 })
 const pendingQueueHidden = computed(() => Math.max(0, pendingQueueTotal.value - pendingQueueTasks.value.length))
+const queueConcurrencyDirty = computed(() => (
+  queueConcurrencyDraft.value.maxConcurrent !== queueConcurrency.value.maxConcurrent ||
+  queueConcurrencyDraft.value.maxConcurrentSummaries !== queueConcurrency.value.maxConcurrentSummaries ||
+  queueConcurrencyDraft.value.maxConcurrentEmbeddings !== queueConcurrency.value.maxConcurrentEmbeddings ||
+  queueConcurrencyDraft.value.maxConcurrentParses !== queueConcurrency.value.maxConcurrentParses
+))
 const selectedPendingTasks = computed(() => pendingQueueTasks.value.filter((task) => selectedPendingTaskIds.value.has(task.id)))
 const allVisiblePendingSelected = computed(() => (
   pendingQueueTasks.value.length > 0 && pendingQueueTasks.value.every((task) => selectedPendingTaskIds.value.has(task.id))
@@ -916,16 +939,53 @@ const pruneSelectedPendingTasks = () => {
   selectedPendingTaskIds.value = new Set([...selectedPendingTaskIds.value].filter((id) => visibleIds.has(id)))
 }
 
+const applyQueueConcurrency = (value: any) => {
+  const next: QueueConcurrency = {
+    maxConcurrent: Number(value?.maxConcurrent || defaultQueueConcurrency.maxConcurrent),
+    maxConcurrentSummaries: Number(value?.maxConcurrentSummaries || defaultQueueConcurrency.maxConcurrentSummaries),
+    maxConcurrentEmbeddings: Number(value?.maxConcurrentEmbeddings || defaultQueueConcurrency.maxConcurrentEmbeddings),
+    maxConcurrentParses: Number(value?.maxConcurrentParses || defaultQueueConcurrency.maxConcurrentParses),
+  }
+  queueConcurrency.value = next
+  queueConcurrencyDraft.value = { ...next }
+}
+
+const resetQueueConcurrencyDraft = () => {
+  queueConcurrencyDraft.value = { ...queueConcurrency.value }
+}
+
+const saveQueueConcurrency = async () => {
+  queueConcurrencySaving.value = true
+  queueConcurrencyError.value = ''
+  try {
+    const res = await api.updateTaskConcurrency(queueConcurrencyDraft.value)
+    applyQueueConcurrency(res.concurrency)
+    queueConcurrencySaved.value = true
+    setTimeout(() => { queueConcurrencySaved.value = false }, 1500)
+    await loadSystemStatus()
+  } catch (err) {
+    queueConcurrencyError.value = (err as Error).message || '并发设置保存失败'
+  } finally {
+    queueConcurrencySaving.value = false
+  }
+}
+
 const loadSystemStatus = async () => {
   systemStatusLoading.value = true
   systemStatusError.value = ''
+  queueConcurrencyError.value = ''
   try {
-    const [statusRes, tasksRes] = await Promise.all([
+    const [statusRes, tasksRes, concurrencyRes] = await Promise.all([
       api.getSystemStatus(),
-      api.getTasks('pending', pendingQueueLimit),
+      api.getTasks('pending', pendingQueueLimit, 'asc'),
+      api.getTaskConcurrency().catch((err) => {
+        queueConcurrencyError.value = (err as Error).message || '并发设置加载失败'
+        return null
+      }),
     ])
     systemStatus.value = statusRes.status
     pendingQueueTasks.value = tasksRes.tasks || []
+    if (concurrencyRes?.concurrency) applyQueueConcurrency(concurrencyRes.concurrency)
     pruneSelectedPendingTasks()
   } catch (err) {
     systemStatusError.value = (err as Error).message || '状态加载失败'
@@ -1043,9 +1103,13 @@ const cancelQueuedTask = async (task: any) => {
 const cancelSelectedQueuedTasks = async () => {
   const tasks = selectedPendingTasks.value
   if (!tasks.length) return
+  const preview = tasks
+    .slice(0, 5)
+    .map((task) => `「${task?.paper?.title || task?.paperId || shortId(task.id)}」`)
+    .join('、')
   const confirmed = await confirm({
     title: '批量取消队列任务',
-    message: `确定取消已选中的 ${tasks.length} 个待执行任务？已开始运行的任务不能在这里取消。`,
+    message: `将只取消当前勾选的 ${tasks.length} 个待执行任务${preview ? `：${preview}${tasks.length > 5 ? ' 等' : ''}` : ''}。已开始运行的任务不能在这里取消。`,
     confirmText: '取消选中任务',
     danger: true,
     icon: 'alert',
@@ -2379,6 +2443,41 @@ onBeforeUnmount(() => {
                   </template>
                 </dl>
 
+                <div class="queue-concurrency-panel">
+                  <div class="queue-concurrency-head">
+                    <div>
+                      <strong>并发限制</strong>
+                      <span>保存后立即影响后续取队列；不会中断已经运行中的任务。</span>
+                    </div>
+                    <div class="queue-concurrency-actions">
+                      <span v-if="queueConcurrencySaved" class="saved-text">已保存</span>
+                      <button class="btn-ghost-xs" :disabled="!queueConcurrencyDirty || queueConcurrencySaving" @click="resetQueueConcurrencyDraft">还原</button>
+                      <button class="btn-primary-sm" :disabled="!queueConcurrencyDirty || queueConcurrencySaving" @click="saveQueueConcurrency">
+                        {{ queueConcurrencySaving ? '保存中…' : '保存并发' }}
+                      </button>
+                    </div>
+                  </div>
+                  <div class="queue-concurrency-grid">
+                    <label class="queue-concurrency-field">
+                      <span>总并发</span>
+                      <input v-model.number="queueConcurrencyDraft.maxConcurrent" type="number" min="1" max="50" class="text-input-sm" />
+                    </label>
+                    <label class="queue-concurrency-field">
+                      <span>总结并发</span>
+                      <input v-model.number="queueConcurrencyDraft.maxConcurrentSummaries" type="number" min="1" max="20" class="text-input-sm" />
+                    </label>
+                    <label class="queue-concurrency-field">
+                      <span>向量并发</span>
+                      <input v-model.number="queueConcurrencyDraft.maxConcurrentEmbeddings" type="number" min="1" max="20" class="text-input-sm" />
+                    </label>
+                    <label class="queue-concurrency-field">
+                      <span>解析并发</span>
+                      <input v-model.number="queueConcurrencyDraft.maxConcurrentParses" type="number" min="1" max="20" class="text-input-sm" />
+                    </label>
+                  </div>
+                  <p v-if="queueConcurrencyError" class="maintenance-error queue-concurrency-error">{{ queueConcurrencyError }}</p>
+                </div>
+
                 <div class="pending-queue-panel">
                   <div class="pending-queue-header">
                     <div>
@@ -2397,7 +2496,7 @@ onBeforeUnmount(() => {
                   <div v-if="!pendingQueueTasks.length" class="empty-text pending-queue-empty">暂无待执行任务</div>
                   <template v-else>
                     <div class="pending-queue-list" role="listbox" aria-label="待执行队列任务">
-                      <label
+                      <div
                         v-for="task in pendingQueueTasks"
                         :key="task.id"
                         class="pending-queue-item"
@@ -2408,6 +2507,8 @@ onBeforeUnmount(() => {
                           class="pending-queue-check"
                           :checked="selectedPendingTaskIds.has(task.id)"
                           :disabled="!!cancelTaskRunning || !!maintenanceRunning"
+                          :aria-label="`选择 ${task.paper?.title || task.paperId || task.id}`"
+                          @click.stop
                           @change="togglePendingTaskSelection(task.id, ($event.target as HTMLInputElement).checked)"
                         />
                         <div class="pending-queue-main">
@@ -2426,7 +2527,7 @@ onBeforeUnmount(() => {
                         >
                           {{ cancelTaskRunning === task.id ? '取消中…' : '取消' }}
                         </button>
-                      </label>
+                      </div>
                     </div>
                     <div v-if="pendingQueueHidden" class="pending-queue-more">
                       还有 {{ formatNumber(pendingQueueHidden) }} 个待执行任务未显示。可刷新同步最新队列状态。
@@ -2850,6 +2951,60 @@ onBeforeUnmount(() => {
 .task-queue-section {
   grid-column: 1 / -1;
 }
+.queue-concurrency-panel {
+  margin-top: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--color-bg-muted) 34%, transparent);
+}
+.queue-concurrency-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.queue-concurrency-head > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.queue-concurrency-head strong {
+  font-size: 13px;
+  color: var(--color-text);
+}
+.queue-concurrency-head span {
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+}
+.queue-concurrency-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.queue-concurrency-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+.queue-concurrency-field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.queue-concurrency-field input {
+  width: 100%;
+}
+.queue-concurrency-error {
+  margin: 10px 0 0;
+}
+.queue-concurrency-actions .saved-text {
+  font-size: 12px;
+  color: var(--color-success);
+}
 .pending-queue-panel {
   margin-top: 14px;
   border: 1px solid var(--color-border);
@@ -2911,7 +3066,6 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   padding: 10px 12px;
   background: color-mix(in srgb, var(--color-bg-card) 88%, var(--color-bg-muted));
-  cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
 .pending-queue-item:hover {
