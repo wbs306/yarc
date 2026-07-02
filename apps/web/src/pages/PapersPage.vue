@@ -590,6 +590,42 @@ const handleTreeRename = (node: FileNode, newName: string) => {
   void renameWorkspaceNode(node, newName)
 }
 
+const workspaceRootDropActive = ref(false)
+
+const isWorkspaceFileNodeDragTarget = (event: DragEvent) =>
+  !!(event.target as HTMLElement | null)?.closest('.file-node')
+
+const readDraggedWorkspaceNode = (event: DragEvent): FileNode | null => {
+  const raw = event.dataTransfer?.getData('application/x-yarc-file-node')
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as FileNode
+    return parsed?.path && parsed?.name && parsed?.type ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const handleWorkspaceRootDragOver = (event: DragEvent) => {
+  if (isWorkspaceFileNodeDragTarget(event)) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  workspaceRootDropActive.value = true
+}
+
+const handleWorkspaceRootDragLeave = (event: DragEvent) => {
+  if ((event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) return
+  workspaceRootDropActive.value = false
+}
+
+const handleWorkspaceRootDrop = (event: DragEvent) => {
+  if (isWorkspaceFileNodeDragTarget(event)) return
+  event.preventDefault()
+  workspaceRootDropActive.value = false
+  const node = readDraggedWorkspaceNode(event)
+  if (node) void moveWorkspaceNode(node, '')
+}
+
 const moveWorkspaceNode = async (node: FileNode, targetDirPath: string) => {
   if (node.readonly) return
 
@@ -2145,7 +2181,16 @@ const showSearchPaperPopup = (paper: any) => {
             </div>
           </div>
 
-          <div v-else-if="sidebarMode === 'files'" key="m-files" class="category-list files-inline-list" @contextmenu.prevent="openFileContextMenu($event, null)">
+          <div
+            v-else-if="sidebarMode === 'files'"
+            key="m-files"
+            class="category-list files-inline-list"
+            :class="{ 'root-drop-target': workspaceRootDropActive }"
+            @contextmenu.prevent="openFileContextMenu($event, null)"
+            @dragover="handleWorkspaceRootDragOver"
+            @dragleave="handleWorkspaceRootDragLeave"
+            @drop="handleWorkspaceRootDrop"
+          >
             <div class="section-divider">
               <span class="divider-text">data/</span>
             </div>
@@ -3380,6 +3425,11 @@ const showSearchPaperPopup = (paper: any) => {
 .error-text { color: var(--color-error); }
 .files-inline-list {
   padding: 8px 4px calc(8px + var(--list-scroll-bottom-gap, 84px));
+}
+.files-inline-list.root-drop-target {
+  outline: 1px dashed rgba(var(--color-primary-rgb), 0.45);
+  outline-offset: -4px;
+  background: rgba(var(--color-primary-rgb), 0.05);
 }
 .files-inline-list :deep(.file-tree) {
   padding: 0;
