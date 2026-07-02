@@ -131,15 +131,28 @@ const selectPaper = (paper: { id: string; title: string }) => {
   })
 }
 
-const fileTreeCache = ref<string[]>([])
+const fileTreeCache = ref<Array<{ path: string; type: 'file' | 'directory' }>>([])
 const categoriesCache = ref<Array<{ id: string; name: string }>>([])
+
+const flattenFileTree = (nodes: any[]): Array<{ path: string; type: 'file' | 'directory' }> => {
+  const items: Array<{ path: string; type: 'file' | 'directory' }> = []
+  const walk = (list: any[]) => {
+    for (const node of list || []) {
+      if (!node?.path || (node.type !== 'file' && node.type !== 'directory')) continue
+      items.push({ path: node.path, type: node.type })
+      if (node.type === 'directory' && Array.isArray(node.children)) walk(node.children)
+    }
+  }
+  walk(nodes)
+  return items
+}
 
 const loadFileTree = async () => {
   if (fileTreeCache.value.length) return
   try {
     const api = (await import('@/composables/useApi')).useApi()
     const res = await api.getFileTree()
-    fileTreeCache.value = (res.files || []).map((f: any) => f.path)
+    fileTreeCache.value = flattenFileTree(res.files || [])
   } catch {}
 }
 
@@ -177,12 +190,12 @@ const suggestions = computed<SuggestionItem[]>(() => {
     
     if (command === 'file') {
       return fileTreeCache.value
-        .filter(p => p.toLowerCase().includes(partial))
+        .filter(item => item.path.toLowerCase().includes(partial))
         .slice(0, 8)
-        .map(p => ({ 
-          label: p, 
-          insert: `@file ${p} `, 
-          hint: '文件', 
+        .map(item => ({ 
+          label: item.path, 
+          insert: `@file ${item.path} `, 
+          hint: item.type === 'directory' ? '目录' : '文件', 
           type: 'file' as const,
           matchStart,
           matchEnd
