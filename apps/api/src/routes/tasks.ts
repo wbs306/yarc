@@ -7,7 +7,8 @@ const tasks = new Hono()
 tasks.get('/', async (c) => {
   const status = c.req.query('status')
   const limit = parseInt(c.req.query('limit') || '50')
-  const list = await taskService.list(status, limit)
+  const order = c.req.query('order') === 'asc' ? 'asc' : 'desc'
+  const list = await taskService.list(status, limit, order)
   return c.json({ tasks: list })
 })
 
@@ -15,6 +16,18 @@ tasks.get('/', async (c) => {
 tasks.get('/stats', async (c) => {
   const stats = await taskService.getStats()
   return c.json(stats)
+})
+
+// GET /api/tasks/concurrency
+tasks.get('/concurrency', async (c) => {
+  return c.json({ concurrency: taskService.getConcurrency() })
+})
+
+// PUT /api/tasks/concurrency
+tasks.put('/concurrency', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const concurrency = await taskService.updateConcurrency(body)
+  return c.json({ concurrency })
 })
 
 // GET /api/tasks/:id

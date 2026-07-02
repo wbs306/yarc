@@ -22,6 +22,13 @@ import { join } from 'node:path'
 
 type JobType = 'parse_pdf' | 'generate_embedding' | 'summarize' | 'enrich_metadata'
 
+export interface JobQueueConcurrency {
+  maxConcurrent: number
+  maxConcurrentSummaries: number
+  maxConcurrentEmbeddings: number
+  maxConcurrentParses: number
+}
+
 interface Job {
   id: string
   taskId?: string
@@ -81,6 +88,31 @@ class JobQueue {
     sseHub.emit({ type: 'paper-status', paperId: job.paperId, jobType: job.type, status: 'failed', error: reason })
     this.process()
     return job
+  }
+
+  getConcurrency(): JobQueueConcurrency {
+    return {
+      maxConcurrent: this.maxConcurrent,
+      maxConcurrentSummaries: this.maxConcurrentSummaries,
+      maxConcurrentEmbeddings: this.maxConcurrentEmbeddings,
+      maxConcurrentParses: this.maxConcurrentParses,
+    }
+  }
+
+  setConcurrency(input: Partial<JobQueueConcurrency>): JobQueueConcurrency {
+    const current = this.getConcurrency()
+    const clamp = (value: unknown, fallback: number, min: number, max: number) => {
+      const parsed = Number(value)
+      if (!Number.isFinite(parsed)) return fallback
+      return Math.min(Math.max(Math.floor(parsed), min), max)
+    }
+
+    this.maxConcurrent = clamp(input.maxConcurrent, current.maxConcurrent, 1, 50)
+    this.maxConcurrentSummaries = clamp(input.maxConcurrentSummaries, current.maxConcurrentSummaries, 1, 20)
+    this.maxConcurrentEmbeddings = clamp(input.maxConcurrentEmbeddings, current.maxConcurrentEmbeddings, 1, 20)
+    this.maxConcurrentParses = clamp(input.maxConcurrentParses, current.maxConcurrentParses, 1, 20)
+    for (let i = 0; i < this.maxConcurrent; i++) this.process()
+    return this.getConcurrency()
   }
 
   private async process() {
@@ -595,15 +627,32 @@ class JobQueue {
     return {
       pending: this.queue.length,
       running: this.running,
+      runningByType: {
+        summaries: this.runningSummaries,
+        embeddings: this.runningEmbeddings,
+        parses: this.runningParses,
+      },
+      concurrency: this.getConcurrency(),
     }
   }
 }
 
 export const jobQueue = new JobQueue()
 
+export const JOB_QUEUE_CONCURRENCY_SETTING_KEY = 'job_queue_concurrency'
+
+const loadPersistedConcurrency = async () => {
+  const row = await prisma.setting.findUnique({ where: { key: JOB_QUEUE_CONCURRENCY_SETTING_KEY } })
+  if (row?.value && typeof row.value === 'object' && !Array.isArray(row.value)) {
+    jobQueue.setConcurrency(row.value as Partial<JobQueueConcurrency>)
+  }
+}
+
 // Recover incomplete jobs on startup
 export async function recoverJobs() {
   try {
+    await loadPersistedConcurrency()
+
     const pendingTasks = await prisma.task.findMany({
       where: { status: { in: ['pending', 'active'] } },
       distinct: ['paperId', 'type'],

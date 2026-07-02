@@ -299,12 +299,20 @@ export function useApi() {
       request(`/search-categories/${categoryId}/papers/${encodeURIComponent(paperId)}`, { method: 'DELETE' }),
 
     // Tasks
-    getTasks: (status?: string, limit?: number) =>
+    getTasks: (status?: string, limit?: number, order?: 'asc' | 'desc') =>
       request<{ tasks: any[] }>('/tasks', {
-        params: { ...(status ? { status } : {}), ...(limit !== undefined ? { limit: String(limit) } : {}) },
+        params: { ...(status ? { status } : {}), ...(limit !== undefined ? { limit: String(limit) } : {}), ...(order ? { order } : {}) },
       }),
 
     getTaskStats: () => request<{ pending: number; active: number; completed: number; failed: number }>('/tasks/stats'),
+
+    getTaskConcurrency: () => request<{ concurrency: any }>('/tasks/concurrency'),
+
+    updateTaskConcurrency: (concurrency: any) =>
+      request<{ concurrency: any }>('/tasks/concurrency', {
+        method: 'PUT',
+        body: JSON.stringify(concurrency),
+      }),
 
     cancelTask: (id: string) => request<{ task: any }>(`/tasks/${id}/cancel`, { method: 'POST' }),
 

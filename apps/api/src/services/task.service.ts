@@ -1,9 +1,10 @@
 import { prisma } from '@yarc/db'
 import { AppError } from '../lib/errors.js'
-import { jobQueue } from './job-queue.service.js'
+import { JOB_QUEUE_CONCURRENCY_SETTING_KEY, jobQueue } from './job-queue.service.js'
+import type { JobQueueConcurrency } from './job-queue.service.js'
 
 export class TaskService {
-  async list(status?: string, limit = 50) {
+  async list(status?: string, limit = 50, order: 'asc' | 'desc' = 'desc') {
     const where: any = {}
     if (status) where.status = status
 
@@ -14,7 +15,7 @@ export class TaskService {
 
     return prisma.task.findMany({
       where,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: order },
       ...(take ? { take } : {}),
       include: {
         paper: { select: { id: true, title: true } },
@@ -58,6 +59,21 @@ export class TaskService {
       where: { id },
       data: { status: 'pending', error: null, progress: 0, result: null as any, completedAt: null },
     })
+  }
+
+  getConcurrency() {
+    return jobQueue.getConcurrency()
+  }
+
+  async updateConcurrency(input: Partial<JobQueueConcurrency>) {
+    const concurrency = jobQueue.setConcurrency(input)
+    const value: Record<string, number> = { ...concurrency }
+    await prisma.setting.upsert({
+      where: { key: JOB_QUEUE_CONCURRENCY_SETTING_KEY },
+      create: { key: JOB_QUEUE_CONCURRENCY_SETTING_KEY, value },
+      update: { value, updatedAt: new Date() },
+    })
+    return concurrency
   }
 
   async getStats() {
