@@ -26,6 +26,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
 const sentHistory = ref<string[]>([])
 const historyIndex = ref(-1)  // -1 = not navigating
 const historyDraft = ref('')  // saved draft when entering history mode
+const historyDraftSelection = ref<{ start: number; end: number } | null>(null)
 
 // Auto-resize textarea
 const autoResize = () => {
@@ -508,6 +509,18 @@ const copyMessage = async (msg: any) => {
   clearTimeout(copyTimer)
   copyTimer = window.setTimeout(() => { copiedMsgId.value = '' }, 1500)
 }
+const textareaSelection = () => {
+  const el = textareaRef.value
+  return {
+    start: el?.selectionStart ?? inputText.value.length,
+    end: el?.selectionEnd ?? inputText.value.length,
+  }
+}
+
+const setTextareaSelection = (start: number, end = start) => {
+  nextTick(() => textareaRef.value?.setSelectionRange(start, end))
+}
+
 const onKeydown = (e: KeyboardEvent) => {
   if (e.key === 'Tab') {
     if (suggestions.value.length) { e.preventDefault(); applySelectedSuggestion() }
@@ -523,11 +536,18 @@ const onKeydown = (e: KeyboardEvent) => {
     selectedSuggestion.value = (selectedSuggestion.value - 1 + suggestions.value.length) % suggestions.value.length
     return
   }
-  // Sent-message history navigation (only when no suggestions visible)
+  // Sent-message history navigation (only when no suggestions visible).
+  // Let the textarea keep normal multi-line cursor movement unless the caret is
+  // already at the very beginning, or we are already browsing message history.
   if (e.key === 'ArrowUp' && !suggestions.value.length && sentHistory.value.length) {
-    // Enter history mode or go back
+    const selection = textareaSelection()
+    const canEnterHistory = historyIndex.value >= 0 || (selection.start === 0 && selection.end === 0)
+    if (!canEnterHistory) return
+
+    e.preventDefault()
     if (historyIndex.value === -1) {
       historyDraft.value = inputText.value
+      historyDraftSelection.value = selection
       historyIndex.value = sentHistory.value.length - 1
     } else if (historyIndex.value > 0) {
       historyIndex.value--
@@ -535,26 +555,31 @@ const onKeydown = (e: KeyboardEvent) => {
       return  // already at oldest
     }
     inputText.value = sentHistory.value[historyIndex.value]
-    nextTick(() => textareaRef.value?.setSelectionRange(inputText.value.length, inputText.value.length))
+    setTextareaSelection(inputText.value.length)
     return
   }
   if (e.key === 'ArrowDown' && !suggestions.value.length && historyIndex.value >= 0) {
+    e.preventDefault()
     if (historyIndex.value < sentHistory.value.length - 1) {
       historyIndex.value++
       inputText.value = sentHistory.value[historyIndex.value]
+      setTextareaSelection(inputText.value.length)
     } else {
-      // Exit history mode, restore draft
+      // Exit history mode, restore draft and caret selection.
+      const selection = historyDraftSelection.value
       historyIndex.value = -1
       inputText.value = historyDraft.value
       historyDraft.value = ''
+      historyDraftSelection.value = null
+      setTextareaSelection(selection?.start ?? inputText.value.length, selection?.end ?? selection?.start ?? inputText.value.length)
     }
-    nextTick(() => textareaRef.value?.setSelectionRange(inputText.value.length, inputText.value.length))
     return
   }
   // Any other key resets history navigation (except modifiers)
   if (historyIndex.value >= 0 && !['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) {
     historyIndex.value = -1
     historyDraft.value = ''
+    historyDraftSelection.value = null
   }
   if (e.key === 'Enter' && !e.shiftKey) {
     if (suggestions.value.length) { e.preventDefault(); applySelectedSuggestion(); return }
