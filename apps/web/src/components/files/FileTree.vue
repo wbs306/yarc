@@ -24,11 +24,13 @@ const props = withDefaults(defineProps<{
   level?: number
   creatingParentPath?: string | undefined
   creatingType?: 'file' | 'directory'
+  parentPath?: string
 }>(), {
   selectedPath: '',
   level: 0,
   creatingParentPath: undefined,
   creatingType: 'file',
+  parentPath: '',
 })
 
 const emit = defineEmits<{
@@ -37,6 +39,7 @@ const emit = defineEmits<{
   rename: [node: FileNode, newName: string]
   create: [parentPath: string, name: string, type: 'file' | 'directory']
   cancelCreate: []
+  move: [node: FileNode, targetDirPath: string]
 }>()
 
 const loadExpandedPaths = () => {
@@ -61,6 +64,8 @@ const renamingValue = ref('')
 const renameInput = ref<HTMLInputElement | null>(null)
 const creatingValue = ref('')
 const treeRoot = ref<HTMLElement | null>(null)
+const draggingPath = ref<string | null>(null)
+const dropTargetPath = ref<string | null>(null)
 // Guard to prevent double-submission
 const createSubmitted = ref(false)
 
@@ -223,11 +228,109 @@ const fileColor = (node: FileNode) => {
   return '#71717a'
 }
 
+const normalizePath = (path?: string | null) => (path || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '')
+const isProtectedDropDir = (path?: string | null) => {
+  const normalized = normalizePath(path)
+  return normalized === 'papers' || normalized.startsWith('papers/')
+}
+const canDragNode = (node: FileNode) => !node.readonly && renamingPath.value !== node.path && props.creatingParentPath === undefined
+const canDropIntoDir = (path: string, readonly = false) => !readonly && !isProtectedDropDir(path)
+
+const handleDragStart = (event: DragEvent, node: FileNode) => {
+  if (!canDragNode(node)) {
+    event.preventDefault()
+    return
+  }
+  draggingPath.value = node.path
+  event.dataTransfer?.setData('application/x-yarc-file-node', JSON.stringify({ ...node, children: undefined }))
+  event.dataTransfer?.setData('text/plain', node.path)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+}
+
+const handleDragEnd = () => {
+  draggingPath.value = null
+  dropTargetPath.value = null
+}
+
+const handleDirectoryDragOver = (event: DragEvent, node: FileNode) => {
+  if (node.type !== 'directory' || !canDropIntoDir(node.path, node.readonly)) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dropTargetPath.value = node.path
+}
+
+const handleDirectoryDragLeave = (event: DragEvent, node: FileNode) => {
+  if ((event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) return
+  if (dropTargetPath.value === node.path) dropTargetPath.value = null
+}
+
+const readDroppedNode = (event: DragEvent): FileNode | null => {
+  const raw = event.dataTransfer?.getData('application/x-yarc-file-node')
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as FileNode
+    return parsed?.path && parsed?.name && parsed?.type ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const handleDirectoryDrop = (event: DragEvent, targetDirPath: string) => {
+  event.preventDefault()
+  event.stopPropagation()
+  dropTargetPath.value = null
+  const node = readDroppedNode(event)
+  if (!node || node.path === targetDirPath || targetDirPath.startsWith(`${node.path}/`)) return
+  emit('move', node, targetDirPath)
+}
+
+const handleTreeDragOver = (event: DragEvent) => {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('.file-node')) return
+  if (!canDropIntoDir(props.parentPath)) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dropTargetPath.value = props.parentPath
+}
+
+const handleTreeDragLeave = (event: DragEvent) => {
+  if ((event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) return
+  if (dropTargetPath.value === props.parentPath) dropTargetPath.value = null
+}
+
+const handleTreeDrop = (event: DragEvent) => {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('.file-node')) return
+  if (!canDropIntoDir(props.parentPath)) return
+  handleDirectoryDrop(event, props.parentPath)
+}
+
+const handleTreeContextMenu = (event: MouseEvent) => {
+  if ((event.target as HTMLElement | null)?.closest('.file-node')) return
+  event.preventDefault()
+  event.stopPropagation()
+  emit('contextMenu', event, null)
+}
+
+const isDropTarget = (path: string) => dropTargetPath.value === path
+
 defineExpose({ startRename })
 </script>
 
 <template>
-  <div ref="treeRoot" class="file-tree" :style="{ '--tree-level': level }" @click="handleTreeClick">
+  <div
+    ref="treeRoot"
+    class="file-tree"
+    :class="{ 'tree-drop-target': isDropTarget(parentPath) }"
+    :style="{ '--tree-level': level }"
+    @click="handleTreeClick"
+    @contextmenu="handleTreeContextMenu"
+    @dragover="handleTreeDragOver"
+    @dragleave="handleTreeDragLeave"
+    @drop="handleTreeDrop"
+  >
     <!-- Create input at root level -->
     <div v-if="isRootCreating()" class="file-node-wrap creating">
       <div class="file-node creating" :style="{ paddingLeft: `${4 + level * 16}px` }">
@@ -255,15 +358,28 @@ defineExpose({ startRename })
     <div v-for="node in nodes" :key="node.path" class="file-node-wrap">
       <div
         class="file-node"
-        :class="{ active: selectedPath === node.path, directory: node.type === 'directory', readonly: node.readonly, renaming: renamingPath === node.path }"
+        :class="{
+          active: selectedPath === node.path,
+          directory: node.type === 'directory',
+          readonly: node.readonly,
+          renaming: renamingPath === node.path,
+          dragging: draggingPath === node.path,
+          'drop-target': isDropTarget(node.path),
+        }"
         :style="{ paddingLeft: `${4 + level * 16}px` }"
         role="button"
         tabindex="0"
         :title="node.path"
+        :draggable="canDragNode(node)"
         @click="handleNodeClick(node)"
         @contextmenu="handleContextMenu($event, node)"
         @keydown.enter.prevent="handleNodeClick(node)"
         @keydown.space.prevent="handleNodeClick(node)"
+        @dragstart.stop="handleDragStart($event, node)"
+        @dragend.stop="handleDragEnd"
+        @dragover="handleDirectoryDragOver($event, node)"
+        @dragleave="handleDirectoryDragLeave($event, node)"
+        @drop="handleDirectoryDrop($event, node.path)"
       >
         <span class="file-toggle" :class="{ expanded: isExpanded(node), visible: node.type === 'directory' }">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -361,11 +477,13 @@ defineExpose({ startRename })
           :level="level + 1"
           :creating-parent-path="creatingParentPath"
           :creating-type="creatingType"
+          :parent-path="node.path"
           @select="emit('select', $event)"
           @context-menu="(e, child) => emit('contextMenu', e, child)"
           @rename="(child, newName) => emit('rename', child, newName)"
           @create="(parentPath, name, type) => emit('create', parentPath, name, type)"
           @cancel-create="emit('cancelCreate')"
+          @move="(child, targetDirPath) => emit('move', child, targetDirPath)"
         />
       </Transition>
     </div>
@@ -407,6 +525,25 @@ defineExpose({ startRename })
 .file-node.active {
   background: var(--color-primary-soft);
   color: var(--color-primary);
+}
+
+.file-node.dragging {
+  opacity: 0.48;
+}
+
+.file-node.drop-target {
+  background: rgba(var(--color-primary-rgb), 0.12);
+  box-shadow: inset 0 0 0 1px rgba(var(--color-primary-rgb), 0.35);
+}
+
+.file-tree.tree-drop-target {
+  outline: 1px dashed rgba(var(--color-primary-rgb), 0.45);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.file-node.drop-target .file-icon {
+  transform: scale(1.08);
 }
 
 .file-node.active::before {

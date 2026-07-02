@@ -590,6 +590,48 @@ const handleTreeRename = (node: FileNode, newName: string) => {
   void renameWorkspaceNode(node, newName)
 }
 
+const moveWorkspaceNode = async (node: FileNode, targetDirPath: string) => {
+  if (node.readonly) return
+
+  const targetDir = targetDirPath.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '')
+  if (isPapersWorkspacePath(targetDir)) {
+    filesError.value = 'papers/ 是受保护目录，不能在文件管理器中修改'
+    return
+  }
+  if (node.type === 'directory' && (targetDir === node.path || targetDir.startsWith(`${node.path}/`))) {
+    filesError.value = '不能把文件夹移动到自身或其子文件夹中'
+    return
+  }
+
+  const targetPath = joinWorkspacePath(targetDir, node.name)
+  if (!targetPath || targetPath === node.path) return
+
+  const selectedBeforeMove = selectedWorkspacePath.value
+  const selectedWasInsideMove = selectedBeforeMove === node.path || selectedBeforeMove.startsWith(`${node.path}/`)
+  if (selectedWasInsideMove && workspaceDirty.value && !(await prepareWorkspaceSwitch())) return
+
+  filesError.value = ''
+  try {
+    const res = await api.renamePath(node.path, targetPath)
+    removeRecentWorkspacePath(node.path)
+    await loadWorkspaceFiles(true)
+
+    if (selectedWasInsideMove) {
+      const nextSelectedPath = selectedBeforeMove === node.path
+        ? res.file.path
+        : joinWorkspacePath(res.file.path, selectedBeforeMove.slice(node.path.length + 1))
+      const movedSelectedNode = findWorkspaceNode(workspaceFiles.value, nextSelectedPath)
+      selectedWorkspaceFile.value = null
+      localStorage.removeItem('yarc_workspace_file')
+      clearWorkspaceEditor()
+      if (movedSelectedNode) await selectWorkspaceFile(movedSelectedNode)
+      else filesError.value = `文件已移动，但未能重新打开：${nextSelectedPath}`
+    }
+  } catch (err) {
+    filesError.value = (err as Error).message || '移动失败'
+  }
+}
+
 const deleteWorkspaceNode = async (node: FileNode) => {
   if (node.readonly) return
   const label = node.type === 'directory' ? '文件夹' : '文件'
@@ -2121,6 +2163,7 @@ const showSearchPaperPopup = (paper: any) => {
               @rename="handleTreeRename"
               @create="handleCreate"
               @cancel-create="cancelCreate"
+              @move="moveWorkspaceNode"
             />
           </div>
 
