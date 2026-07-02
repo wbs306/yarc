@@ -24,6 +24,7 @@ type JobType = 'parse_pdf' | 'generate_embedding' | 'summarize' | 'enrich_metada
 
 interface Job {
   id: string
+  taskId?: string
   type: JobType
   paperId: string
   status: 'pending' | 'running' | 'completed' | 'failed'
@@ -41,26 +42,43 @@ class JobQueue {
   private maxConcurrentEmbeddings = 1
   private maxConcurrentParses = 3
 
-  add(type: JobType, paperId: string, options: { persistTask?: boolean } = {}): Job {
+  add(type: JobType, paperId: string, options: { persistTask?: boolean; taskId?: string } = {}): Job {
+    const persistTask = options.persistTask ?? true
+    const taskId = options.taskId || (persistTask ? randomUUID() : undefined)
     const job: Job = {
       id: randomUUID(),
+      taskId,
       type,
       paperId,
       status: 'pending',
     }
     this.queue.push(job)
-    sseHub.emit({ type: 'paper-status', paperId, jobType: type, status: 'queued', jobId: job.id, at: new Date().toISOString() })
+    sseHub.emit({ type: 'paper-status', paperId, jobType: type, status: 'queued', jobId: taskId || job.id, at: new Date().toISOString() })
 
-    const persistTask = options.persistTask ?? true
     if (persistTask) {
       // Create the DB task before processing so the worker can reliably move it
-      // from pending -> active -> completed/failed.
+      // from pending -> active -> completed/failed. The generated task id is
+      // also stored on the in-memory job so a pending DB task can be cancelled
+      // without letting the queued job run later.
       prisma.task.create({
-        data: { paperId, type, status: 'pending' },
+        data: { ...(taskId ? { id: taskId } : {}), paperId, type, status: 'pending' },
       }).then(() => this.process()).catch(console.error)
       return job
     }
 
+    this.process()
+    return job
+  }
+
+  async cancelPendingTask(taskId: string, reason = 'Cancelled by user'): Promise<Job | null> {
+    const jobIndex = this.queue.findIndex((queuedJob) => queuedJob.taskId === taskId)
+    if (jobIndex < 0) return null
+
+    const [job] = this.queue.splice(jobIndex, 1)
+    job.status = 'failed'
+    job.error = reason
+    await this.markPaperJobFailed(job).catch(console.error)
+    sseHub.emit({ type: 'paper-status', paperId: job.paperId, jobType: job.type, status: 'failed', error: reason })
     this.process()
     return job
   }
@@ -84,10 +102,21 @@ class JobQueue {
     job.status = 'running'
 
     try {
-      await prisma.task.updateMany({
-        where: { paperId: job.paperId, type: job.type, status: 'pending' },
-        data: { status: 'active' },
-      })
+      if (job.taskId) {
+        const activated = await prisma.task.updateMany({
+          where: { id: job.taskId, status: 'pending' },
+          data: { status: 'active' },
+        })
+        if (activated.count === 0) {
+          const current = await prisma.task.findUnique({ where: { id: job.taskId }, select: { status: true } })
+          if (current?.status !== 'active') return
+        }
+      } else {
+        await prisma.task.updateMany({
+          where: { paperId: job.paperId, type: job.type, status: 'pending' },
+          data: { status: 'active' },
+        })
+      }
 
       sseHub.emit({ type: 'paper-status', paperId: job.paperId, jobType: job.type, status: 'processing' })
 
@@ -95,7 +124,7 @@ class JobQueue {
       job.status = 'completed'
 
       await prisma.task.updateMany({
-        where: { paperId: job.paperId, type: job.type, status: 'active' },
+        where: job.taskId ? { id: job.taskId, status: 'active' } : { paperId: job.paperId, type: job.type, status: 'active' },
         data: { status: 'completed', completedAt: new Date() },
       })
 
@@ -107,7 +136,7 @@ class JobQueue {
       await this.markPaperJobFailed(job)
 
       await prisma.task.updateMany({
-        where: { paperId: job.paperId, type: job.type, status: 'active' },
+        where: job.taskId ? { id: job.taskId, status: 'active' } : { paperId: job.paperId, type: job.type, status: 'active' },
         data: { status: 'failed', error: (error as Error).message, completedAt: new Date() },
       })
 
@@ -582,7 +611,7 @@ export async function recoverJobs() {
 
     for (const task of pendingTasks) {
       console.log(`[JobQueue] Recovering task: ${task.type} for paper ${task.paperId}`)
-      jobQueue.add(task.type as JobType, task.paperId, { persistTask: false })
+      jobQueue.add(task.type as JobType, task.paperId, { persistTask: false, taskId: task.id })
     }
   } catch (err) {
     console.error('[JobQueue] Failed to recover jobs:', err)

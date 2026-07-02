@@ -892,16 +892,41 @@ const removePattern = (p: string) => {
 const systemStatus = ref<any | null>(null)
 const systemStatusLoading = ref(false)
 const systemStatusError = ref('')
+const pendingQueueTasks = ref<any[]>([])
+const pendingQueueLimit = 5000 // Enough to include hundreds of pending tasks; the list itself scrolls internally.
+const selectedPendingTaskIds = ref<Set<string>>(new Set())
+const cancelTaskRunning = ref('')
 const maintenanceRunning = ref('')
 const maintenanceMessage = ref('')
 const maintenanceError = ref('')
+const pendingQueueTotal = computed(() => {
+  const rows = systemStatus.value?.tasks?.byTypeStatus || []
+  const total = rows
+    .filter((item: any) => item.status === 'pending')
+    .reduce((sum: number, item: any) => sum + Number(item.count || 0), 0)
+  return total || pendingQueueTasks.value.length
+})
+const pendingQueueHidden = computed(() => Math.max(0, pendingQueueTotal.value - pendingQueueTasks.value.length))
+const selectedPendingTasks = computed(() => pendingQueueTasks.value.filter((task) => selectedPendingTaskIds.value.has(task.id)))
+const allVisiblePendingSelected = computed(() => (
+  pendingQueueTasks.value.length > 0 && pendingQueueTasks.value.every((task) => selectedPendingTaskIds.value.has(task.id))
+))
+const pruneSelectedPendingTasks = () => {
+  const visibleIds = new Set(pendingQueueTasks.value.map((task) => task.id))
+  selectedPendingTaskIds.value = new Set([...selectedPendingTaskIds.value].filter((id) => visibleIds.has(id)))
+}
 
 const loadSystemStatus = async () => {
   systemStatusLoading.value = true
   systemStatusError.value = ''
   try {
-    const res = await api.getSystemStatus()
-    systemStatus.value = res.status
+    const [statusRes, tasksRes] = await Promise.all([
+      api.getSystemStatus(),
+      api.getTasks('pending', pendingQueueLimit),
+    ])
+    systemStatus.value = statusRes.status
+    pendingQueueTasks.value = tasksRes.tasks || []
+    pruneSelectedPendingTasks()
   } catch (err) {
     systemStatusError.value = (err as Error).message || '状态加载失败'
   } finally {
@@ -936,6 +961,27 @@ const formatDateTime = (value: unknown) => {
 const statusEntries = (record: Record<string, number> | undefined | null) => (
   Object.entries(record || {}).sort(([a], [b]) => a.localeCompare(b))
 )
+const taskTypeLabel = (type: string) => ({
+  parse_pdf: 'PDF 解析',
+  generate_embedding: '向量化',
+  summarize: '论文总结',
+  enrich_metadata: '元数据补全',
+}[type] || type)
+const shortId = (id: string) => id ? id.slice(0, 8) : '—'
+const togglePendingTaskSelection = (id: string, checked?: boolean) => {
+  const next = new Set(selectedPendingTaskIds.value)
+  const shouldSelect = checked ?? !next.has(id)
+  if (shouldSelect) next.add(id)
+  else next.delete(id)
+  selectedPendingTaskIds.value = next
+}
+const toggleAllVisiblePendingTasks = () => {
+  if (allVisiblePendingSelected.value) {
+    selectedPendingTaskIds.value = new Set()
+    return
+  }
+  selectedPendingTaskIds.value = new Set(pendingQueueTasks.value.map((task) => task.id))
+}
 
 const runMaintenance = async (
   action: 'embeddings' | 'mineru' | 'summaries',
@@ -965,6 +1011,63 @@ const runMaintenance = async (
     maintenanceError.value = (err as Error).message || '操作失败'
   } finally {
     maintenanceRunning.value = ''
+  }
+}
+
+const cancelQueuedTask = async (task: any) => {
+  const title = task?.paper?.title || task?.paperId || '该任务'
+  const confirmed = await confirm({
+    title: '取消队列任务',
+    message: `确定取消「${title}」的${taskTypeLabel(task.type)}队列任务？已开始运行的任务不能在这里取消。`,
+    confirmText: '取消任务',
+    danger: true,
+    icon: 'alert',
+  })
+  if (!confirmed) return
+
+  cancelTaskRunning.value = task.id
+  maintenanceMessage.value = ''
+  maintenanceError.value = ''
+  try {
+    await api.cancelTask(task.id)
+    selectedPendingTaskIds.value = new Set([...selectedPendingTaskIds.value].filter((id) => id !== task.id))
+    maintenanceMessage.value = '已取消队列任务'
+    await loadSystemStatus()
+  } catch (err) {
+    maintenanceError.value = (err as Error).message || '取消失败'
+  } finally {
+    cancelTaskRunning.value = ''
+  }
+}
+
+const cancelSelectedQueuedTasks = async () => {
+  const tasks = selectedPendingTasks.value
+  if (!tasks.length) return
+  const confirmed = await confirm({
+    title: '批量取消队列任务',
+    message: `确定取消已选中的 ${tasks.length} 个待执行任务？已开始运行的任务不能在这里取消。`,
+    confirmText: '取消选中任务',
+    danger: true,
+    icon: 'alert',
+  })
+  if (!confirmed) return
+
+  cancelTaskRunning.value = '__batch__'
+  maintenanceMessage.value = ''
+  maintenanceError.value = ''
+  try {
+    const results = await Promise.allSettled(tasks.map((task) => api.cancelTask(task.id)))
+    const failed = results.filter((result) => result.status === 'rejected').length
+    const succeeded = results.length - failed
+    selectedPendingTaskIds.value = new Set()
+    maintenanceMessage.value = failed
+      ? `已取消 ${succeeded} 个任务，失败 ${failed} 个（可能已开始运行或状态变化）`
+      : `已取消 ${succeeded} 个队列任务`
+    await loadSystemStatus()
+  } catch (err) {
+    maintenanceError.value = (err as Error).message || '批量取消失败'
+  } finally {
+    cancelTaskRunning.value = ''
   }
 }
 
@@ -2267,14 +2370,69 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <div class="status-section">
+              <div class="status-section task-queue-section">
                 <h4>任务队列记录</h4>
                 <div v-if="!systemStatus.tasks.byTypeStatus.length" class="empty-text">暂无任务记录</div>
                 <dl v-else>
                   <template v-for="item in systemStatus.tasks.byTypeStatus" :key="`${item.type}-${item.status}`">
-                    <dt>{{ item.type }} / {{ item.status }}</dt><dd>{{ formatNumber(item.count) }}</dd>
+                    <dt>{{ taskTypeLabel(item.type) }} / {{ item.status }}</dt><dd>{{ formatNumber(item.count) }}</dd>
                   </template>
                 </dl>
+
+                <div class="pending-queue-panel">
+                  <div class="pending-queue-header">
+                    <div>
+                      <span>待执行队列</span>
+                      <small>共 {{ formatNumber(pendingQueueTotal) }} 个 · 滚动查看全部 pending 任务</small>
+                    </div>
+                    <div class="pending-queue-actions">
+                      <button class="btn-ghost-xs" :disabled="!pendingQueueTasks.length || !!cancelTaskRunning" @click="toggleAllVisiblePendingTasks">
+                        {{ allVisiblePendingSelected ? '取消全选' : '全选全部' }}
+                      </button>
+                      <button class="btn-danger-sm" :disabled="!selectedPendingTasks.length || !!cancelTaskRunning || !!maintenanceRunning" @click="cancelSelectedQueuedTasks">
+                        {{ cancelTaskRunning === '__batch__' ? '取消中…' : `取消选中 (${selectedPendingTasks.length})` }}
+                      </button>
+                    </div>
+                  </div>
+                  <div v-if="!pendingQueueTasks.length" class="empty-text pending-queue-empty">暂无待执行任务</div>
+                  <template v-else>
+                    <div class="pending-queue-list" role="listbox" aria-label="待执行队列任务">
+                      <label
+                        v-for="task in pendingQueueTasks"
+                        :key="task.id"
+                        class="pending-queue-item"
+                        :class="{ selected: selectedPendingTaskIds.has(task.id) }"
+                      >
+                        <input
+                          type="checkbox"
+                          class="pending-queue-check"
+                          :checked="selectedPendingTaskIds.has(task.id)"
+                          :disabled="!!cancelTaskRunning || !!maintenanceRunning"
+                          @change="togglePendingTaskSelection(task.id, ($event.target as HTMLInputElement).checked)"
+                        />
+                        <div class="pending-queue-main">
+                          <div class="pending-queue-title-row">
+                            <strong>{{ taskTypeLabel(task.type) }}</strong>
+                            <span class="pending-queue-id">#{{ shortId(task.id) }}</span>
+                          </div>
+                          <span :title="task.paper?.title || task.paperId">{{ task.paper?.title || `论文 ${shortId(task.paperId)}` }}</span>
+                          <small>{{ formatDateTime(task.createdAt) }}</small>
+                        </div>
+                        <button
+                          class="btn-danger-sm"
+                          type="button"
+                          :disabled="!!cancelTaskRunning || !!maintenanceRunning"
+                          @click.stop.prevent="cancelQueuedTask(task)"
+                        >
+                          {{ cancelTaskRunning === task.id ? '取消中…' : '取消' }}
+                        </button>
+                      </label>
+                    </div>
+                    <div v-if="pendingQueueHidden" class="pending-queue-more">
+                      还有 {{ formatNumber(pendingQueueHidden) }} 个待执行任务未显示。可刷新同步最新队列状态。
+                    </div>
+                  </template>
+                </div>
               </div>
             </div>
           </template>
@@ -2688,6 +2846,131 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   padding: 3px 7px;
   background: var(--color-bg-card);
+}
+.task-queue-section {
+  grid-column: 1 / -1;
+}
+.pending-queue-panel {
+  margin-top: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--color-bg-muted) 48%, transparent), transparent 72px);
+}
+.pending-queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--color-text);
+}
+.pending-queue-header > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.pending-queue-header small {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--color-text-muted);
+}
+.pending-queue-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.pending-queue-empty {
+  padding: 12px 14px;
+}
+.pending-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 340px;
+  overflow: auto;
+  padding: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-text-muted) 35%, transparent) transparent;
+}
+.pending-queue-list::-webkit-scrollbar { width: 8px; }
+.pending-queue-list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-muted) 30%, transparent);
+  border-radius: 999px;
+}
+.pending-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--color-bg-card) 88%, var(--color-bg-muted));
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.pending-queue-item:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 36%, var(--color-border));
+  background: color-mix(in srgb, var(--color-primary-soft) 42%, var(--color-bg-card));
+}
+.pending-queue-item.selected {
+  border-color: color-mix(in srgb, var(--color-primary) 58%, var(--color-border));
+  background: color-mix(in srgb, var(--color-primary-soft) 62%, var(--color-bg-card));
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+.pending-queue-check {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-primary);
+  flex-shrink: 0;
+}
+.pending-queue-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.pending-queue-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pending-queue-main strong {
+  font-size: 12px;
+  color: var(--color-text);
+}
+.pending-queue-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.pending-queue-main .pending-queue-id {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.pending-queue-main small {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.pending-queue-more {
+  margin: 0 10px 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-bg-muted) 35%, transparent);
 }
 
 /* ── Setting Rows ────────────────────────────────────────────────────── */
@@ -3165,6 +3448,26 @@ onBeforeUnmount(() => {
 .btn-danger:hover {
   background: var(--color-error);
   color: #fff;
+}
+.btn-danger-sm {
+  padding: 5px 12px;
+  border: 1px solid var(--color-error);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-error);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.btn-danger-sm:hover:not(:disabled) {
+  background: var(--color-error);
+  color: #fff;
+}
+.btn-danger-sm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .btn-icon {
   width: 28px;
