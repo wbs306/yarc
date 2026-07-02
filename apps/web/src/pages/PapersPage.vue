@@ -448,11 +448,12 @@ const selectWorkspaceFile = async (node: FileNode) => {
 
 const saveWorkspaceFile = async () => {
   if (!selectedWorkspaceFile.value || !workspaceCanEdit.value || !workspaceDirty.value) return
+  const contentToSave = workspaceContent.value
   workspaceSaving.value = true
   filesError.value = ''
   try {
-    await api.saveFileContent(selectedWorkspaceFile.value.path, workspaceContent.value)
-    workspaceSavedContent.value = workspaceContent.value
+    await api.saveFileContent(selectedWorkspaceFile.value.path, contentToSave)
+    workspaceSavedContent.value = contentToSave
     snapshotCurrentWorkspaceTab()
     await loadWorkspaceFiles(true)
   } catch (err) {
@@ -1185,9 +1186,74 @@ const onRealtimeNotesChanged = (event: Event) => {
   if (paperId && currentId === paperId) noteStore.fetchNotes(paperId).catch(() => {})
 }
 
-const onRealtimeFilesChanged = () => {
+const normalizeWorkspaceFilePath = (path?: string | null) => (path || '').replace(/\\/g, '/').replace(/^\/+/, '')
+
+const refreshOpenWorkspaceFileContent = async (changedPath?: string) => {
+  const normalizedChangedPath = normalizeWorkspaceFilePath(changedPath)
+  const candidatePaths = new Set<string>()
+
+  if (isWorkspaceFile(selectedWorkspaceFile.value) && selectedWorkspaceFile.value.editable) {
+    candidatePaths.add(selectedWorkspaceFile.value.path)
+  }
+  for (const tab of openWorkspaceTabs.value) {
+    if (isWorkspaceFile(tab.file) && tab.file.editable && !tab.file.readonly) candidatePaths.add(tab.file.path)
+  }
+
+  for (const path of candidatePaths) {
+    // On exact save/create events we only need to refresh the affected file. For
+    // watcher `external-change` events, still refresh every open tab because the
+    // backend watcher intentionally coalesces quick filesystem changes.
+    if (normalizedChangedPath && path !== normalizedChangedPath) continue
+
+    try {
+      const res = await api.getFileContent(path)
+      const isCurrent = selectedWorkspacePath.value === path
+      const tab = openWorkspaceTabs.value.find((item) => item.file.path === path)
+      const previousSavedContent = isCurrent ? workspaceSavedContent.value : tab?.savedContent
+      const isDirty = isCurrent ? workspaceDirty.value : !!tab && tab.content !== tab.savedContent
+      const diskContentChanged = previousSavedContent !== undefined && previousSavedContent !== res.content
+
+      if (isCurrent) {
+        workspaceLanguage.value = res.language
+        workspaceModified.value = res.modified
+        workspaceSavedContent.value = res.content
+        if (!isDirty) workspaceContent.value = res.content
+      }
+
+      if (tab) {
+        tab.language = res.language
+        tab.modified = res.modified
+        tab.savedContent = res.content
+        if (!isDirty) tab.content = res.content
+      }
+
+      if (isCurrent) {
+        if (isDirty && diskContentChanged && workspaceContent.value !== res.content) {
+          filesError.value = '文件已在磁盘更新；当前有未保存修改，未自动覆盖。'
+        }
+        snapshotCurrentWorkspaceTab()
+      }
+    } catch (err) {
+      if (selectedWorkspacePath.value === path) {
+        filesError.value = (err as Error).message || '刷新文件内容失败'
+      }
+    }
+  }
+}
+
+const onRealtimeFilesChanged = (event: Event) => {
+  const detail = (event as CustomEvent)?.detail || {}
+  const action = typeof detail.action === 'string' ? detail.action : ''
+  const changedPath = typeof detail.path === 'string' ? detail.path : ''
+
   if (sidebarMode.value === 'files') {
     void loadWorkspaceFiles(true)
+  }
+
+  if (action === 'external-change') {
+    void refreshOpenWorkspaceFileContent()
+  } else if (changedPath && ['save', 'create-file'].includes(action)) {
+    void refreshOpenWorkspaceFileContent(changedPath)
   }
 }
 
