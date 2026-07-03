@@ -447,7 +447,7 @@ const selectWorkspaceFile = async (node: FileNode) => {
 }
 
 const saveWorkspaceFile = async () => {
-  if (!selectedWorkspaceFile.value || !workspaceCanEdit.value || !workspaceDirty.value) return
+  if (!selectedWorkspaceFile.value || !workspaceCanEdit.value || !workspaceDirty.value || workspaceSaving.value) return
   const contentToSave = workspaceContent.value
   workspaceSaving.value = true
   filesError.value = ''
@@ -1080,10 +1080,23 @@ const onResize = () => {
   }
 }
 
+const isSaveShortcut = (event: KeyboardEvent) =>
+  (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's'
+
+const onDocumentKeydown = (event: KeyboardEvent) => {
+  if (!isSaveShortcut(event)) return
+  if (hasPaper.value || sidebarMode.value !== 'files' || !selectedWorkspaceFile.value || !workspaceCanEdit.value) return
+
+  event.preventDefault()
+  event.stopPropagation()
+  void saveWorkspaceFile()
+}
+
 onMounted(async () => {
   window.addEventListener('resize', onResize)
   window.addEventListener('yarc-open-chat', openChatPanel)
   document.addEventListener('click', onDocumentClick)
+  document.addEventListener('keydown', onDocumentKeydown)
   document.addEventListener('scroll', closeAllContextMenus, true)
   const saved = localStorage.getItem('yarc-sidebar-width')
   if (saved) sidebarWidth.value = parseInt(saved)
@@ -1113,6 +1126,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   window.removeEventListener('yarc-open-chat', openChatPanel)
   document.removeEventListener('click', onDocumentClick)
+  document.removeEventListener('keydown', onDocumentKeydown)
   document.removeEventListener('scroll', closeAllContextMenus, true)
 })
 
@@ -2628,7 +2642,7 @@ const showSearchPaperPopup = (paper: any) => {
                     <button :class="{ active: markdownPreview }" @click="markdownPreview = true">预览</button>
                   </div>
                   <span :class="['dirty-dot', { active: workspaceDirty }]" :title="workspaceDirty ? '有未保存修改' : '已保存'" />
-                  <button class="save-workspace-btn" :disabled="!workspaceDirty || !workspaceCanEdit || workspaceSaving" @click="saveWorkspaceFile">
+                  <button class="save-workspace-btn" :disabled="!workspaceDirty || !workspaceCanEdit || workspaceSaving" title="保存（Ctrl/⌘+S）" @click="saveWorkspaceFile">
                     {{ workspaceSaving ? '保存中…' : '保存' }}
                   </button>
                 </template>
@@ -2667,6 +2681,7 @@ const showSearchPaperPopup = (paper: any) => {
                 :line-wrap="theme.editor.lineWrap"
                 :line-numbers="theme.editor.lineNumbers"
                 class="workspace-code-editor"
+                @save="saveWorkspaceFile"
               />
             </div>
 

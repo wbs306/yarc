@@ -33,7 +33,10 @@ const props = withDefaults(defineProps<{
   lineNumbers: true,
 })
 
-const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+  save: []
+}>()
 
 const host = ref<HTMLDivElement>()
 const minimap = ref<HTMLDivElement>()
@@ -154,7 +157,19 @@ function buildExtensions() {
     bracketMatching(),
     highlightActiveLine(),
     syntaxHighlighting(highlightStyle),
-    keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+    keymap.of([
+      {
+        key: 'Mod-s',
+        preventDefault: true,
+        run: () => {
+          emit('save')
+          return true
+        },
+      },
+      ...defaultKeymap,
+      ...historyKeymap,
+      indentWithTab,
+    ]),
     baseTheme,
     fontConf.of(fontTheme(props.fontSize)),
     tabConf.of(tabExtension(props.tabSize)),
