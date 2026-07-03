@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { EditorState, Compartment } from '@codemirror/state'
+import { EditorState, EditorSelection, Compartment } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, dropCursor } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { bracketMatching, foldGutter, indentOnInput, indentUnit, HighlightStyle, syntaxHighlighting, LanguageDescription } from '@codemirror/language'
@@ -54,6 +54,19 @@ const gutterConf = new Compartment()
 const fontTheme = (size: number) => EditorView.theme({ '&': { fontSize: `${size}px` } })
 const tabExtension = (n: number) => [EditorState.tabSize.of(n), indentUnit.of(' '.repeat(n))]
 const gutterExtension = (on: boolean) => (on ? [lineNumbers(), highlightActiveLineGutter(), foldGutter()] : [])
+const surroundPairs: Record<string, readonly [string, string]> = {
+  "'": ["'", "'"],
+  '"': ['"', '"'],
+  '`': ['`', '`'],
+  '(': ['(', ')'],
+  ')': ['(', ')'],
+  '[': ['[', ']'],
+  ']': ['[', ']'],
+  '{': ['{', '}'],
+  '}': ['{', '}'],
+  '<': ['<', '>'],
+  '>': ['<', '>'],
+}
 
 // Reuse the already-installed language packs to highlight fenced code blocks in markdown.
 const mdCodeLanguages = [
@@ -147,6 +160,33 @@ function isDark() {
   return document.documentElement.getAttribute('data-theme') === 'dark'
 }
 
+function surroundSelectedText(view: EditorView, open: string, close: string) {
+  if (props.readonly || view.state.selection.ranges.every((range) => range.empty)) return false
+
+  view.dispatch({
+    ...view.state.changeByRange((range) => {
+      if (range.empty) return { range }
+      const selectedText = view.state.sliceDoc(range.from, range.to)
+      return {
+        changes: { from: range.from, to: range.to, insert: `${open}${selectedText}${close}` },
+        range: EditorSelection.range(range.from + open.length, range.to + open.length),
+      }
+    }),
+    scrollIntoView: true,
+    userEvent: 'input.type',
+  })
+  return true
+}
+
+function handleSurroundSelectionKeydown(event: KeyboardEvent, view: EditorView) {
+  if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1) return false
+  const pair = surroundPairs[event.key]
+  if (!pair || !surroundSelectedText(view, pair[0], pair[1])) return false
+
+  event.preventDefault()
+  return true
+}
+
 function buildExtensions() {
   return [
     gutterConf.of(gutterExtension(props.lineNumbers)),
@@ -157,6 +197,7 @@ function buildExtensions() {
     bracketMatching(),
     highlightActiveLine(),
     syntaxHighlighting(highlightStyle),
+    EditorView.domEventHandlers({ keydown: handleSurroundSelectionKeydown }),
     keymap.of([
       {
         key: 'Mod-s',
