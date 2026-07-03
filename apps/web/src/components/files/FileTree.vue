@@ -40,6 +40,7 @@ const emit = defineEmits<{
   create: [parentPath: string, name: string, type: 'file' | 'directory']
   cancelCreate: []
   move: [node: FileNode, targetDirPath: string]
+  upload: [targetDirPath: string, files: File[]]
 }>()
 
 const loadExpandedPaths = () => {
@@ -235,6 +236,8 @@ const isProtectedDropDir = (path?: string | null) => {
 }
 const canDragNode = (node: FileNode) => !node.readonly && renamingPath.value !== node.path && props.creatingParentPath === undefined
 const canDropIntoDir = (path: string, readonly = false) => !readonly && !isProtectedDropDir(path)
+const isExternalFileDrag = (event: DragEvent) => Array.from(event.dataTransfer?.types || []).includes('Files')
+const getDroppedFiles = (event: DragEvent) => Array.from(event.dataTransfer?.files || [])
 
 const handleDragStart = (event: DragEvent, node: FileNode) => {
   if (!canDragNode(node)) {
@@ -256,7 +259,7 @@ const handleDirectoryDragOver = (event: DragEvent, node: FileNode) => {
   if (node.type !== 'directory' || !canDropIntoDir(node.path, node.readonly)) return
   event.preventDefault()
   event.stopPropagation()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  if (event.dataTransfer) event.dataTransfer.dropEffect = isExternalFileDrag(event) ? 'copy' : 'move'
   dropTargetPath.value = node.path
 }
 
@@ -280,6 +283,13 @@ const handleDirectoryDrop = (event: DragEvent, targetDirPath: string) => {
   event.preventDefault()
   event.stopPropagation()
   dropTargetPath.value = null
+
+  const files = getDroppedFiles(event)
+  if (files.length) {
+    if (canDropIntoDir(targetDirPath)) emit('upload', targetDirPath, files)
+    return
+  }
+
   const node = readDroppedNode(event)
   if (!node || node.path === targetDirPath || targetDirPath.startsWith(`${node.path}/`)) return
   emit('move', node, targetDirPath)
@@ -291,7 +301,7 @@ const handleTreeDragOver = (event: DragEvent) => {
   if (!canDropIntoDir(props.parentPath)) return
   event.preventDefault()
   event.stopPropagation()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  if (event.dataTransfer) event.dataTransfer.dropEffect = isExternalFileDrag(event) ? 'copy' : 'move'
   dropTargetPath.value = props.parentPath
 }
 
@@ -484,6 +494,7 @@ defineExpose({ startRename })
           @create="(parentPath, name, type) => emit('create', parentPath, name, type)"
           @cancel-create="emit('cancelCreate')"
           @move="(child, targetDirPath) => emit('move', child, targetDirPath)"
+          @upload="(targetDirPath, files) => emit('upload', targetDirPath, files)"
         />
       </Transition>
     </div>

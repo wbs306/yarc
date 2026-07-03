@@ -172,7 +172,10 @@ const workspaceLanguage = ref('plaintext')
 const workspaceModified = ref('')
 const workspaceContentLoading = ref(false)
 const workspaceSaving = ref(false)
+const workspaceUploading = ref(false)
 const workspaceOpeningSystem = ref(false)
+const workspaceUploadInput = ref<HTMLInputElement | null>(null)
+const workspaceUploadTargetPath = ref('')
 const selectedWorkspacePath = computed(() => selectedWorkspaceFile.value?.path || '')
 const workspaceDirty = computed(() => workspaceContent.value !== workspaceSavedContent.value)
 const workspaceCanEdit = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.editable && !selectedWorkspaceFile.value.readonly)
@@ -282,6 +285,61 @@ const startCreate = (parentPath: string, type: 'file' | 'directory') => {
 
 const cancelCreate = () => {
   creatingParentPath.value = undefined
+}
+
+const openWorkspaceUploadPicker = (parentPath = '') => {
+  if (isPapersWorkspacePath(parentPath)) {
+    filesError.value = 'papers/ 是受保护目录，不能在文件管理器中修改'
+    return
+  }
+  workspaceUploadTargetPath.value = parentPath
+  if (workspaceUploadInput.value) workspaceUploadInput.value.value = ''
+  workspaceUploadInput.value?.click()
+}
+
+const uploadWorkspaceFiles = async (files: File[], parentPath = '') => {
+  if (workspaceUploading.value) return
+  const uploadFiles = files.filter((file) => file.size >= 0)
+  if (!uploadFiles.length) return
+  if (isPapersWorkspacePath(parentPath)) {
+    filesError.value = 'papers/ 是受保护目录，不能在文件管理器中修改'
+    return
+  }
+
+  workspaceUploading.value = true
+  filesError.value = ''
+  const uploaded: FileNode[] = []
+  const errors: string[] = []
+
+  for (const file of uploadFiles) {
+    try {
+      const res = await api.uploadFile(parentPath, file)
+      uploaded.push(res.file as FileNode)
+    } catch (err) {
+      errors.push(`${file.name}: ${(err as Error).message || '上传失败'}`)
+    }
+  }
+
+  try {
+    await loadWorkspaceFiles(true)
+    if (uploaded.length === 1) {
+      const uploadedNode = findWorkspaceNode(workspaceFiles.value, uploaded[0].path) || uploaded[0]
+      if (uploadedNode.type === 'file') await selectWorkspaceFile(uploadedNode)
+    }
+  } finally {
+    workspaceUploading.value = false
+  }
+
+  if (errors.length) {
+    filesError.value = uploaded.length
+      ? `已上传 ${uploaded.length} 个文件，${errors.length} 个失败：${errors.join('；')}`
+      : `上传失败：${errors.join('；')}`
+  }
+}
+
+const handleWorkspaceUploadInput = (event: Event) => {
+  const files = Array.from((event.target as HTMLInputElement).files || [])
+  void uploadWorkspaceFiles(files, workspaceUploadTargetPath.value)
 }
 
 const handleCreate = async (parentPath: string, name: string, type: 'file' | 'directory') => {
@@ -606,10 +664,13 @@ const readDraggedWorkspaceNode = (event: DragEvent): FileNode | null => {
   }
 }
 
+const isExternalWorkspaceFileDrag = (event: DragEvent) => Array.from(event.dataTransfer?.types || []).includes('Files')
+const getDroppedWorkspaceFiles = (event: DragEvent) => Array.from(event.dataTransfer?.files || [])
+
 const handleWorkspaceRootDragOver = (event: DragEvent) => {
   if (isWorkspaceFileNodeDragTarget(event)) return
   event.preventDefault()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  if (event.dataTransfer) event.dataTransfer.dropEffect = isExternalWorkspaceFileDrag(event) ? 'copy' : 'move'
   workspaceRootDropActive.value = true
 }
 
@@ -622,6 +683,13 @@ const handleWorkspaceRootDrop = (event: DragEvent) => {
   if (isWorkspaceFileNodeDragTarget(event)) return
   event.preventDefault()
   workspaceRootDropActive.value = false
+
+  const files = getDroppedWorkspaceFiles(event)
+  if (files.length) {
+    void uploadWorkspaceFiles(files, '')
+    return
+  }
+
   const node = readDraggedWorkspaceNode(event)
   if (node) void moveWorkspaceNode(node, '')
 }
@@ -704,6 +772,12 @@ const fileCtxNewFile = () => {
   const parentPath = fileContextCreateParentPath()
   closeFileContextMenu()
   startCreate(parentPath, 'file')
+}
+
+const fileCtxUpload = () => {
+  const parentPath = fileContextCreateParentPath()
+  closeFileContextMenu()
+  openWorkspaceUploadPicker(parentPath)
 }
 
 const fileCtxRename = () => {
@@ -2207,8 +2281,17 @@ const showSearchPaperPopup = (paper: any) => {
           >
             <div class="section-divider">
               <span class="divider-text">data/</span>
+              <button class="add-search-cat-btn" :disabled="workspaceUploading" @click.stop="openWorkspaceUploadPicker('')" title="上传文件">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+              </button>
             </div>
-            <div v-if="filesLoading" class="side-empty">正在加载文件…</div>
+            <input ref="workspaceUploadInput" class="visually-hidden-input" type="file" multiple @change="handleWorkspaceUploadInput" />
+            <div v-if="workspaceUploading" class="side-empty">正在上传文件…</div>
+            <div v-else-if="filesLoading" class="side-empty">正在加载文件…</div>
             <div v-else-if="filesError" class="side-empty error-text">{{ filesError }}</div>
             <div v-else-if="!workspaceFiles.length" class="side-empty">暂无文件</div>
             <FileTree
@@ -2223,6 +2306,7 @@ const showSearchPaperPopup = (paper: any) => {
               @create="handleCreate"
               @cancel-create="cancelCreate"
               @move="moveWorkspaceNode"
+              @upload="(targetDirPath, files) => uploadWorkspaceFiles(files, targetDirPath)"
             />
           </div>
 
@@ -2359,6 +2443,10 @@ const showSearchPaperPopup = (paper: any) => {
               <button class="ctx-item" :disabled="!canCreateInFileContext()" @click="fileCtxNewFile">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
                 新建文件
+              </button>
+              <button class="ctx-item" :disabled="!canCreateInFileContext() || workspaceUploading" @click="fileCtxUpload">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                上传文件
               </button>
               <template v-if="fileContextMenu.node">
                 <div class="ctx-sep" />
@@ -4162,9 +4250,21 @@ const showSearchPaperPopup = (paper: any) => {
   transition: all var(--transition);
 }
 
-.add-search-cat-btn:hover {
+.add-search-cat-btn:hover:not(:disabled) {
   background: var(--color-bg-muted);
   color: var(--color-primary);
+}
+.add-search-cat-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.visually-hidden-input {
+  position: fixed;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .search-category-item {
