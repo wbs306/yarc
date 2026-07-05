@@ -3622,8 +3622,8 @@ const showSearchPaperPopup = (paper: any) => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px 28px var(--editor-scroll-bottom-gap, min(42vh, 360px));
-  scroll-padding-bottom: var(--editor-scroll-bottom-gap, min(42vh, 360px));
+  padding: 24px 28px 32px;
+  scroll-padding-bottom: 32px;
   color: var(--color-text);
 }
 .workspace-md-preview :deep(h1) { font-size: 24px; font-weight: 700; margin: 20px 0 12px; }
