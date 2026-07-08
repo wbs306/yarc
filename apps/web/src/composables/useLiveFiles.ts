@@ -32,6 +32,8 @@ export interface LiveFileClient {
 }
 
 const clients = new Map<string, LiveFileClient>()
+const RECONNECT_BASE_MS = 500
+const RECONNECT_MAX_MS = 15_000
 
 const fromBase64 = (value: string) => {
   const binary = window.atob(value)
@@ -70,8 +72,12 @@ export function useLiveFiles() {
     const conflict = ref(false)
     const error = ref('')
     const status = ref<LiveFileStatus | null>(null)
-    const ws = new WebSocket(liveFileUrl(path))
+
+    let ws: WebSocket | null = null
     let closedByClient = false
+    let reconnectTimer: number | null = null
+    let reconnectAttempt = 0
+    let pendingFlushRequested = false
     let readyResolve: (() => void) | null = null
     let readyReject: ((err: Error) => void) | null = null
     let pendingFlushResolve: (() => void) | null = null
@@ -89,6 +95,33 @@ export function useLiveFiles() {
       pendingFlushReject = null
     }
 
+    const sendJson = (message: unknown) => {
+      if (ws?.readyState !== WebSocket.OPEN) return false
+      ws.send(JSON.stringify(message))
+      return true
+    }
+
+    const sendFullLocalStateIfNeeded = () => {
+      if (!dirty.value) return
+      sendJson({ type: 'update', update: toBase64(Y.encodeStateAsUpdate(ydoc)) })
+    }
+
+    const requestFlush = () => {
+      pendingFlushRequested = true
+      if (sendJson({ type: 'flush' })) pendingFlushRequested = false
+    }
+
+    const scheduleReconnect = () => {
+      if (closedByClient || reconnectTimer !== null) return
+      const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * (2 ** reconnectAttempt))
+      reconnectAttempt += 1
+      error.value = `实时文件连接已断开，${Math.round(delay / 1000) || 1} 秒后重连…`
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null
+        connect()
+      }, delay)
+    }
+
     ytext.observe(() => {
       content.value = ytext.toString()
     })
@@ -96,88 +129,33 @@ export function useLiveFiles() {
     ydoc.on('update', (update: Uint8Array, origin: unknown) => {
       if (origin === 'server') return
       dirty.value = true
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'update', update: toBase64(update) }))
+      if (!sendJson({ type: 'update', update: toBase64(update) })) {
+        // The next successful connection sends the full local Y.Doc state, so
+        // edits made while offline are preserved without queuing every update.
+        scheduleReconnect()
       }
     })
 
-    const client: LiveFileClient = {
-      path,
-      ydoc,
-      ytext,
-      content,
-      language,
-      modified,
-      connected,
-      ready,
-      dirty,
-      saving,
-      conflict,
-      error,
-      status,
-      flush: () => {
-        if (conflict.value) return Promise.reject(new Error('文件存在冲突，请先处理冲突'))
-        if (ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('实时文件连接未建立'))
-        ws.send(JSON.stringify({ type: 'flush' }))
-        if (!dirty.value && !saving.value) return Promise.resolve()
-        return new Promise<void>((resolve, reject) => {
-          pendingFlushResolve = resolve
-          pendingFlushReject = reject
-          window.setTimeout(() => {
-            if (pendingFlushReject === reject) clearPendingFlush(new Error('保存超时'))
-          }, 10_000)
-        })
-      },
-      resolveConflict: (strategy) => {
-        if (ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('实时文件连接未建立'))
-        ws.send(JSON.stringify({ type: 'resolve-conflict', strategy }))
-        return new Promise<void>((resolve, reject) => {
-          pendingFlushResolve = resolve
-          pendingFlushReject = reject
-          window.setTimeout(() => {
-            if (pendingFlushReject === reject) clearPendingFlush(new Error('冲突处理超时'))
-          }, 10_000)
-        })
-      },
-      syncContent: (nextContent) => {
-        const current = ytext.toString()
-        if (current === nextContent) return
-        ydoc.transact(() => {
-          ytext.delete(0, ytext.length)
-          ytext.insert(0, nextContent)
-        }, 'server')
-        content.value = nextContent
-      },
-      close: () => {
-        closedByClient = true
-        try { ws.close() } catch { /* ignore */ }
-        ydoc.destroy()
-        clients.delete(path)
-      },
-    }
-
-    ws.onopen = () => {
-      connected.value = true
-      error.value = ''
-    }
-
-    ws.onmessage = (event) => {
+    const handleMessage = (event: MessageEvent) => {
       try {
         const msg = JSON.parse(String(event.data))
         if (msg.type === 'init') {
+          const hadLocalDirty = dirty.value
           language.value = msg.language || 'plaintext'
           modified.value = msg.modified || ''
           Y.applyUpdate(ydoc, fromBase64(msg.update), 'server')
           content.value = ytext.toString()
           if (msg.status) {
             status.value = msg.status
-            dirty.value = !!msg.status.dirty
+            dirty.value = !!msg.status.dirty || hadLocalDirty
             saving.value = !!msg.status.saving
             conflict.value = !!msg.status.conflict
           }
           ready.value = true
           readyResolve?.()
           readyResolve = null
+          if (hadLocalDirty) sendFullLocalStateIfNeeded()
+          if (pendingFlushRequested) requestFlush()
           return
         }
         if (msg.type === 'update' && typeof msg.update === 'string') {
@@ -203,8 +181,10 @@ export function useLiveFiles() {
         }
         if (msg.type === 'error') {
           error.value = msg.message || '实时文件同步失败'
-          readyReject?.(new Error(error.value))
-          readyReject = null
+          if (!ready.value) {
+            readyReject?.(new Error(error.value))
+            readyReject = null
+          }
           clearPendingFlush(new Error(error.value))
         }
       } catch (err) {
@@ -212,28 +192,100 @@ export function useLiveFiles() {
       }
     }
 
-    ws.onerror = () => {
-      error.value = '实时文件连接失败'
-      readyReject?.(new Error(error.value))
-      readyReject = null
-      clearPendingFlush(new Error(error.value))
-    }
+    function connect() {
+      if (closedByClient) return
+      try { ws?.close() } catch { /* ignore */ }
+      ws = new WebSocket(liveFileUrl(path))
 
-    ws.onclose = () => {
-      connected.value = false
-      if (!closedByClient) {
-        error.value = error.value || '实时文件连接已断开'
-        clearPendingFlush(new Error(error.value))
+      ws.onopen = () => {
+        connected.value = true
+        reconnectAttempt = 0
+        error.value = ''
+      }
+      ws.onmessage = handleMessage
+      ws.onerror = () => {
+        connected.value = false
+        if (!closedByClient) {
+          error.value = '实时文件连接失败，准备重连…'
+        }
+      }
+      ws.onclose = () => {
+        connected.value = false
+        if (!closedByClient) {
+          // Keep pending flush promises open across reconnects. After init, the
+          // client resends dirty local state and any requested flush.
+          scheduleReconnect()
+        }
       }
     }
 
+    const client: LiveFileClient = {
+      path,
+      ydoc,
+      ytext,
+      content,
+      language,
+      modified,
+      connected,
+      ready,
+      dirty,
+      saving,
+      conflict,
+      error,
+      status,
+      flush: () => {
+        if (conflict.value) return Promise.reject(new Error('文件存在冲突，请先处理冲突'))
+        requestFlush()
+        if (!dirty.value && !saving.value && !pendingFlushRequested) return Promise.resolve()
+        return new Promise<void>((resolve, reject) => {
+          pendingFlushResolve = resolve
+          pendingFlushReject = reject
+          window.setTimeout(() => {
+            if (pendingFlushReject === reject) clearPendingFlush(new Error('保存超时'))
+          }, 20_000)
+        })
+      },
+      resolveConflict: (strategy) => {
+        if (!sendJson({ type: 'resolve-conflict', strategy })) return Promise.reject(new Error('实时文件连接未建立'))
+        return new Promise<void>((resolve, reject) => {
+          pendingFlushResolve = resolve
+          pendingFlushReject = reject
+          window.setTimeout(() => {
+            if (pendingFlushReject === reject) clearPendingFlush(new Error('冲突处理超时'))
+          }, 10_000)
+        })
+      },
+      syncContent: (nextContent) => {
+        const current = ytext.toString()
+        if (current === nextContent) return
+        ydoc.transact(() => {
+          ytext.delete(0, ytext.length)
+          ytext.insert(0, nextContent)
+        }, 'server')
+        content.value = nextContent
+      },
+      close: () => {
+        closedByClient = true
+        if (reconnectTimer !== null) {
+          window.clearTimeout(reconnectTimer)
+          reconnectTimer = null
+        }
+        try { ws?.close() } catch { /* ignore */ }
+        ydoc.destroy()
+        clients.delete(path)
+      },
+    }
+
     clients.set(path, client)
+    connect()
     try {
       await readyPromise
       return client
     } catch (err) {
       clients.delete(path)
-      try { ws.close() } catch { /* ignore */ }
+      closedByClient = true
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
+      try { (ws as WebSocket | null)?.close() } catch { /* ignore */ }
       ydoc.destroy()
       throw err
     }
