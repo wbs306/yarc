@@ -218,6 +218,11 @@ export function useApi() {
     getBranches: (convId: string) =>
       request<{ branches: any[] }>(`/conversations/${convId}/branches`),
 
+    getConversationContextUsage: (convId: string, branchId?: string) =>
+      request<{ contextUsage: { tokens: number | null; contextWindow: number; percent: number | null; model?: string } | null }>(`/conversations/${convId}/context-usage`, {
+        params: branchId ? { branchId } : undefined,
+      }),
+
     switchBranch: (convId: string, branchId: string) =>
       request<{ messages: any[] }>(`/conversations/${convId}/switch-branch/${branchId}`, { method: 'POST' }),
 

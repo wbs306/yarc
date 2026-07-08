@@ -208,6 +208,85 @@ export class PiService {
     return { reloaded: true, reason }
   }
 
+  async getConversationContextUsage(
+    conversationId: string,
+    branchId = 'main'
+  ): Promise<{ tokens: number | null; contextWindow: number; percent: number | null; model?: string } | null> {
+    await this.initPi()
+    if (!this.piModule) return null
+    await this.refreshPiState()
+
+    const { createAgentSession, DefaultResourceLoader, SessionManager } = this.piModule
+    const agentWorkspace = await ensureAgentWorkspace()
+    const sessionDir = join(config.dataDir, '.pi', 'agent', 'sessions')
+
+    const [conv, info] = await Promise.all([
+      prisma.conversation.findUnique({ where: { id: conversationId }, select: { model: true } }),
+      getPiSessionMetadata(conversationId, branchId),
+    ])
+    if (!conv) return null
+
+    const modelId = conv.model || info?.model || undefined
+    let model: any = undefined
+    if (modelId) {
+      const parts = modelId.split('/')
+      if (parts.length === 2) model = this.modelRegistry?.find(parts[0], parts[1])
+      if (!model) {
+        const available = await this.modelRegistry?.getAvailable()
+        model = available?.find((m: any) => m.id === modelId)
+      }
+    }
+
+    const sessionFile = info?.sessionFile
+    if (!sessionFile || !(await this.fileExists(sessionFile))) {
+      const contextWindow = Number(model?.contextWindow || 0)
+      return {
+        tokens: 0,
+        contextWindow,
+        percent: contextWindow > 0 ? 0 : null,
+        model: model?.id || modelId,
+      }
+    }
+
+    let session: any
+    try {
+      const resourceLoader = new DefaultResourceLoader({
+        cwd: agentWorkspace.cwd,
+        agentDir: agentWorkspace.agentDir,
+        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
+          agentsFiles: base.agentsFiles.filter((file) => file.path !== agentWorkspace.legacyAgentsMd),
+        }),
+        systemPromptOverride: (baseSystemPrompt?: string) => baseSystemPrompt?.trim() || DEFAULT_CHAT_SYSTEM_PROMPT,
+      })
+      await resourceLoader.reload()
+
+      const sessionManager = SessionManager.open(sessionFile, sessionDir, agentWorkspace.cwd)
+      const result = await createAgentSession({
+        sessionManager,
+        authStorage: this.authStorage,
+        modelRegistry: this.modelRegistry,
+        ...(model ? { model } : {}),
+        resourceLoader,
+      })
+      session = result.session
+
+      const usage = session.getContextUsage?.()
+      const contextWindow = Number(usage?.contextWindow ?? session.model?.contextWindow ?? model?.contextWindow ?? 0)
+      const tokens = usage?.tokens ?? 0
+      return {
+        tokens,
+        contextWindow,
+        percent: usage?.percent ?? (contextWindow > 0 && tokens !== null ? (tokens / contextWindow) * 100 : null),
+        model: session.model?.id || model?.id || modelId,
+      }
+    } catch (err) {
+      console.warn('[PiService] getConversationContextUsage failed:', err)
+      return null
+    } finally {
+      await session?.dispose?.()
+    }
+  }
+
   /**
    * Initialize a lightweight Pi session for extension loading.
    * This is used at startup to trigger extension loading (e.g., WeChat auto-reconnect).

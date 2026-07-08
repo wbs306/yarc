@@ -53,6 +53,14 @@ conversations.get('/:id/branches', async (c) => {
   return c.json({ branches })
 })
 
+// GET /api/conversations/:id/context-usage
+conversations.get('/:id/context-usage', async (c) => {
+  const id = c.req.param('id')
+  const branchId = c.req.query('branchId') || 'main'
+  const contextUsage = await piService.getConversationContextUsage(id, branchId)
+  return c.json({ contextUsage })
+})
+
 // POST /api/conversations/:id/switch-branch/:branchId
 conversations.post('/:id/switch-branch/:branchId', async (c) => {
   const convId = c.req.param('id')

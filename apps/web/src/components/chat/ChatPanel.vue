@@ -755,6 +755,29 @@ const isStreamingMsg = (msg: any) => chatStore.isStreaming && chatStore.streamin
 
 const currentConvTitle = computed(() => chatStore.conversations.find(c => c.id === chatStore.currentConvId)?.title || '新对话')
 
+const formatTokenCount = (value: number | null | undefined) => {
+  if (value === null || value === undefined) return '?'
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`
+  return String(value)
+}
+const contextUsageLabel = computed(() => {
+  const usage = chatStore.currentContextUsage
+  if (!usage) return ''
+  const tokens = formatTokenCount(usage.tokens)
+  const windowSize = usage.contextWindow ? formatTokenCount(usage.contextWindow) : ''
+  const percent = usage.percent === null || usage.percent === undefined ? '' : ` · ${usage.percent.toFixed(1)}%`
+  return windowSize ? `${tokens}/${windowSize}${percent}` : tokens
+})
+const contextUsageTitle = computed(() => {
+  const usage = chatStore.currentContextUsage
+  if (!usage) return ''
+  const tokenText = usage.tokens === null ? '未知' : usage.tokens.toLocaleString()
+  const windowText = usage.contextWindow ? usage.contextWindow.toLocaleString() : '未知'
+  const percentText = usage.percent === null || usage.percent === undefined ? '未知' : `${usage.percent.toFixed(2)}%`
+  return `当前分支上下文 token：${tokenText} / ${windowText}（${percentText}）`
+})
+
 // Extract session state from the latest assistant message that has it
 const sessionState = computed(() => {
   const msgs = chatStore.messages
@@ -837,9 +860,8 @@ const sessionState = computed(() => {
         </Transition>
       </div>
       <div class="chat-header-actions">
-        <div v-if="sessionState" class="session-state">
-          <span class="state-model" :title="sessionState.model">{{ sessionState.model.split('/').pop() || '未设置' }}</span>
-          <span v-if="sessionState.thinkingLevel !== 'off'" class="state-thinking">{{ sessionState.thinkingLevel }}</span>
+        <div v-if="contextUsageLabel" class="session-state">
+          <span class="state-context" :title="contextUsageTitle">CTX {{ contextUsageLabel }}</span>
         </div>
         <button class="tb-btn" @click="chatStore.createConversation()" title="新对话"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="tb-btn" @click="emit('close')" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -1075,16 +1097,16 @@ const sessionState = computed(() => {
 .btw-answer { font-size: 13px; line-height: 1.6; color: var(--color-text); }
 .btw-answer :deep(p) { margin: 0 0 8px; }
 .btw-answer :deep(p:last-child) { margin-bottom: 0; }
-.chat-header { height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 8px; border-bottom: 1px solid var(--color-border); flex-shrink: 0; position: relative; z-index: 20; }
+.chat-header { height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 8px; border-bottom: 1px solid var(--color-border); flex-shrink: 0; position: relative; z-index: 20; }
 .chat-header-actions { display: flex; gap: 2px; flex-shrink: 0; }
-.conv-selector { position: relative; flex: 1; min-width: 0; }
-.conv-trigger { display: flex; align-items: center; gap: 6px; padding: 7px 14px; border: none; background: transparent; color: var(--color-text); cursor: pointer; border-radius: var(--radius-sm); width: 100%; }
+.conv-selector { flex: 1; min-width: 0; }
+.conv-trigger { display: flex; align-items: center; gap: 6px; padding: 7px 8px; border: none; background: transparent; color: var(--color-text); cursor: pointer; border-radius: var(--radius-sm); width: 100%; }
 .conv-trigger:hover { background: var(--color-bg-muted); }
 .conv-trigger-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .conv-trigger-chevron { flex-shrink: 0; transition: transform 0.15s; opacity: 0.5; }
 .conv-trigger-chevron.open { transform: rotate(180deg); }
-.conv-dropdown { position: absolute; top: calc(100% + 4px); left: 0; right: 0; max-height: 600px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,0.12); display: flex; flex-direction: column; overflow: hidden; z-index: 50; }
-.conv-dropdown-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 8px; border-bottom: 1px solid var(--color-border); }
+.conv-dropdown { position: absolute; top: calc(100% + 4px); left: 8px; width: 84%; max-height: 600px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,0.12); display: flex; flex-direction: column; overflow: hidden; z-index: 50; box-sizing: border-box; }
+.conv-dropdown-header { display: flex; align-items: center; justify-content: space-between; margin: 4px 4px 0; padding: 8px 10px; border-radius: var(--radius-sm); }
 .conv-dropdown-title { font-size: 12px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
 .conv-new-btn { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--color-border); background: var(--color-bg); color: var(--color-text-secondary); border-radius: var(--radius-sm); cursor: pointer; }
 .conv-new-btn:hover { color: var(--color-primary); border-color: var(--color-primary); }
@@ -1116,6 +1138,7 @@ const sessionState = computed(() => {
 .session-state { display: flex; align-items: center; gap: 6px; margin-right: 8px; }
 .state-model { font-size: 11px; color: var(--color-text-muted); padding: 2px 8px; background: var(--color-bg-muted); border-radius: 999px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .state-thinking { font-size: 10px; color: var(--color-primary); padding: 2px 6px; background: rgba(99,102,241,0.1); border-radius: 999px; }
+.state-context { font-size: 10px; color: var(--color-text-secondary); padding: 2px 6px; background: var(--color-bg-muted); border-radius: 999px; white-space: nowrap; }
 .chat-messages-wrap { position: relative; flex: 1; min-height: 0; }
 .chat-messages { position: absolute; inset: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .scroll-bottom-btn { position: absolute; bottom: 8px; left: 12px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--color-border); background: var(--color-bg-card); color: var(--color-text-secondary); border-radius: 50%; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 5; transition: opacity 0.15s; }
@@ -1252,7 +1275,7 @@ const sessionState = computed(() => {
   .chat-messages { padding: 12px; }
   .chat-input-area { padding: 10px 10px calc(10px + env(safe-area-inset-bottom, 0px)); }
   .chat-textarea { font-size: 16px; }
-  .conv-dropdown { min-width: 240px; left: -8px; }
+  .conv-dropdown { left: 8px; width: 84%; }
 }
 
 /* UI Context bridge styles */

@@ -43,6 +43,7 @@ export interface BtwItem {
   cancelled?: boolean
   createdAt: string
 }
+export interface ContextUsageInfo { tokens: number | null; contextWindow: number; percent: number | null; model?: string }
 
 const MODEL_KEY = 'yarc-current-model'
 const EFFORT_KEY = 'yarc-reasoning-effort'
@@ -60,6 +61,7 @@ export const useChatStore = defineStore('chat', () => {
   const modelsError = ref('')
   const chatError = ref('')
   const pendingPrompt = ref('')
+  const currentContextUsage = ref<ContextUsageInfo | null>(null)
 
   // Branches
   const branches = ref<BranchInfo[]>([])
@@ -382,6 +384,15 @@ export const useChatStore = defineStore('chat', () => {
     } catch { return [] }
   }
 
+  const loadContextUsage = async (convId: string, branchId: string) => {
+    try {
+      const r = await api.getConversationContextUsage(convId, branchId)
+      if (currentConvId.value === convId && currentBranchId.value === branchId) currentContextUsage.value = r.contextUsage
+    } catch {
+      if (currentConvId.value === convId && currentBranchId.value === branchId) currentContextUsage.value = null
+    }
+  }
+
   const selectConversation = async (id: string) => {
     if (!id) return
 
@@ -407,6 +418,9 @@ export const useChatStore = defineStore('chat', () => {
     if (target) {
       currentBranchId.value = target
       await loadBranchMsgs(id, target)
+      await loadContextUsage(id, target)
+    } else {
+      currentContextUsage.value = null
     }
     syncStream()
     refreshActiveInteraction()
@@ -426,6 +440,7 @@ export const useChatStore = defineStore('chat', () => {
       await loadBranchMsgs(currentConvId.value, branchId)
       currentBranchId.value = branchId
     }
+    await loadContextUsage(currentConvId.value, branchId)
   }
 
   const createConversation = async (paperId?: string) => {
@@ -446,6 +461,7 @@ export const useChatStore = defineStore('chat', () => {
     await loadBranches(r.conversation.id)
     const main = branches.value.find(b => b.branchName === "main")
     if (main) { currentBranchId.value = main.id; branchCache.value.set(main.id, []) }
+    currentContextUsage.value = null
     syncStream()
     return r.conversation
   }
@@ -758,7 +774,10 @@ export const useChatStore = defineStore('chat', () => {
 
           if (d.type === 'done') {
             const bid = msg?.branchId || currentBranchId.value
-            if (bid) await loadBranchMsgs(convId, bid, true)
+            if (bid) {
+              await loadBranchMsgs(convId, bid, true)
+              await loadContextUsage(convId, bid)
+            }
             await loadBranches(convId)
             // Detect new subagent runs from this turn
             detectSubagentRuns().catch(() => {})
@@ -905,7 +924,7 @@ export const useChatStore = defineStore('chat', () => {
       if (streamCompleted) {
         if (bid) {
           branchCache.value.delete(bid)
-          loadBranchMsgs(convId, bid).catch(() => {})
+          loadBranchMsgs(convId, bid).then(() => loadContextUsage(convId, bid)).catch(() => {})
         }
       } else if (currentConvId.value === convId) {
         scheduleStreamReconnect(convId, navigator.onLine === false ? 5000 : 1500)
@@ -928,7 +947,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   return {
-    conversations, currentConvId, messages, models, modelsError, chatError, pendingPrompt,
+    conversations, currentConvId, messages, models, modelsError, chatError, pendingPrompt, currentContextUsage,
     currentModel, reasoningEffort, isStreaming, streamingConvId, streamingMessageId, streamingContent,
     pdfContext, branches, currentBranchId, branchCache, interactions, activeInteractionId, activeInteraction,
     notificationInteractions, btwItems, btwPanelOpen,
