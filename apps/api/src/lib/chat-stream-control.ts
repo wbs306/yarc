@@ -4,6 +4,7 @@ interface CancelEntry {
 }
 
 const cancelledStreams = new Map<string, CancelEntry>()
+const abortHandlers = new Map<string, Set<() => void>>()
 
 // Auto-cleanup interval: remove expired entries every 5 minutes.
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000
@@ -35,6 +36,9 @@ export const chatStreamControl = {
       messageId,
       expiresAt: Date.now() + ENTRY_TTL_MS,
     })
+    for (const handler of abortHandlers.get(messageId) || []) {
+      try { handler() } catch { /* ignore */ }
+    }
   },
 
   isCancelled(messageId: string) {
@@ -50,6 +54,17 @@ export const chatStreamControl = {
 
   clear(messageId: string) {
     cancelledStreams.delete(messageId)
+    abortHandlers.delete(messageId)
+  },
+
+  registerAbortHandler(messageId: string, handler: () => void) {
+    const handlers = abortHandlers.get(messageId) || new Set<() => void>()
+    handlers.add(handler)
+    abortHandlers.set(messageId, handlers)
+    return () => {
+      handlers.delete(handler)
+      if (!handlers.size) abortHandlers.delete(messageId)
+    }
   },
 
   /** Manually trigger cleanup (useful for testing). */

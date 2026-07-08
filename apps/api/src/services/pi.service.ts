@@ -1913,6 +1913,8 @@ export class PiService {
     const effort = options.reasoningEffort || 'off'
     session.setThinkingLevel(effort)
 
+    let unregisterAbortHandler: (() => void) | null = null
+
     try {
       const queue: ChatEvent[] = []
       let resolve: (() => void) | null = null
@@ -1922,6 +1924,13 @@ export class PiService {
         if (resolve) { resolve(); resolve = null }
       }
       emitInteractionEvent = push
+
+      if (options._cancelled) {
+        unregisterAbortHandler = chatStreamControl.registerAbortHandler(options._cancelled, () => {
+          session.abort()
+          if (resolve) { resolve(); resolve = null }
+        })
+      }
 
       // Bind a Web/RPC-style UI context so Pi extensions using ctx.ui.confirm/select/input/notify
       // can interact through YARC instead of failing with no_ui. ctx.ui.custom remains degraded.
@@ -2066,6 +2075,8 @@ export class PiService {
         // Check for cancellation at the start of each loop iteration
         if (options._cancelled && chatStreamControl.isCancelled(options._cancelled)) {
           session.abort()
+          unregisterAbortHandler?.()
+          unregisterAbortHandler = null
           unsubscribe()
           await promptPromise
           return
@@ -2078,6 +2089,8 @@ export class PiService {
           const evt = queue.shift()!
           yield evt
           if (evt.type === 'done') {
+            unregisterAbortHandler?.()
+            unregisterAbortHandler = null
             unsubscribe()
             await promptPromise
             return
@@ -2089,6 +2102,7 @@ export class PiService {
       if (options.conversationId && options.branchId) {
         await this.savePiSessionInfo(options.conversationId, options.branchId, session)
       }
+      unregisterAbortHandler?.()
       agentInteractionRegistry.cancelByStream(options.assistantMessageId || '', 'session_disposed')
       emitInteractionEvent = null
       await session.dispose()
