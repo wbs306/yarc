@@ -69,6 +69,7 @@ import { ensureAgentWorkspace } from './lib/agent-workspace.js'
 import { prisma } from '@yarc/db'
 import { DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_PROMPT } from './lib/prompts.js'
 import { fileService } from './services/file.service.js'
+import { liveFileService } from './services/live-file.service.js'
 import { sseHub } from './lib/sse.js'
 import { streamBuffer } from './lib/stream-buffer-singleton.js'
 import { chatStreamControl } from './lib/chat-stream-control.js'
@@ -118,6 +119,57 @@ app.route('/api/notes', notesRoutes)
 app.route('/api/conversations', conversationsRoutes)
 app.route('/api/search', searchRoutes)
 app.route('/api/tasks', tasksRoutes)
+// ── WebSocket live workspace files ──────────────────────────────────────────
+
+app.get(
+  '/api/files/live',
+  upgradeWebSocket((c) => {
+    const path = c.req.query('path') || ''
+    let clientId: string | null = null
+
+    return {
+      async onOpen(_event, ws) {
+        try {
+          if (!path) {
+            ws.send(JSON.stringify({ type: 'error', code: 'MISSING_PATH', message: 'Path is required' }))
+            ws.close()
+            return
+          }
+          const attached = await liveFileService.attachClient(path, ws)
+          clientId = attached.client.id
+        } catch (err) {
+          ws.send(JSON.stringify({ type: 'error', code: 'OPEN_FAILED', message: (err as Error).message || 'Failed to open live file' }))
+          ws.close()
+        }
+      },
+      async onMessage(event, ws) {
+        try {
+          const raw = typeof event.data === 'string' ? event.data : Buffer.from(event.data as any).toString('utf-8')
+          const msg = JSON.parse(raw)
+          if (!clientId) return
+          if (msg.type === 'update' && typeof msg.update === 'string') {
+            liveFileService.applyClientUpdate(path, msg.update, clientId)
+          } else if (msg.type === 'flush') {
+            await liveFileService.flush(path)
+          } else if (msg.type === 'resolve-conflict' && (msg.strategy === 'use-live' || msg.strategy === 'use-disk')) {
+            await liveFileService.resolveConflict(path, msg.strategy)
+          } else {
+            ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', message: 'Unsupported live file message' }))
+          }
+        } catch (err) {
+          ws.send(JSON.stringify({ type: 'error', code: 'MESSAGE_FAILED', message: (err as Error).message || 'Live file message failed' }))
+        }
+      },
+      onClose() {
+        if (clientId) liveFileService.detachClient(path, clientId)
+      },
+      onError() {
+        if (clientId) liveFileService.detachClient(path, clientId)
+      },
+    }
+  }),
+)
+
 app.route('/api/files', filesRoutes)
 app.route('/api/settings', settingsRoutes)
 app.route('/api/rankings', rankingsRoutes)

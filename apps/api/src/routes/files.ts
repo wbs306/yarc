@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { extname } from 'node:path'
 import { fileService } from '../services/file.service.js'
+import { liveFileService } from '../services/live-file.service.js'
 import { piService } from '../services/pi.service.js'
 import { AppError } from '../lib/errors.js'
 
@@ -141,6 +142,10 @@ files.get('/content', async (c) => {
   const path = c.req.query('path')
   if (!path) {
     throw new AppError('MISSING_PATH', 'Path is required', 400)
+  }
+
+  if (c.req.query('refreshLive') === '1') {
+    await liveFileService.handleDiskChange(path)
   }
 
   const result = await fileService.getFileContent(path)

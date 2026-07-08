@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch, computed } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { renderMarkdown } from '@/lib/markdown'
 import { usePaperStore, type Paper } from '@/stores/paper'
@@ -7,6 +7,7 @@ import { useChatStore } from '@/stores/chat'
 import { useNoteStore, type Note } from '@/stores/note'
 import { useThemeStore } from '@/stores/theme'
 import { useApi } from '@/composables/useApi'
+import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
 
@@ -28,6 +29,7 @@ import SortControl, { type SortOption } from '@/components/ui/SortControl.vue'
 const route = useRoute()
 const router = useRouter()
 const api = useApi()
+const liveFiles = useLiveFiles()
 const paperStore = usePaperStore()
 const chatStore = useChatStore()
 const noteStore = useNoteStore()
@@ -170,6 +172,7 @@ const workspaceContent = ref('')
 const workspaceSavedContent = ref('')
 const workspaceLanguage = ref('plaintext')
 const workspaceModified = ref('')
+const currentLiveClient = shallowRef<LiveFileClient | null>(null)
 const workspaceContentLoading = ref(false)
 const workspaceSaving = ref(false)
 const workspaceUploading = ref(false)
@@ -177,7 +180,11 @@ const workspaceOpeningSystem = ref(false)
 const workspaceUploadInput = ref<HTMLInputElement | null>(null)
 const workspaceUploadTargetPath = ref('')
 const selectedWorkspacePath = computed(() => selectedWorkspaceFile.value?.path || '')
-const workspaceDirty = computed(() => workspaceContent.value !== workspaceSavedContent.value)
+const workspaceDirty = computed(() => {
+  const live = currentLiveClient.value
+  if (live && selectedWorkspacePath.value === live.path) return live.dirty.value || live.saving.value || live.conflict.value
+  return workspaceContent.value !== workspaceSavedContent.value
+})
 const workspaceCanEdit = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.editable && !selectedWorkspaceFile.value.readonly)
 const workspaceIsImage = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.mime?.startsWith('image/'))
 const workspaceIsOffice = computed(() => isOfficeFile(selectedWorkspaceFile.value))
@@ -186,6 +193,19 @@ const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'fil
 const workspaceIsMarkdown = computed(() => workspaceLanguage.value === 'markdown')
 const markdownPreview = ref(false)
 const workspaceMarkdownHtml = computed(() => renderMarkdown(workspaceContent.value))
+
+watch(() => currentLiveClient.value?.content.value, (content) => {
+  if (currentLiveClient.value && content !== undefined) workspaceContent.value = content
+})
+watch(() => currentLiveClient.value?.language.value, (language) => {
+  if (currentLiveClient.value && language) workspaceLanguage.value = language
+})
+watch(() => currentLiveClient.value?.modified.value, (modified) => {
+  if (currentLiveClient.value && modified) workspaceModified.value = modified
+})
+watch(() => currentLiveClient.value?.error.value, (message) => {
+  if (currentLiveClient.value && message) filesError.value = message
+})
 
 const persistRecentWorkspaceFiles = () => {
   const items = recentWorkspaceFiles.value.filter(isWorkspaceFile).map(({ children, ...node }) => node)
@@ -200,6 +220,9 @@ const touchWorkspaceFile = (node: FileNode) => {
 }
 
 const removeRecentWorkspacePath = (path: string) => {
+  for (const livePath of Array.from(liveFiles.clients.keys())) {
+    if (livePath === path || livePath.startsWith(`${path}/`)) void liveFiles.release(livePath)
+  }
   recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter((file) => file.path !== path && !file.path.startsWith(`${path}/`))
   openWorkspaceTabs.value = openWorkspaceTabs.value.filter((tab) => tab.file.path !== path && !tab.file.path.startsWith(`${path}/`))
   persistRecentWorkspaceFiles()
@@ -221,11 +244,12 @@ const snapshotCurrentWorkspaceTab = () => {
 }
 
 const restoreWorkspaceTab = (tab: WorkspaceFileTab, node: FileNode) => {
+  currentLiveClient.value = liveFiles.get(node.path)
   selectedWorkspaceFile.value = node
-  workspaceContent.value = tab.content
-  workspaceSavedContent.value = tab.savedContent
-  workspaceLanguage.value = tab.language
-  workspaceModified.value = tab.modified
+  workspaceContent.value = currentLiveClient.value?.content.value ?? tab.content
+  workspaceSavedContent.value = currentLiveClient.value?.content.value ?? tab.savedContent
+  workspaceLanguage.value = currentLiveClient.value?.language.value ?? tab.language
+  workspaceModified.value = currentLiveClient.value?.modified.value ?? tab.modified
   markdownPreview.value = tab.markdownPreview
   workspaceContentLoading.value = false
   tab.lastAccessedAt = Date.now()
@@ -378,6 +402,7 @@ const findWorkspaceNode = (nodes: FileNode[], path: string): FileNode | null => 
 }
 
 const clearWorkspaceEditor = () => {
+  currentLiveClient.value = null
   workspaceContent.value = ''
   workspaceSavedContent.value = ''
   workspaceLanguage.value = 'plaintext'
@@ -429,6 +454,11 @@ const setSidebarMode = (mode: 'library' | 'files' | 'settings') => {
 }
 
 const prepareWorkspaceSwitch = async () => {
+  if (currentLiveClient.value && selectedWorkspacePath.value === currentLiveClient.value.path) {
+    snapshotCurrentWorkspaceTab()
+    return true
+  }
+
   if (!workspaceDirty.value) {
     snapshotCurrentWorkspaceTab()
     return true
@@ -477,24 +507,27 @@ const selectWorkspaceFile = async (node: FileNode) => {
   filesError.value = ''
 
   const existingTab = openWorkspaceTabs.value.find((tab) => tab.file.path === node.path && isWorkspaceFile(tab.file))
-  if (existingTab) {
-    restoreWorkspaceTab(existingTab, node)
+  markdownPreview.value = existingTab?.markdownPreview ?? false
+
+  if (node.type !== 'file' || !node.editable) {
+    currentLiveClient.value = null
+    if (existingTab) restoreWorkspaceTab(existingTab, node)
+    else {
+      clearWorkspaceEditor()
+      snapshotCurrentWorkspaceTab()
+    }
     return
   }
 
-  markdownPreview.value = false
-  if (node.type !== 'file' || !node.editable) {
-    clearWorkspaceEditor()
-    snapshotCurrentWorkspaceTab()
-    return
-  }
   workspaceContentLoading.value = true
+  currentLiveClient.value = null
   try {
-    const res = await api.getFileContent(node.path)
-    workspaceContent.value = res.content
-    workspaceSavedContent.value = res.content
-    workspaceLanguage.value = res.language
-    workspaceModified.value = res.modified
+    const client = await liveFiles.open(node.path)
+    currentLiveClient.value = client
+    workspaceContent.value = client.content.value
+    workspaceSavedContent.value = client.content.value
+    workspaceLanguage.value = client.language.value
+    workspaceModified.value = client.modified.value
     snapshotCurrentWorkspaceTab()
   } catch (err) {
     clearWorkspaceEditor()
@@ -505,13 +538,19 @@ const selectWorkspaceFile = async (node: FileNode) => {
 }
 
 const saveWorkspaceFile = async () => {
-  if (!selectedWorkspaceFile.value || !workspaceCanEdit.value || !workspaceDirty.value || workspaceSaving.value) return
-  const contentToSave = workspaceContent.value
+  if (!selectedWorkspaceFile.value || !workspaceCanEdit.value || workspaceSaving.value) return
+  const live = currentLiveClient.value
   workspaceSaving.value = true
   filesError.value = ''
   try {
-    await api.saveFileContent(selectedWorkspaceFile.value.path, contentToSave)
-    workspaceSavedContent.value = contentToSave
+    if (live && live.path === selectedWorkspaceFile.value.path) {
+      await live.flush()
+      workspaceSavedContent.value = live.content.value
+    } else if (workspaceDirty.value) {
+      const contentToSave = workspaceContent.value
+      await api.saveFileContent(selectedWorkspaceFile.value.path, contentToSave)
+      workspaceSavedContent.value = contentToSave
+    }
     snapshotCurrentWorkspaceTab()
     await loadWorkspaceFiles(true)
   } catch (err) {
@@ -521,12 +560,34 @@ const saveWorkspaceFile = async () => {
   }
 }
 
-const saveWorkspaceTab = async (tab: WorkspaceFileTab) => {
-  if (tab.file.type !== 'file' || !tab.file.editable || tab.file.readonly || tab.content === tab.savedContent) return true
+const resolveCurrentLiveConflict = async (strategy: 'use-live' | 'use-disk') => {
+  const live = currentLiveClient.value
+  if (!live) return
   filesError.value = ''
   try {
-    await api.saveFileContent(tab.file.path, tab.content)
-    tab.savedContent = tab.content
+    await live.resolveConflict(strategy)
+    workspaceSavedContent.value = live.content.value
+    snapshotCurrentWorkspaceTab()
+    await loadWorkspaceFiles(true)
+  } catch (err) {
+    filesError.value = (err as Error).message || '冲突处理失败'
+  }
+}
+
+const saveWorkspaceTab = async (tab: WorkspaceFileTab) => {
+  if (tab.file.type !== 'file' || !tab.file.editable || tab.file.readonly) return true
+  const live = liveFiles.get(tab.file.path)
+  filesError.value = ''
+  try {
+    if (live) {
+      await live.flush()
+      tab.content = live.content.value
+      tab.savedContent = live.content.value
+    } else {
+      if (tab.content === tab.savedContent) return true
+      await api.saveFileContent(tab.file.path, tab.content)
+      tab.savedContent = tab.content
+    }
     return true
   } catch (err) {
     filesError.value = (err as Error).message || '保存失败'
@@ -556,9 +617,27 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
   const file = (isCurrent ? selectedWorkspaceFile.value : null)
     || tab?.file
     || recentWorkspaceFiles.value.find((item) => item.path === path)
-  const isDirty = isCurrent ? workspaceDirty.value : !!tab && tab.content !== tab.savedContent
+  const live = liveFiles.get(path)
+  const isDirty = live ? (live.dirty.value || live.saving.value || live.conflict.value) : (isCurrent ? workspaceDirty.value : !!tab && tab.content !== tab.savedContent)
 
-  if (isDirty) {
+  if (live?.conflict.value) {
+    const choice = await confirmChoice({
+      title: '关闭冲突文件？',
+      message: `「${file?.name || '当前文件'}」存在外部修改冲突。关闭后不会自动覆盖磁盘版本。`,
+      cancelText: '取消关闭',
+      icon: 'alert',
+      actions: [
+        { label: '保留编辑器版本并保存', value: 'save', variant: 'primary' },
+        { label: '直接关闭', value: 'discard', variant: 'danger' },
+      ],
+    })
+    if (choice === 'save') {
+      await live.resolveConflict('use-live').catch((err) => { filesError.value = (err as Error).message || '冲突处理失败' })
+      if (live.conflict.value) return
+    } else if (choice !== 'discard') return
+  } else if (live && (live.dirty.value || live.saving.value)) {
+    await live.flush().catch(() => {})
+  } else if (isDirty) {
     if (prefs.workspaceAutoSaveOnSwitch) {
       if (isCurrent) {
         await saveWorkspaceFile()
@@ -590,6 +669,8 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
     }
   }
 
+  await liveFiles.release(path)
+
   recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter((item) => item.path !== path)
   openWorkspaceTabs.value = openWorkspaceTabs.value.filter((item) => item.file.path !== path)
   persistRecentWorkspaceFiles()
@@ -599,9 +680,7 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
   const nextTab = [...openWorkspaceTabs.value].filter((tab) => isWorkspaceFile(tab.file)).sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)[0]
   if (nextTab) {
     const node = findWorkspaceNode(workspaceFiles.value, nextTab.file.path) || nextTab.file
-    restoreWorkspaceTab(nextTab, node)
-    touchWorkspaceFile(node)
-    localStorage.setItem('yarc_workspace_file', node.path)
+    await selectWorkspaceFile(node)
   } else {
     selectedWorkspaceFile.value = null
     localStorage.removeItem('yarc_workspace_file')
@@ -1197,6 +1276,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  void liveFiles.releaseAll()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('yarc-open-chat', openChatPanel)
   document.removeEventListener('click', onDocumentClick)
@@ -1372,7 +1452,30 @@ const refreshOpenWorkspaceFileContent = async (changedPath?: string) => {
     if (normalizedChangedPath && path !== normalizedChangedPath) continue
 
     try {
-      const res = await api.getFileContent(path)
+      const live = liveFiles.get(path)
+      if (live && (live.dirty.value || live.saving.value || live.conflict.value)) continue
+      const res = await api.getFileContent(path, { refreshLive: !!live })
+      if (live) {
+        if (!live.dirty.value && !live.saving.value && !live.conflict.value) live.syncContent(res.content)
+        live.language.value = res.language
+        live.modified.value = res.modified
+        const isCurrentLive = selectedWorkspacePath.value === path
+        const tabLive = openWorkspaceTabs.value.find((item) => item.file.path === path)
+        if (isCurrentLive) {
+          workspaceContent.value = live.content.value
+          workspaceSavedContent.value = live.content.value
+          workspaceLanguage.value = res.language
+          workspaceModified.value = res.modified
+          snapshotCurrentWorkspaceTab()
+        }
+        if (tabLive) {
+          tabLive.content = live.content.value
+          tabLive.savedContent = live.content.value
+          tabLive.language = res.language
+          tabLive.modified = res.modified
+        }
+        continue
+      }
       const isCurrent = selectedWorkspacePath.value === path
       const tab = openWorkspaceTabs.value.find((item) => item.file.path === path)
       const previousSavedContent = isCurrent ? workspaceSavedContent.value : tab?.savedContent
@@ -1412,7 +1515,7 @@ const onRealtimeFilesChanged = (event: Event) => {
   const action = typeof detail.action === 'string' ? detail.action : ''
   const changedPath = typeof detail.path === 'string' ? detail.path : ''
 
-  if (sidebarMode.value === 'files') {
+  if (sidebarMode.value === 'files' && action !== 'live-save') {
     void loadWorkspaceFiles(true)
   }
 
@@ -2729,9 +2832,12 @@ const showSearchPaperPopup = (paper: any) => {
                     <button :class="{ active: !markdownPreview }" @click="markdownPreview = false">编辑</button>
                     <button :class="{ active: markdownPreview }" @click="markdownPreview = true">预览</button>
                   </div>
-                  <span :class="['dirty-dot', { active: workspaceDirty }]" :title="workspaceDirty ? '有未保存修改' : '已保存'" />
-                  <button class="save-workspace-btn" :disabled="!workspaceDirty || !workspaceCanEdit || workspaceSaving" title="保存（Ctrl/⌘+S）" @click="saveWorkspaceFile">
-                    {{ workspaceSaving ? '保存中…' : '保存' }}
+                  <span
+                    :class="['dirty-dot', { active: workspaceDirty, conflict: currentLiveClient?.conflict.value }]"
+                    :title="currentLiveClient?.conflict.value ? '有外部修改冲突' : currentLiveClient?.saving.value ? '同步保存中' : workspaceDirty ? '等待同步' : '已同步'"
+                  />
+                  <button class="save-workspace-btn" :disabled="(!workspaceDirty && !currentLiveClient) || !workspaceCanEdit || workspaceSaving" title="立即保存（Ctrl/⌘+S）" @click="saveWorkspaceFile">
+                    {{ workspaceSaving || currentLiveClient?.saving.value ? '保存中…' : currentLiveClient?.conflict.value ? '有冲突' : currentLiveClient ? '立即保存' : '保存' }}
                   </button>
                 </template>
                 <button
@@ -2759,7 +2865,13 @@ const showSearchPaperPopup = (paper: any) => {
                 class="workspace-md-preview md"
                 v-html="workspaceMarkdownHtml"
               />
+              <div v-if="currentLiveClient?.conflict.value" class="workspace-live-conflict">
+                文件在磁盘被外部程序修改，无法安全自动合并。
+                <button @click="resolveCurrentLiveConflict('use-live')">保留编辑器版本</button>
+                <button @click="resolveCurrentLiveConflict('use-disk')">使用磁盘版本</button>
+              </div>
               <CodeEditor
+                :key="selectedWorkspacePath"
                 v-show="!(workspaceIsMarkdown && markdownPreview)"
                 v-model="workspaceContent"
                 :language="workspaceLanguage"
@@ -2768,6 +2880,7 @@ const showSearchPaperPopup = (paper: any) => {
                 :tab-size="theme.editor.tabSize"
                 :line-wrap="theme.editor.lineWrap"
                 :line-numbers="theme.editor.lineNumbers"
+                :collab-y-text="currentLiveClient?.ytext || null"
                 class="workspace-code-editor"
                 @save="saveWorkspaceFile"
               />
@@ -3584,6 +3697,25 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-text-editor-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
 .dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-border-hover); flex-shrink: 0; }
 .dirty-dot.active { background: var(--color-warning); }
+.dirty-dot.conflict { background: var(--color-error); }
+.workspace-live-conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--color-error);
+  font-size: 12px;
+}
+.workspace-live-conflict button {
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: var(--color-bg-card);
+  color: var(--color-error);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  cursor: pointer;
+}
 .save-workspace-btn {
   padding: 5px 12px;
   border: none;

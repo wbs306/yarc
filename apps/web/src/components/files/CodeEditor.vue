@@ -2,6 +2,8 @@
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { EditorState, EditorSelection, Compartment } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, dropCursor } from '@codemirror/view'
+import * as Y from 'yjs'
+import { yCollab } from 'y-codemirror.next'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { bracketMatching, foldGutter, indentOnInput, indentUnit, HighlightStyle, syntaxHighlighting, LanguageDescription } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
@@ -24,6 +26,7 @@ const props = withDefaults(defineProps<{
   tabSize?: number
   lineWrap?: boolean
   lineNumbers?: boolean
+  collabYText?: Y.Text | null
 }>(), {
   language: 'plaintext',
   readonly: false,
@@ -50,6 +53,7 @@ const fontConf = new Compartment()
 const tabConf = new Compartment()
 const wrapConf = new Compartment()
 const gutterConf = new Compartment()
+const collabConf = new Compartment()
 
 const fontTheme = (size: number) => EditorView.theme({ '&': { fontSize: `${size}px` } })
 const tabExtension = (n: number) => [EditorState.tabSize.of(n), indentUnit.of(' '.repeat(n))]
@@ -187,6 +191,10 @@ function handleSurroundSelectionKeydown(event: KeyboardEvent, view: EditorView) 
   return true
 }
 
+function collabExtension() {
+  return props.collabYText ? yCollab(props.collabYText, null) : []
+}
+
 function buildExtensions() {
   return [
     gutterConf.of(gutterExtension(props.lineNumbers)),
@@ -220,6 +228,7 @@ function buildExtensions() {
       EditorView.editable.of(!props.readonly),
       EditorState.readOnly.of(props.readonly),
     ]),
+    collabConf.of(collabExtension()),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         const value = update.state.doc.toString()
@@ -354,7 +363,7 @@ function handleMinimapPointerDown(e: PointerEvent) {
 onMounted(() => {
   view.value = new EditorView({
     parent: host.value!,
-    state: EditorState.create({ doc: props.modelValue, extensions: buildExtensions() }),
+    state: EditorState.create({ doc: props.collabYText?.toString() ?? props.modelValue, extensions: buildExtensions() }),
   })
   view.value.scrollDOM.addEventListener('scroll', updateMinimapViewport, { passive: true })
   minimapResizeObserver = new ResizeObserver(scheduleMinimapDraw)
@@ -386,9 +395,20 @@ function syncDark() {
 
 watch(() => props.modelValue, (value) => {
   const v = view.value
-  if (!v) return
+  if (!v || props.collabYText) return
   if (value === v.state.doc.toString()) return
   v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: value } })
+  scheduleMinimapDraw()
+})
+
+watch(() => props.collabYText, (ytext) => {
+  const v = view.value
+  if (!v) return
+  const nextDoc = ytext?.toString() ?? props.modelValue
+  v.dispatch({
+    changes: { from: 0, to: v.state.doc.length, insert: nextDoc },
+    effects: collabConf.reconfigure(collabExtension()),
+  })
   scheduleMinimapDraw()
 })
 

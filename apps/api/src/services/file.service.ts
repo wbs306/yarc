@@ -4,6 +4,7 @@ import { config } from '../lib/config.js'
 import { AppError } from '../lib/errors.js'
 import { sseHub } from '../lib/sse.js'
 import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
+import { liveFileService } from './live-file.service.js'
 import type { FileNode } from '@yarc/shared'
 
 const TEXT_EXTENSIONS = new Set([
@@ -165,12 +166,22 @@ export class FileService {
   }
 
   private emitFilesChanged(action: string, path?: string) {
-    sseHub.emit({ type: 'files-changed', action, path, at: new Date().toISOString() })
-    if (action === 'external-change' && path && this.isPiConfigPath(path)) {
-      void import('./pi.service.js')
-        .then(({ piService }) => piService.reload(`files:${action}`))
-        .catch((err) => console.warn('[FileService] Pi reload failed:', err))
+    if (action === 'external-change' && path) {
+      void liveFileService.handleDiskChange(path)
+        .then((result) => {
+          if (result === 'self') return
+          sseHub.emit({ type: 'files-changed', action, path, live: result === 'live', at: new Date().toISOString() })
+          if (this.isPiConfigPath(path)) {
+            void import('./pi.service.js')
+              .then(({ piService }) => piService.reload(`files:${action}`))
+              .catch((err) => console.warn('[FileService] Pi reload failed:', err))
+          }
+        })
+        .catch((err) => console.warn('[FileService] live disk-change bridge failed:', err))
+      return
     }
+
+    sseHub.emit({ type: 'files-changed', action, path, at: new Date().toISOString() })
   }
 
   private async assertExists(fullPath: string) {
@@ -317,7 +328,10 @@ export class FileService {
     return this.sortNodes(nodes)
   }
 
-  async getFileContent(filePath: string): Promise<{ content: string; language: string; modified: string }> {
+  async getFileContent(filePath: string): Promise<{ content: string; language: string; modified: string; live?: boolean; dirty?: boolean; saving?: boolean; conflict?: boolean }> {
+    const liveSnapshot = liveFileService.getSnapshot(filePath)
+    if (liveSnapshot) return liveSnapshot
+
     const fullPath = this.resolvePath(filePath)
     const entryStat = await this.assertExists(fullPath)
     if (!entryStat.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
@@ -360,6 +374,12 @@ export class FileService {
   }
 
   async saveFileContent(filePath: string, content: string): Promise<void> {
+    if (liveFileService.hasSession(filePath)) {
+      await liveFileService.replaceContent(filePath, content, 'api')
+      await liveFileService.flush(filePath)
+      return
+    }
+
     if (this.isProtectedPath(filePath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
     const fullPath = this.resolvePath(filePath)
     const entryStat = await this.assertExists(fullPath)

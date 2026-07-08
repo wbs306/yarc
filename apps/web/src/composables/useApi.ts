@@ -322,8 +322,10 @@ export function useApi() {
     getFileTree: (path?: string) =>
       request<{ files: any[] }>('/files', { params: path ? { path } : {} }),
 
-    getFileContent: (path: string) =>
-      request<{ content: string; language: string; modified: string }>('/files/content', { params: { path } }),
+    getFileContent: (path: string, options?: { refreshLive?: boolean }) =>
+      request<{ content: string; language: string; modified: string }>('/files/content', {
+        params: { path, ...(options?.refreshLive ? { refreshLive: '1' } : {}) },
+      }),
 
     saveFileContent: (path: string, content: string) =>
       request('/files/content', {
