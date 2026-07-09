@@ -677,14 +677,18 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
 
   if (!isCurrent) return
 
+  // The current file has been removed from the workspace tab list. Clear the
+  // active selection before selecting a fallback tab; otherwise selectWorkspaceFile
+  // will run the normal switch preparation and snapshot the just-closed file back
+  // into openWorkspaceTabs.
+  selectedWorkspaceFile.value = null
+  localStorage.removeItem('yarc_workspace_file')
+  clearWorkspaceEditor()
+
   const nextTab = [...openWorkspaceTabs.value].filter((tab) => isWorkspaceFile(tab.file)).sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)[0]
   if (nextTab) {
     const node = findWorkspaceNode(workspaceFiles.value, nextTab.file.path) || nextTab.file
     await selectWorkspaceFile(node)
-  } else {
-    selectedWorkspaceFile.value = null
-    localStorage.removeItem('yarc_workspace_file')
-    clearWorkspaceEditor()
   }
 }
 
