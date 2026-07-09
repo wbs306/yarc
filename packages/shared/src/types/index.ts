@@ -193,6 +193,9 @@ export type ChatEvent =
       page?: number
       limit?: number
       total: number
+      totalPages?: number
+      hasNextPage?: boolean
+      nextPage?: number | null
       papers: Array<Record<string, unknown>>
       earlyAccess?: boolean
       publication?: string

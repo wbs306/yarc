@@ -828,7 +828,22 @@ export class PiService {
               results = await searchService.searchSemanticScholar(query, field, page, limit, yearFrom, yearTo)
             }
             const papers = results.papers || []
-            let text = `Found ${results.total || papers.length} papers. These results have been sent to the UI search list.\n\n`
+            const total = Number(results.total || papers.length || 0)
+            const effectivePage = Number(results.page || page || 1)
+            const effectiveLimit = Number(results.limit || limit || papers.length || 20)
+            const totalPages = effectiveLimit > 0 ? Math.ceil(total / effectiveLimit) : 0
+            const hasNextPage = totalPages > 0 && effectivePage < totalPages
+            const nextPage = hasNextPage ? effectivePage + 1 : null
+            let text = `Found ${total} papers. Showing page ${effectivePage} of ${totalPages}, ${papers.length} result(s) on this page. These results have been sent to the UI search list.\n`
+            if (hasNextPage) {
+              text += `More results are available: call yarc_search_papers again with the same query/source/field and page=${nextPage}, limit=${effectiveLimit}. You can also increase limit if the source allows it.\n`
+            } else {
+              text += 'No next page is available for this search.\n'
+            }
+            if (papers.length > 10) {
+              text += `The tool returned ${papers.length} result(s) for this page; the summary below lists the first 10.\n`
+            }
+            text += '\n'
             for (const p of papers.slice(0, 10)) {
               const authors = p.authors?.slice(0, 3).join(', ') || 'Unknown'
               const venue = p.venue || p.journal || ''
@@ -836,7 +851,7 @@ export class PiService {
               if (p.abstract) text += `Abstract: ${p.abstract.slice(0, 180)}...\n`
               text += `ID: ${p.id || p.paperId || 'N/A'}\n\n`
             }
-            return { content: [{ type: 'text' as const, text }], details: { papers, total: results.total, page, limit, query, source, field, earlyAccess, publication } }
+            return { content: [{ type: 'text' as const, text }], details: { papers, total, page: effectivePage, limit: effectiveLimit, totalPages, hasNextPage, nextPage, query, source, field, earlyAccess, publication } }
           } catch (err) {
             return { content: [{ type: 'text' as const, text: `Search failed: ${(err as Error).message}` }], isError: true, details: {} }
           }
@@ -2003,6 +2018,9 @@ export class PiService {
                 page: Number(details.page || ctx.args?.page || 1),
                 limit: Number(details.limit || ctx.args?.limit || details.papers.length || 20),
                 total: Number(details.total || details.papers.length || 0),
+                totalPages: Number(details.totalPages || 0),
+                hasNextPage: Boolean(details.hasNextPage || false),
+                nextPage: details.nextPage ?? null,
                 papers: details.papers,
                 earlyAccess: Boolean(details.earlyAccess || ctx.args?.earlyAccess || false),
                 publication: details.publication || ctx.args?.publication,
@@ -2159,6 +2177,9 @@ export class PiService {
         page: Number(details.page || args?.page || 1),
         limit: Number(details.limit || args?.limit || details.papers.length || 20),
         total: Number(details.total || details.papers.length || 0),
+        totalPages: Number(details.totalPages || 0),
+        hasNextPage: Boolean(details.hasNextPage || false),
+        nextPage: details.nextPage ?? null,
         papers: details.papers,
         at: new Date().toISOString(),
       })
