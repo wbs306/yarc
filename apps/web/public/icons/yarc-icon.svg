@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">YARC app icon</title>
+  <desc id="desc">An open research book with a connected Y-shaped insight mark and a sparkle.</desc>
+  <defs>
+    <linearGradient id="background" x1="130" y1="96" x2="894" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="0.48" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#3730a3"/>
+    </linearGradient>
+    <linearGradient id="pageLeft" x1="247" y1="300" x2="507" y2="758" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e0e7ff"/>
+    </linearGradient>
+    <linearGradient id="pageRight" x1="777" y1="300" x2="517" y2="758" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef2ff"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(512 442) rotate(90) scale(430)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity=".2"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="150" y="214" width="724" height="630" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="28" stdDeviation="30" flood-color="#1e1b4b" flood-opacity=".3"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#background)"/>
+  <rect x="42" y="42" width="940" height="940" rx="194" fill="none" stroke="#ffffff" stroke-opacity=".16" stroke-width="6"/>
+  <circle cx="512" cy="442" r="430" fill="url(#glow)"/>
+
+  <g filter="url(#shadow)">
+    <path d="M204 308c0-28 25-49 52-43 83 17 161 51 227 100 18 13 29 34 29 56v352c-76-63-166-104-264-119-25-4-44-25-44-50V308Z" fill="url(#pageLeft)"/>
+    <path d="M820 308c0-28-25-49-52-43-83 17-161 51-227 100-18 13-29 34-29 56v352c76-63 166-104 264-119 25-4 44-25 44-50V308Z" fill="url(#pageRight)"/>
+    <path d="M512 420v353" stroke="#c7d2fe" stroke-width="18" stroke-linecap="round"/>
+  </g>
+
+  <g fill="none" stroke="#4f46e5" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M384 438 512 552 640 438"/>
+    <path d="M512 552v112"/>
+  </g>
+  <g fill="#4f46e5" stroke="#ffffff" stroke-width="16">
+    <circle cx="384" cy="438" r="38"/>
+    <circle cx="640" cy="438" r="38"/>
+    <circle cx="512" cy="664" r="38"/>
+  </g>
+
+  <g fill="#ffffff">
+    <path d="M758 164c7-28 46-28 53 0l7 28a28 28 0 0 0 20 20l28 7c28 7 28 46 0 53l-28 7a28 28 0 0 0-20 20l-7 28c-7 28-46 28-53 0l-7-28a28 28 0 0 0-20-20l-28-7c-28-7-28-46 0-53l28-7a28 28 0 0 0 20-20l7-28Z"/>
+    <circle cx="687" cy="177" r="16" opacity=".72"/>
+  </g>
+</svg>

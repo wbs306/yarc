@@ -4606,4 +4606,38 @@ const showSearchPaperPopup = (paper: any) => {
   .primary-btn { padding: 7px 10px; }
 }
 
+/* ── Installed PWA title-bar integration ───────────────────────────────────
+   In Window Controls Overlay mode the app header becomes the draggable title
+   bar. The dynamic insets reserve the system controls on either the left
+   (macOS-style) or right (Windows/Linux-style), so app actions stay clickable. */
+@media (display-mode: window-controls-overlay) {
+  .app-layout {
+    --header-height: max(48px, env(titlebar-area-height, 48px));
+  }
+
+  .app-header {
+    padding-left: max(12px, env(titlebar-area-x, 0px));
+    padding-right: max(
+      12px,
+      calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
+    );
+    app-region: drag;
+    -webkit-app-region: drag;
+  }
+
+  .app-header :is(
+    button,
+    a,
+    input,
+    select,
+    textarea,
+    [role='button'],
+    [role='listbox'],
+    [contenteditable='true']
+  ) {
+    app-region: no-drag;
+    -webkit-app-region: no-drag;
+  }
+}
+
 </style>

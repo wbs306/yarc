@@ -166,6 +166,12 @@ export const useThemeStore = defineStore('theme', () => {
     root.style.setProperty('--color-primary-hover', mix(primary, { r: 0, g: 0, b: 0 }, resolved === 'dark' ? 0.08 : 0.15))
     root.style.setProperty('--color-primary-soft', `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${resolved === 'dark' ? 0.18 : 0.12})`)
 
+    // Keep the browser/PWA title bar aligned with the actual light or dark
+    // background instead of using the accent color as a fixed chrome color.
+    const browserThemeColor = getComputedStyle(root).getPropertyValue('--color-bg').trim()
+    const themeColorMeta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+    if (browserThemeColor && themeColorMeta) themeColorMeta.content = browserThemeColor
+
     // Background image: crossfade across two layers so rotation / manual switches
     // fade smoothly instead of snapping. Only retrigger when the image truly changes.
     const img = backgroundCssValue(backgroundImage.value)

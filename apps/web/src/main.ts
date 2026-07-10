@@ -14,7 +14,9 @@ app.use(createPinia())
 app.use(router)
 app.mount('#app')
 
-// Register Service Worker for PDF caching.
+// Register the PWA Service Worker (currently also handles PDF caching).
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {})
+  navigator.serviceWorker.register('/sw.js').catch((error: unknown) => {
+    console.warn('[YARC] Service Worker registration failed:', error)
+  })
 }
