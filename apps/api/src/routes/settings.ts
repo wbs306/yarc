@@ -51,6 +51,22 @@ const zeroIfMissing = async (path: string) => {
   }
 }
 
+const refreshCatalogForModelFetch = async () => {
+  try {
+    const result = await fetchAndCacheModelCatalog()
+    return { models: result.models, total: result.total, source: 'remote' }
+  } catch (err) {
+    console.warn('[Settings] Failed to refresh model catalog while fetching provider models:', err)
+    const models = await readModelCatalog()
+    return {
+      models,
+      total: models.length,
+      source: models.length ? 'local' : 'none',
+      error: (err as Error).message,
+    }
+  }
+}
+
 const walkDirStats = async (root: string): Promise<{ bytes: number; files: number; dirs: number }> => {
   let bytes = 0
   let files = 0
@@ -795,6 +811,8 @@ settings.post('/pi-models/fetch', async (c) => {
     modelsUrl += '/v1/models'
   }
 
+  const catalogPromise = refreshCatalogForModelFetch()
+
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
@@ -820,7 +838,8 @@ settings.post('/pi-models/fetch', async (c) => {
       return entry
     }).filter((m: any) => m.id)
 
-    return c.json({ models, url: modelsUrl })
+    const catalog = await catalogPromise
+    return c.json({ models, url: modelsUrl, catalog })
   } catch (err) {
     return c.json({ error: { code: 'FETCH_ERROR', message: (err as Error).message } }, 422)
   }

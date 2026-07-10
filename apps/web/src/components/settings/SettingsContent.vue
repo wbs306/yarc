@@ -60,6 +60,8 @@ type ProviderModel = {
   compat?: Record<string, any>;
 }
 type Provider = { baseUrl: string; api: string; apiKey?: string; models: ProviderModel[]; compat?: Record<string, any> }
+type ModelCatalogEntry = { id: string; name: string; provider: string; contextWindow: number; maxTokens: number; reasoning: boolean; input: string[] }
+type ModelCatalogResponse = { models?: ModelCatalogEntry[]; source?: string }
 const customProviders = ref<Record<string, Provider>>({})
 const customModelsLoading = ref(false)
 const customModelsSaving = ref(false)
@@ -73,11 +75,11 @@ const newModel = ref<{ providerId: string; id: string; name: string; reasoning: 
 const showAddModel = ref('')  // provider id
 const apiOptions = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai']
 // Fetched models from API for a provider
-const fetchedModels = ref<Array<{ id: string; name?: string; provider?: string; reasoning?: boolean; contextWindow?: number; input?: string[] }>>([])
+const fetchedModels = ref<Array<{ id: string; name?: string; provider?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number; input?: string[] }>>([])
 const fetchedModelsLoading = ref(false)
 const showFetchedModels = ref('')  // provider id or '__new__'
 const editingModel = ref<{ providerId: string; modelIndex: number } | null>(null)
-const modelCatalog = ref<Array<{ id: string; name: string; provider: string; contextWindow: number; maxTokens: number; reasoning: boolean; input: string[] }>>([])
+const modelCatalog = ref<ModelCatalogEntry[]>([])
 const catalogLoaded = ref(false)
 const catalogSource = ref('')
 const catalogRefreshing = ref(false)
@@ -141,6 +143,13 @@ const addNewProviderModel = () => {
   editingNewModel.value = newProviderModels.value.length - 1
 }
 
+const applyFetchedModelCatalog = (catalog?: ModelCatalogResponse) => {
+  if (!catalog?.models) return
+  modelCatalog.value = catalog.models
+  catalogSource.value = catalog.source || ''
+  catalogLoaded.value = true
+}
+
 const fetchModelsForNewProvider = async () => {
   const providerId = newProvider.value.id.trim()
   const baseUrl = newProvider.value.baseUrl.trim()
@@ -149,8 +158,9 @@ const fetchModelsForNewProvider = async () => {
   showFetchedModels.value = '__new__'
   fetchedModels.value = []
   try {
-    await loadModelCatalog()
     const res = await api.fetchProviderModels(baseUrl, newProvider.value.apiKey.trim() || undefined, newProvider.value.api)
+    applyFetchedModelCatalog(res.catalog)
+    if (!catalogLoaded.value) await loadModelCatalog()
     fetchedModels.value = enrichWithCatalog(res.models || []).sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
   } catch (err) {
     console.error('Failed to fetch models:', err)
@@ -405,9 +415,10 @@ const fetchModelsForProvider = async (providerId: string) => {
   showFetchedModels.value = providerId
   fetchedModels.value = []
   try {
-    await loadModelCatalog()
-    console.log('[FetchModels] Catalog loaded:', modelCatalog.value.length, 'models')
     const res = await api.fetchProviderModels(provider.baseUrl, provider.apiKey, provider.api)
+    applyFetchedModelCatalog(res.catalog)
+    if (!catalogLoaded.value) await loadModelCatalog()
+    console.log('[FetchModels] Catalog loaded:', modelCatalog.value.length, 'models')
     console.log('[FetchModels] Provider returned:', res.models?.length, 'models')
     fetchedModels.value = enrichWithCatalog(res.models || []).sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
     console.log('[FetchModels] Enriched:', fetchedModels.value.length, 'models, first:', fetchedModels.value[0])

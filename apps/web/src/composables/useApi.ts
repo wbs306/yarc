@@ -430,7 +430,16 @@ export function useApi() {
       }),
 
     fetchProviderModels: (baseUrl: string, apiKey?: string, api?: string) =>
-      request<{ models: Array<{ id: string; name?: string }>; url?: string }>('/settings/pi-models/fetch', {
+      request<{
+        models: Array<{ id: string; name?: string }>
+        url?: string
+        catalog?: {
+          models: Array<{ id: string; name: string; provider: string; contextWindow: number; maxTokens: number; reasoning: boolean; input: string[] }>
+          total: number
+          source: string
+          error?: string
+        }
+      }>('/settings/pi-models/fetch', {
         method: 'POST',
         body: JSON.stringify({ baseUrl, apiKey, api }),
       }),
