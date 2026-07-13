@@ -1,7 +1,40 @@
 import { Hono } from 'hono'
+import { AppError } from '../lib/errors.js'
+import { sseHub } from '../lib/sse.js'
 import { noteService } from '../services/note.service.js'
 
 const notes = new Hono()
+
+// POST /api/notes/sync — import linked Markdown files into database notes.
+notes.post('/sync', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as { paperId?: unknown; paperIds?: unknown }
+  const hasPaperIds = Object.prototype.hasOwnProperty.call(body, 'paperIds')
+  if (hasPaperIds && (!Array.isArray(body.paperIds) || body.paperIds.length === 0 || body.paperIds.some(id => typeof id !== 'string'))) {
+    throw new AppError('INVALID_PAPER_IDS', 'paperIds must be a non-empty string array', 400)
+  }
+  if (body.paperId !== undefined && typeof body.paperId !== 'string') {
+    throw new AppError('INVALID_PAPER_ID', 'paperId must be a string', 400)
+  }
+
+  const paperIds = [...new Set([
+    ...(typeof body.paperId === 'string' ? [body.paperId] : []),
+    ...(Array.isArray(body.paperIds) ? body.paperIds as string[] : []),
+  ])]
+  if (paperIds.length > 100) throw new AppError('TOO_MANY_PAPERS', 'At most 100 paper IDs can be synced at once', 400)
+
+  const result = await noteService.syncFromFiles(paperIds.length ? paperIds : undefined)
+  for (const paperId of result.changedPaperIds) {
+    sseHub.emit({
+      type: 'notes-changed',
+      source: 'file-sync',
+      action: 'sync',
+      paperId,
+      noteIds: result.items.filter(item => item.paperId === paperId && item.status === 'synced').map(item => item.noteId),
+      at: new Date().toISOString(),
+    })
+  }
+  return c.json({ result })
+})
 
 // GET /api/notes/:paperId
 notes.get('/:paperId', async (c) => {

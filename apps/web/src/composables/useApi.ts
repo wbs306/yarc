@@ -1,4 +1,4 @@
-import type { PaperReferenceInput, PaperReferenceResolution } from '@yarc/shared'
+import type { NoteFileSyncResult, PaperReferenceInput, PaperReferenceResolution } from '@yarc/shared'
 
 const API_BASE = '/api'
 
@@ -192,6 +192,12 @@ export function useApi() {
 
     deleteNote: (id: string) =>
       request(`/notes/${id}`, { method: 'DELETE' }),
+
+    syncNotesFromFiles: (paperIds?: string[]) =>
+      request<{ result: NoteFileSyncResult }>('/notes/sync', {
+        method: 'POST',
+        body: JSON.stringify(paperIds?.length ? { paperIds } : {}),
+      }),
 
     // Conversations
     getConversations: () => request<{ conversations: any[] }>('/conversations'),

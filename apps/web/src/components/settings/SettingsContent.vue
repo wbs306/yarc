@@ -21,6 +21,9 @@ const enabledModelsLoading = ref(false)
 
 const pdfCacheDays = ref(2)
 const pdfCacheSaved = ref(false)
+const noteSyncRunning = ref(false)
+const noteSyncMessage = ref('')
+const noteSyncError = ref('')
 const summaryPrompt = ref('')
 const summaryPromptLoading = ref(false)
 const summaryPromptSaved = ref(false)
@@ -1300,6 +1303,28 @@ const savePdfCacheDays = async () => {
   } catch { /* ignore */ }
 }
 
+const syncLinkedNoteFiles = async () => {
+  const confirmed = await confirm({
+    title: '同步 Markdown 笔记',
+    message: '将读取所有已关联的 Markdown 文件，并用文件内容更新数据库笔记。未关联文件的笔记不会处理。确认继续？',
+    confirmText: '开始同步',
+    icon: 'reset',
+  })
+  if (!confirmed) return
+
+  noteSyncRunning.value = true
+  noteSyncMessage.value = ''
+  noteSyncError.value = ''
+  try {
+    const { result } = await api.syncNotesFromFiles()
+    noteSyncMessage.value = `已检查 ${result.matched} 条关联笔记：更新 ${result.synced}，无变化 ${result.unchanged}，文件缺失 ${result.missing}，失败 ${result.failed}`
+  } catch (err) {
+    noteSyncError.value = (err as Error).message || '笔记同步失败'
+  } finally {
+    noteSyncRunning.value = false
+  }
+}
+
 const applyCustomBg = () => {
   const url = customBgUrl.value.trim()
   theme.setBackgroundImage(url || '')
@@ -2269,6 +2294,28 @@ onBeforeUnmount(() => {
             <div v-if="!filteredRankings.length" class="empty-text">无匹配条目</div>
             <p v-if="rankingEntries.length > 200" class="group-hint">仅显示前 200 条，请用搜索缩小范围。</p>
           </div>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <div class="card-header">
+          <h3>Markdown 笔记同步</h3>
+          <p>从已关联的 Markdown 文件导入内容，数据库仍作为前端和 Agent 的笔记数据源。</p>
+        </div>
+        <div class="card-body">
+          <div class="setting-row">
+            <div class="row-info">
+              <div class="row-label">同步关联笔记</div>
+              <div class="row-desc">仅处理已有 filePath 的笔记；文件内容不同时更新数据库。</div>
+            </div>
+            <div class="row-control">
+              <button class="btn-primary-sm" :disabled="noteSyncRunning" @click="syncLinkedNoteFiles">
+                {{ noteSyncRunning ? '同步中…' : '立即同步' }}
+              </button>
+            </div>
+          </div>
+          <p v-if="noteSyncMessage" class="maintenance-message">{{ noteSyncMessage }}</p>
+          <p v-if="noteSyncError" class="error-text">{{ noteSyncError }}</p>
         </div>
       </div>
 

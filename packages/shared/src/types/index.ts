@@ -75,6 +75,27 @@ export interface Note {
   updatedAt: string
 }
 
+export type NoteFileSyncStatus = 'synced' | 'unchanged' | 'missing' | 'failed'
+
+export interface NoteFileSyncItem {
+  noteId: string
+  paperId: string
+  status: NoteFileSyncStatus
+  error?: string
+}
+
+export interface NoteFileSyncResult {
+  requestedPaperIds: string[] | null
+  matched: number
+  synced: number
+  unchanged: number
+  missing: number
+  failed: number
+  updatedNoteIds: string[]
+  changedPaperIds: string[]
+  items: NoteFileSyncItem[]
+}
+
 // ── Conversation & Message ───────────────────────────────────────────────────
 
 export interface Conversation {

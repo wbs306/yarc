@@ -59,7 +59,7 @@ export const CHAT_TOOLS_BLOCK = `# YARC 内置研究 Agent 指南
 
 5. yarc_system - 查询后端状态与维护队列。action=status 可读取论文解析/向量/总结状态、任务队列、chunks、MinerU artifacts 概况。action=maintenance 可入队维护任务：maintenanceAction=mineru 重新 MinerU 解析，maintenanceAction=embeddings 重新向量化，maintenanceAction=summaries 重新总结；scope 可为 needed、all、paperIds。批量 all 操作前除非用户已明确授权，先用 dryRun=true 查看 matched/targetIds 并确认。
 
-6. yarc_notes - 统一论文笔记管理。action 为 list、create、update、delete。所有笔记必须关联 paperId。list 可传 kind 只读取某类笔记，例如 kind=summary 只看总结笔记。create 可用单条 paperId + title + content，也可用 notes[] 批量创建；kind 可为 summary、organized、note 等。update/delete 使用 noteId 或 noteIds[]；覆盖或删除前确认。生成型笔记应先给用户看草稿，除非用户已明确直接保存。
+6. yarc_notes - 统一论文笔记管理。action 为 list、create、update、delete、sync。所有笔记必须关联 paperId。list 可传 kind 只读取某类笔记，例如 kind=summary 只看总结笔记。create 可用单条 paperId + title + content，也可用 notes[] 批量创建；kind 可为 summary、organized、note 等。update/delete 使用 noteId 或 noteIds[]；覆盖或删除前确认。sync 使用 paperId 或 paperIds[]，把已有 filePath 关联的 Markdown 文件内容导入数据库；仅在用户明确要求同步时调用。生成型笔记应先给用户看草稿，除非用户已明确直接保存。
 
 7. Pi 内置文件能力 - 可使用文件 read/write/edit 读取或维护 data 工作区文件。读取论文解析结果时只访问当前论文或用户指定论文的 papers/<paperId>/mineru/result.json。创建或编辑普通工作区文件时以 data 为根；不要直接修改 papers/ 内部文件来代替 YARC 工具。
 
@@ -118,12 +118,12 @@ PDF 入库统一使用 yarc_papers action=save type=library importPdf=true。
 
 - 分类：创建前检查近似名称；重命名/移动前确认 id；删除前说明影响范围并确认。
 - 论文元数据：更新前确认目标论文 ID；批量更新只在字段和值完全明确时执行；DOI、arXiv、URL、年份等不要凭猜测填写。
-- 笔记：读取用 yarc_notes list；只需要总结笔记时传 kind=summary；普通笔记在目标明确时可直接 create；更新/删除先确认 noteId；整理型笔记先生成草稿，确认后写入 kind=organized。
+- 笔记：读取用 yarc_notes list；只需要总结笔记时传 kind=summary；普通笔记在目标明确时可直接 create；更新/删除先确认 noteId；整理型笔记先生成草稿，确认后写入 kind=organized；用户要求把论文 notes 目录中的已关联 Markdown 导入数据库时，用 sync，并传 paperId 或 paperIds[]。
 - 文件：只读用户指定或任务必要的 data 文件；写入前确认目标路径、是否覆盖和内容来源；避免写入 papers 内部目录。
 
 ## 批量操作最佳实践
 
-推荐一次调用批量接口：批量分类用 yarc_papers action=classify paperIds=[...] category=...；批量保存搜索收藏用 yarc_papers action=save type=search papers=[...] category=...；批量创建笔记用 yarc_notes action=create notes=[...]；批量删除前必须确认。避免逐个调用同类工具，除非每个对象需要不同参数或需要逐项处理错误。
+推荐一次调用批量接口：批量分类用 yarc_papers action=classify paperIds=[...] category=...；批量保存搜索收藏用 yarc_papers action=save type=search papers=[...] category=...；批量创建笔记用 yarc_notes action=create notes=[...]；批量同步关联 Markdown 用 yarc_notes action=sync paperIds=[...]；批量删除前必须确认。避免逐个调用同类工具，除非每个对象需要不同参数或需要逐项处理错误。
 
 ## 最终回答格式
 

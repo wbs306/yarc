@@ -349,7 +349,7 @@ export class PiService {
    * 2. yarc_categories - Manage categories (list/create/update/delete)
    * 3. yarc_papers - Manage papers (list/save/classify/update/delete), including PDF imports from base64/URL/local path
    * 4. yarc_system - Inspect backend status and enqueue maintenance jobs
-   * 5. yarc_notes - Manage notes (list/create/update/delete)
+   * 5. yarc_notes - Manage notes (list/create/update/delete/sync)
    */
   private async createYarcTools(interactionContext?: {
     conversationId?: string
@@ -1446,16 +1446,18 @@ export class PiService {
       defineTool({
         name: 'yarc_notes',
         label: 'Manage Notes',
-        description: 'Unified note management. Actions: list (show notes for a paper), create (new note, supports batch), update (modify note, supports batch), delete (remove note, supports batch). Notes must be associated with a paper (paperId required).',
+        description: 'Unified note management. Actions: list, create, update, delete, and sync. sync imports existing linked Markdown files into database notes and accepts paperId or paperIds.',
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal('list'),
             Type.Literal('create'),
             Type.Literal('update'),
-            Type.Literal('delete')
-          ], { description: 'Action: list, create, update, or delete' }),
-          // For list
-          paperId: Type.Optional(Type.String({ description: 'Paper ID (required for list/create)' })),
+            Type.Literal('delete'),
+            Type.Literal('sync')
+          ], { description: 'Action: list, create, update, delete, or sync' }),
+          // For list/create/sync
+          paperId: Type.Optional(Type.String({ description: 'Paper ID (required for list/create; sync accepts this or paperIds)' })),
+          paperIds: Type.Optional(Type.Array(Type.String(), { maxItems: 100, description: 'Paper IDs for sync (maximum 100)' })),
           // For create (single)
           title: Type.Optional(Type.String({ description: 'Note title' })),
           content: Type.Optional(Type.String({ description: 'Note content' })),
@@ -1476,6 +1478,24 @@ export class PiService {
         async execute(_toolCallId: string, params: any) {
           try {
             const action = params.action
+
+            // === SYNC ===
+            if (action === 'sync') {
+              const paperIds = [
+                ...(params.paperId ? [String(params.paperId)] : []),
+                ...(Array.isArray(params.paperIds) ? params.paperIds.map(String) : []),
+              ]
+              const uniquePaperIds = [...new Set(paperIds)]
+              if (uniquePaperIds.length === 0) {
+                return { content: [{ type: 'text' as const, text: 'paperId or paperIds is required for sync' }], isError: true, details: {} }
+              }
+              if (uniquePaperIds.length > 100) {
+                return { content: [{ type: 'text' as const, text: 'At most 100 paper IDs can be synced at once' }], isError: true, details: {} }
+              }
+              const result = await noteService.syncFromFiles(uniquePaperIds)
+              const text = `Note file sync checked ${result.matched} linked notes: ${result.synced} updated, ${result.unchanged} unchanged, ${result.missing} missing, ${result.failed} failed.`
+              return { content: [{ type: 'text' as const, text }], details: result }
+            }
 
             // === LIST ===
             if (action === 'list') {
@@ -2170,7 +2190,7 @@ export class PiService {
     const message = status === 'started'
       ? `${toolName} started`
       : this.formatToolResult(result, isError).slice(0, 600)
-    const paperId = details.paper?.id || details.note?.paperId || details.papers?.[0]?.id || args?.paperId
+    const paperId = details.paper?.id || details.note?.paperId || details.papers?.[0]?.id || details.changedPaperIds?.[0] || args?.paperId || args?.paperIds?.[0]
 
     sseHub.emit({
       type: 'agent-action',
@@ -2263,6 +2283,23 @@ export class PiService {
     // yarc_notes
     if (toolName === 'yarc_notes') {
       const action = args?.action || 'unknown'
+      if (action === 'sync') {
+        const changedPaperIds = Array.isArray(details.changedPaperIds) ? details.changedPaperIds : []
+        for (const changedPaperId of changedPaperIds) {
+          sseHub.emit({
+            type: 'notes-changed',
+            toolName,
+            action,
+            paperId: changedPaperId,
+            noteIds: Array.isArray(details.items)
+              ? details.items.filter((item: any) => item.paperId === changedPaperId && item.status === 'synced').map((item: any) => item.noteId)
+              : [],
+            at: new Date().toISOString(),
+          })
+        }
+        return
+      }
+
       const noteIds = details.notes?.map((n: any) => n.id).filter(Boolean) || details.noteIds || args?.noteIds || []
       const paperIdFromNotes = details.notes?.[0]?.paperId || args?.paperId
 
