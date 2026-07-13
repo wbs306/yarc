@@ -126,7 +126,6 @@ const uploadFiles = async (files: File[]) => {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
   z-index: 100;
   padding: 20px;
   padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));

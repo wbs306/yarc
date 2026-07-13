@@ -29,7 +29,7 @@ watch(open, (isOpen) => {
 
 <template>
   <Teleport to="body">
-    <Transition name="confirm">
+    <Transition name="confirm" :duration="{ enter: 340, leave: 160 }">
       <div
         v-if="open && current"
         class="confirm-overlay"
@@ -90,8 +90,6 @@ watch(open, (isOpen) => {
   justify-content: center;
   padding: 20px;
   background: rgba(9, 9, 16, 0.42);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 }
 
 .confirm-card {
@@ -215,10 +213,6 @@ watch(open, (isOpen) => {
 }
 
 /* ── Enter / leave motion ─────────────────────────────────────────────────── */
-.confirm-enter-active { transition: opacity 0.2s ease; }
-.confirm-leave-active { transition: opacity 0.16s ease; }
-.confirm-enter-from, .confirm-leave-to { opacity: 0; }
-
 .confirm-enter-active .confirm-card {
   animation: confirm-pop 0.34s cubic-bezier(0.34, 1.56, 0.64, 1);
 }

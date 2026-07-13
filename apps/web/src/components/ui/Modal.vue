@@ -18,7 +18,7 @@ const close = () => {
 
 <template>
   <Teleport to="body">
-    <Transition name="modal">
+    <Transition name="modal" :duration="160">
       <div v-if="modelValue" class="modal-overlay" @click.self="close">
         <div class="modal-card" :style="{ maxWidth: maxWidth || '500px' }">
           <div v-if="title || $slots.header" class="modal-header">
@@ -53,7 +53,6 @@ const close = () => {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
   padding: 16px;
 }
 
@@ -119,19 +118,16 @@ const close = () => {
   flex-shrink: 0;
 }
 
-.modal-enter-active,
-.modal-leave-active {
-  transition: all 0.25s ease;
-}
-
-.modal-enter-from,
-.modal-leave-to {
-  opacity: 0;
+.modal-enter-active .modal-card,
+.modal-leave-active .modal-card {
+  transition: transform 0.16s ease, opacity 0.16s ease;
+  will-change: transform, opacity;
 }
 
 .modal-enter-from .modal-card,
 .modal-leave-to .modal-card {
-  transform: scale(0.95) translateY(10px);
+  opacity: 0;
+  transform: scale(0.98) translateY(6px);
 }
 
 /* Modal footer button styles */

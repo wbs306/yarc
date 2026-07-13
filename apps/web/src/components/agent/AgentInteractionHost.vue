@@ -129,7 +129,6 @@ const notificationType = (request: AgentInteractionRequest) => {
   justify-content: center;
   padding: 18px;
   background: rgba(15, 23, 42, 0.22);
-  backdrop-filter: blur(2px);
 }
 .agent-notifications {
   position: absolute;
