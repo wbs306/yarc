@@ -1051,8 +1051,17 @@ const toggleCategoryExpand = (id: string) => {
 const selectCategory = (id: string | null) => {
   selectedSearchCategory.value = null
   selectedCategory.value = id
+  if (id === null) {
+    // “全部文献” should mean the complete library, not merely all categories
+    // while stale ranking filters continue hiding otherwise valid papers.
+    ccfFilter.value = 'all'
+    sciFilter.value = 'all'
+  }
   clearSelection()
   localStorage.setItem('yarc_category', id || '')
+  // Category changes also act as an explicit refresh. This recovers cleanly if
+  // a background import completed while its SSE event was missed or delayed.
+  void refreshLibrary().catch(() => {})
 }
 
 const getPaperRankings = (paper: any): { ccf: string | null; sci: string | null } => ({

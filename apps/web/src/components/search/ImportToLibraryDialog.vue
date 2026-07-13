@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import type { SearchPaper } from '@yarc/shared'
 import { useApi } from '@/composables/useApi'
+import { usePaperStore } from '@/stores/paper'
 import Modal from '../ui/Modal.vue'
 import Select from '../ui/Select.vue'
 import Checkbox from '../ui/Checkbox.vue'
@@ -24,6 +25,7 @@ const emit = defineEmits<{
 }>()
 
 const api = useApi()
+const paperStore = usePaperStore()
 const loading = ref(false)
 const importing = ref(false)
 const categories = ref<Category[]>([])
@@ -31,6 +33,7 @@ const selectedCategoryId = ref('')
 const createNewCategory = ref(false)
 const newCategoryName = ref('')
 const requirePdf = ref(true)
+const jobPollTimers = new Map<string, number>()
 
 const categoryOptions = computed(() => {
   const result: { value: string; label: string }[] = [
@@ -65,6 +68,52 @@ const loadCategories = async () => {
   }
 }
 
+const dispatchImportJobStatus = (job: any) => {
+  if (!job?.id) return
+  const detail = {
+    jobId: job.id,
+    status: job.status || 'running',
+    total: Number(job.total || 0),
+    completed: Number(job.completed || 0),
+    failed: Number(job.failed || 0),
+    categoryId: job.categoryId,
+    errors: job.errors || [],
+    warnings: job.warnings || [],
+    at: job.updatedAt || new Date().toISOString(),
+  }
+  window.dispatchEvent(new CustomEvent(`yarc-import-job-${job.status === 'failed' ? 'failed' : job.status === 'completed' ? 'completed' : 'progress'}`, { detail }))
+}
+
+const trackImportJob = (jobId: string) => {
+  let attempts = 0
+  const poll = async () => {
+    attempts += 1
+    try {
+      const response = await api.getImportJob(jobId)
+      const job = response.job
+      dispatchImportJobStatus(job)
+      if (job?.status === 'completed' || job?.status === 'failed') {
+        jobPollTimers.delete(jobId)
+        await paperStore.fetchPapers({ limit: 500 }).catch(() => {})
+        window.dispatchEvent(new CustomEvent('yarc-library-changed', {
+          detail: { source: 'import-job-poll', jobId, paperIds: (job.results || []).map((paper: any) => paper.id).filter(Boolean) },
+        }))
+        return
+      }
+    } catch {
+      // A transient polling failure should not hide a server-side job that may
+      // still be running; retry until the component is torn down.
+    }
+    if (attempts >= 900) {
+      jobPollTimers.delete(jobId)
+      return
+    }
+    const timer = window.setTimeout(poll, 1000)
+    jobPollTimers.set(jobId, timer)
+  }
+  void poll()
+}
+
 const importPapers = async () => {
   if (!canImport.value) return
   importing.value = true
@@ -82,6 +131,25 @@ const importPapers = async () => {
       extractMetadata: false,
     })
 
+    // The server emits the queued SSE event before this HTTP response returns,
+    // so a reconnecting or briefly suspended tab can miss it. Replay the
+    // initial state locally to guarantee that the top-bar progress indicator
+    // appears for every accepted import job.
+    if (result.job?.id) {
+      window.dispatchEvent(new CustomEvent('yarc-import-job-queued', {
+        detail: {
+          jobId: result.job.id,
+          status: result.job.status || 'queued',
+          total: Number(result.job.total || props.papers.length),
+          completed: Number(result.job.completed || 0),
+          failed: Number(result.job.failed || 0),
+          categoryId: result.job.categoryId,
+          at: result.job.updatedAt || new Date().toISOString(),
+        },
+      }))
+      trackImportJob(result.job.id)
+    }
+
     emit('started', result.job)
     emit('update:modelValue', false)
   } catch (err) {
@@ -94,6 +162,11 @@ const importPapers = async () => {
 
 onMounted(() => {
   loadCategories()
+})
+
+onBeforeUnmount(() => {
+  for (const timer of jobPollTimers.values()) window.clearTimeout(timer)
+  jobPollTimers.clear()
 })
 </script>
 
