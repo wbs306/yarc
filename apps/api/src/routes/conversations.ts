@@ -172,16 +172,29 @@ conversations.get('/:id/streaming-message', async (c) => {
   // Check in-memory streaming registry first
   const activeStream = streamingRegistry.get(id)
   if (activeStream) {
-    // If we have buffered events, return them
-    if (streamBuffer.has(activeStream.messageId)) {
+    const bufferedStream = streamBuffer.get(activeStream.messageId)
+    const message = {
+      id: activeStream.messageId,
+      conversationId: id,
+      branchId: activeStream.branchId,
+      role: 'assistant' as const,
+      content: '',
+      toolCalls: null,
+      metadata: { pending: true, segments: [], streamStatus: 'streaming' },
+      createdAt: new Date(bufferedStream?.createdAt || activeStream.startedAt).toISOString(),
+    }
+
+    // If we have buffered events, return the complete in-flight turn metadata.
+    if (bufferedStream) {
       return c.json({
-        message: { id: activeStream.messageId, branchId: activeStream.branchId },
+        message,
+        userMessage: bufferedStream.userMessage || null,
         events: streamBuffer.getEvents(activeStream.messageId),
         fromBuffer: true,
       })
     }
-    // Stream is still active but no buffer yet (shouldn't happen normally)
-    return c.json({ message: { id: activeStream.messageId, branchId: activeStream.branchId } })
+    // Stream is still active but no buffer yet (shouldn't happen normally).
+    return c.json({ message, userMessage: null })
   }
 
   return c.json({ message: null })

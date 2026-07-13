@@ -8,6 +8,17 @@
  * - Frontend can replay from REST or attach live subscribers for reconnection.
  */
 
+export interface StreamUserMessage {
+  id: string
+  conversationId: string
+  branchId: string
+  role: 'user'
+  content: string
+  toolCalls: null
+  metadata: Record<string, unknown>
+  createdAt: string
+}
+
 export interface StreamEntry {
   events: unknown[]           // All events for replay
   content: string             // Accumulated text content
@@ -18,6 +29,7 @@ export interface StreamEntry {
   status: 'streaming' | 'completed' | 'failed'
   conversationId: string
   branchId?: string
+  userMessage?: StreamUserMessage
   createdAt: number           // Stream creation timestamp
   updatedAt: number           // Last producer activity / heartbeat timestamp
 }
@@ -57,7 +69,7 @@ export class StreamBuffer {
   }
 
   /** Start a new stream for a message. */
-  start(messageId: string, conversationId: string, branchId?: string): void {
+  start(messageId: string, conversationId: string, branchId?: string, userMessage?: StreamUserMessage): void {
     this.streams.set(messageId, {
       events: [],
       content: '',
@@ -68,6 +80,7 @@ export class StreamBuffer {
       status: 'streaming',
       conversationId,
       branchId,
+      userMessage,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     })

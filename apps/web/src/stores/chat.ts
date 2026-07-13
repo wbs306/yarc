@@ -408,6 +408,7 @@ export const useChatStore = defineStore('chat', () => {
     if (currentConvId.value !== id) branchCache.value.clear()
 
     currentConvId.value = id
+    chatError.value = ''
 
     await loadBranches(id)
 
@@ -456,6 +457,7 @@ export const useChatStore = defineStore('chat', () => {
     const r = await api.createConversation({ paperId, model: currentModel.value || undefined })
     conversations.value.unshift(r.conversation)
     currentConvId.value = r.conversation.id
+    chatError.value = ''
     pendingEmptyConvs.add(r.conversation.id)
     branchCache.value.clear()
     await loadBranches(r.conversation.id)
@@ -688,7 +690,9 @@ export const useChatStore = defineStore('chat', () => {
     } catch (e) {
       const err = e as Error
       shouldReconnect = err.name !== 'AbortError'
-      chatError.value = err.name === 'AbortError' ? '已停止' : (err.message || '发送失败')
+      if (currentConvId.value === convId) {
+        chatError.value = err.name === 'AbortError' ? '已停止' : (err.message || '发送失败')
+      }
     } finally {
       abortControllers.delete(convId)
       if (convId) {
@@ -858,7 +862,7 @@ export const useChatStore = defineStore('chat', () => {
         refreshActiveInteraction();
         if (d.reason === 'timeout') chatError.value = 'Agent 交互请求已超时，已按取消处理。';
         break;
-      case 'error': { const t = `❌ ${d.message}`; m.content += m.content ? `\n\n${t}` : t; chatError.value = d.message; appendSeg(m, t, 'error'); break }
+      case 'error': { const t = `❌ ${d.message}`; m.content += m.content ? `\n\n${t}` : t; if (c === currentConvId.value) chatError.value = d.message; appendSeg(m, t, 'error'); break }
       // UI Context bridge events
       case 'agent_ui_status': if (d.key) uiStatus.value = { ...uiStatus.value, [d.key]: d.text || '' }; break
       case 'agent_ui_widget': if (d.key) uiWidgets.value = { ...uiWidgets.value, [d.key]: { lines: d.lines || [], placement: d.placement || 'above' } }; break
@@ -893,16 +897,34 @@ export const useChatStore = defineStore('chat', () => {
     if (!sm?.id) { syncStream(); return false }
 
     const bid = (sm as any).branchId || currentBranchId.value
+    const recoveredUser = r.userMessage as Message | null | undefined
+    const recoveredUserEntryId = recoveredUser?.id
+      ? (r.events || []).find((event: any) => event?.type === 'pi_user_entry' && event.messageId === recoveredUser.id)?.entryId
+      : null
     let msgRef: Message = {
-      ...cloneMessage(sm),
+      id: sm.id,
+      conversationId: sm.conversationId || convId,
+      branchId: bid || null,
+      role: 'assistant',
       content: '',
       toolCalls: null,
-      metadata: { ...(sm.metadata || {}), segments: [], streamStatus: 'streaming' },
+      metadata: { ...(sm.metadata || {}), pending: true, segments: [], streamStatus: 'streaming' },
+      createdAt: sm.createdAt || new Date().toISOString(),
     }
 
     if (bid) {
       currentBranchId.value = bid
       const arr = branchCache.value.get(bid) || []
+
+      // The optimistic user message only lived in the old page. Restore it on
+      // refresh unless Pi JSONL has already supplied its canonical entry.
+      if (recoveredUser?.id && !arr.some(m => m.id === recoveredUserEntryId)) {
+        const userIdx = arr.findIndex(m => m.id === recoveredUser.id)
+        const userMessage = cloneMessage(recoveredUser)
+        if (userIdx >= 0) arr[userIdx] = userMessage
+        else arr.push(userMessage)
+      }
+
       const idx = arr.findIndex(m => m.id === sm.id)
       if (idx >= 0) arr[idx] = msgRef
       else arr.push(msgRef)
@@ -915,27 +937,36 @@ export const useChatStore = defineStore('chat', () => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${location.host}/api/chat?conversation_id=${convId}`)
     let streamCompleted = false
+    let streamFailed = false
     ws.onopen = () => ws.send(JSON.stringify({ type: 'attach', messageId: sm.id }))
     ws.onmessage = (ev) => {
       try {
         const d = JSON.parse(ev.data)
         if (d.type === 'done') {
           streamCompleted = true
-          // Reload messages and detect subagent runs after reconnected stream completes
-          if (bid) loadBranchMsgs(convId, bid, true).then(() => detectSubagentRuns()).catch(() => {})
           ws.close(); return
         }
+        if (d.type === 'error') streamFailed = true
         if (d.type !== 'stream_start') applyEvent(d, msgRef, convId)
       } catch {}
     }
     ws.onerror = () => { /* onclose handles retry/reload */ }
     ws.onclose = () => {
       markInactive(convId, sm.id)
-      if (streamCompleted) {
+      if (streamCompleted && !streamFailed) {
         if (bid) {
           branchCache.value.delete(bid)
-          loadBranchMsgs(convId, bid).then(() => loadContextUsage(convId, bid)).catch(() => {})
+          loadBranchMsgs(convId, bid).then(() => {
+            detectSubagentRuns().catch(() => {})
+            return loadContextUsage(convId, bid)
+          }).catch(() => {})
         }
+      } else if (streamCompleted) {
+        // A stopped/failed reconnect already has the complete replayed content.
+        // Keep it visible instead of replacing it with Pi JSONL while abort
+        // persistence is still settling.
+        msgRef.metadata.pending = false
+        msgRef.metadata.streamStatus = 'failed'
       } else if (currentConvId.value === convId) {
         scheduleStreamReconnect(convId, navigator.onLine === false ? 5000 : 1500)
       }
@@ -951,6 +982,20 @@ export const useChatStore = defineStore('chat', () => {
         if (interaction.streamMessageId === m) delete interactions.value[requestId]
       }
       refreshActiveInteraction()
+
+      const bid = currentBranchId.value
+      if (bid) {
+        const arr = branchCache.value.get(bid) || []
+        for (const message of arr) {
+          if (!message.metadata?.pending) continue
+          if (message.id === m || message.role === 'user') {
+            message.metadata.pending = false
+            if (message.id === m) message.metadata.streamStatus = 'failed'
+          }
+        }
+        branchCache.value.set(bid, [...arr])
+      }
+
       abortControllers.get(c)?.abort(); abortControllers.delete(c); markInactive(c, m || undefined)
     }
     syncStream()

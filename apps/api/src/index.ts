@@ -246,7 +246,13 @@ app.get(
               return
             }
 
-            safeSend({ type: 'stream_start', messageId })
+            const bufferedStream = streamBuffer.get(messageId)
+            safeSend({
+              type: 'stream_start',
+              messageId,
+              branchId: bufferedStream?.branchId,
+              userMessage: bufferedStream?.userMessage,
+            })
             for (const evt of streamBuffer.getEvents(messageId)) safeSend(evt)
 
             if (!streamBuffer.has(messageId)) {
@@ -272,21 +278,39 @@ app.get(
             const branchId = prepared?.branchId || data.branchId || 'main'
             data.branchId = branchId
 
-            // Generate a unique message ID for the stream
+            // Generate stable in-flight user/assistant IDs. The pending user
+            // message is retained with the stream so an immediate refresh can
+            // restore the complete turn before Pi JSONL has persisted it.
             const { randomUUID } = await import('node:crypto')
             streamMsgId = randomUUID()
-            streamBuffer.start(streamMsgId, conversationId, branchId)
+            const isEditBranch = !!(prepared?.branchId && prepared.branchId !== originalBranchId)
+            const pendingUserMessage = {
+              id: `pending-user-${streamMsgId}`,
+              conversationId,
+              branchId,
+              role: 'user' as const,
+              content: data.content,
+              toolCalls: null,
+              metadata: {
+                pending: true,
+                context: data.context || null,
+                ...(isEditBranch ? { forkFromMessageId: data.editMessageId || null } : {}),
+              },
+              createdAt: new Date().toISOString(),
+            }
+            streamBuffer.start(streamMsgId, conversationId, branchId, pendingUserMessage)
 
             // Register in streaming registry for resumption
             const sessionFile = await piConversationService.getSessionFile(conversationId, branchId) || ''
             streamingRegistry.register(conversationId, streamMsgId, branchId, sessionFile)
 
-            // Assistant stream ID is only used for in-flight buffering. The
-            // canonical message IDs come from Pi JSONL after branch reload.
+            // In-flight IDs let replay metadata map pending messages to their
+            // canonical Pi JSONL entries after persistence.
+            data.userMessageId = pendingUserMessage.id
             data.assistantMessageId = streamMsgId
 
             // For edits with new branch, send full message list
-            if (prepared?.branchId && prepared.branchId !== originalBranchId) {
+            if (isEditBranch) {
               let branchInfo: unknown = undefined
               try {
                 const fullMessages = await piConversationService.getBranchMessages(conversationId, branchId)
@@ -301,16 +325,7 @@ app.get(
                 messageId: streamMsgId,
                 branchId,
                 branch: branchInfo,
-                userMessage: {
-                  id: `pending-user-${streamMsgId}`,
-                  conversationId,
-                  branchId,
-                  role: 'user',
-                  content: data.content,
-                  toolCalls: null,
-                  metadata: { pending: true, context: data.context || null, forkFromMessageId: data.editMessageId || null },
-                  createdAt: new Date().toISOString(),
-                },
+                userMessage: pendingUserMessage,
               })
             } else {
               // For new messages, send userMessage in stream_start
@@ -318,16 +333,7 @@ app.get(
                 type: 'stream_start',
                 messageId: streamMsgId,
                 branchId,
-                userMessage: {
-                  id: `pending-user-${streamMsgId}`,
-                  conversationId,
-                  branchId,
-                  role: 'user',
-                  content: data.content,
-                  toolCalls: null,
-                  metadata: { pending: true, context: data.context || null },
-                  createdAt: new Date().toISOString(),
-                },
+                userMessage: pendingUserMessage,
               })
             }
 

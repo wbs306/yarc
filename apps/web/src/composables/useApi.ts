@@ -206,7 +206,7 @@ export function useApi() {
       request(`/conversations/${id}`, { method: 'DELETE' }),
 
     getStreamingMessage: (convId: string) =>
-      request<{ message: any | null; events?: any[]; fromBuffer?: boolean }>(`/conversations/${convId}/streaming-message`),
+      request<{ message: any | null; userMessage?: any | null; events?: any[]; fromBuffer?: boolean }>(`/conversations/${convId}/streaming-message`),
 
     stopStreamingMessage: (convId: string, messageId: string) =>
       request<{ ok: boolean }>(`/conversations/${convId}/streaming-message/${messageId}/stop`, { method: 'POST' }),
