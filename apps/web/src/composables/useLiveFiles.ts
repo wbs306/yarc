@@ -76,6 +76,8 @@ export function useLiveFiles() {
     let ws: WebSocket | null = null
     let closedByClient = false
     let reconnectTimer: number | null = null
+    let reconnectCountdownTimer: number | null = null
+    let reconnectDeadline = 0
     let reconnectAttempt = 0
     let pendingFlushRequested = false
     let readyResolve: (() => void) | null = null
@@ -111,13 +113,30 @@ export function useLiveFiles() {
       if (sendJson({ type: 'flush' })) pendingFlushRequested = false
     }
 
+    const clearReconnectCountdown = () => {
+      if (reconnectCountdownTimer !== null) {
+        window.clearInterval(reconnectCountdownTimer)
+        reconnectCountdownTimer = null
+      }
+      reconnectDeadline = 0
+    }
+
     const scheduleReconnect = () => {
       if (closedByClient || reconnectTimer !== null) return
       const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * (2 ** reconnectAttempt))
       reconnectAttempt += 1
-      error.value = `实时文件连接已断开，${Math.round(delay / 1000) || 1} 秒后重连…`
+      clearReconnectCountdown()
+      reconnectDeadline = Date.now() + delay
+      const updateCountdown = () => {
+        const seconds = Math.max(1, Math.ceil((reconnectDeadline - Date.now()) / 1000))
+        error.value = `实时文件连接已断开，${seconds} 秒后重连…`
+      }
+      updateCountdown()
+      reconnectCountdownTimer = window.setInterval(updateCountdown, 250)
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null
+        clearReconnectCountdown()
+        error.value = '正在重新连接实时文件…'
         connect()
       }, delay)
     }
@@ -200,6 +219,7 @@ export function useLiveFiles() {
       ws.onopen = () => {
         connected.value = true
         reconnectAttempt = 0
+        clearReconnectCountdown()
         error.value = ''
       }
       ws.onmessage = handleMessage
@@ -270,6 +290,7 @@ export function useLiveFiles() {
           window.clearTimeout(reconnectTimer)
           reconnectTimer = null
         }
+        clearReconnectCountdown()
         try { ws?.close() } catch { /* ignore */ }
         ydoc.destroy()
         clients.delete(path)
@@ -285,6 +306,7 @@ export function useLiveFiles() {
       clients.delete(path)
       closedByClient = true
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
+      clearReconnectCountdown()
       try { (ws as WebSocket | null)?.close() } catch { /* ignore */ }
       ydoc.destroy()
       throw err

@@ -204,7 +204,7 @@ watch(() => currentLiveClient.value?.modified.value, (modified) => {
   if (currentLiveClient.value && modified) workspaceModified.value = modified
 })
 watch(() => currentLiveClient.value?.error.value, (message) => {
-  if (currentLiveClient.value && message) filesError.value = message
+  if (currentLiveClient.value) filesError.value = message || ''
 })
 
 const persistRecentWorkspaceFiles = () => {
