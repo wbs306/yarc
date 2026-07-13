@@ -402,17 +402,30 @@ const scheduleScroll = () => {
 }
 const isNearBottom = () => {
   if (!container.value) return true
-  return container.value.scrollHeight - container.value.scrollTop - container.value.clientHeight < 80
+  return container.value.scrollHeight - container.value.scrollTop - container.value.clientHeight < 8
 }
-const maybeScroll = () => { if (autoScroll.value && isNearBottom() && container.value) requestAnimationFrame(() => { container.value!.scrollTop = container.value!.scrollHeight }) }
-const scrollBottom = () => { if (container.value) requestAnimationFrame(() => { container.value!.scrollTop = container.value!.scrollHeight }) }
+const maybeScroll = () => {
+  if (autoScroll.value && container.value) {
+    requestAnimationFrame(() => { container.value!.scrollTop = container.value!.scrollHeight })
+  }
+}
+const scrollBottom = () => {
+  autoScroll.value = true
+  if (container.value) requestAnimationFrame(() => { container.value!.scrollTop = container.value!.scrollHeight })
+}
 const onScroll = () => { autoScroll.value = isNearBottom() }
+const streamLayoutVersion = computed(() => (chatStore.messages || []).map((msg: any) => [
+  msg.id,
+  msg.content?.length || 0,
+  Array.isArray(msg.metadata?.segments) ? msg.metadata.segments.length : 0,
+  (msg.toolCalls || []).map((tool: any) => `${tool.id}:${tool.result?.length || 0}`).join(','),
+].join(':')).join('|'))
 
 watch(() => chatStore.messages?.length ?? 0, (newLen, oldLen) => {
   scheduleScroll()
   if (oldLen === 0 && newLen > 0) nextTick(scrollBottom)
 }, { flush: 'post' })
-watch(() => chatStore.streamingContent, () => scheduleScroll(), { flush: 'post' })
+watch(streamLayoutVersion, () => scheduleScroll(), { flush: 'post' })
 watch(() => chatStore.pendingPrompt, (p) => {
   if (p) { inputText.value = p; chatStore.pendingPrompt = ''; scheduleScroll() }
 })
@@ -489,8 +502,10 @@ const send = async () => {
   editingMessageId.value = ''
   // Reset textarea height
   if (textareaRef.value) textareaRef.value.style.height = 'auto'
-  await chatStore.sendMessage(text, { editMessageId, editForkMessageId })
+  const sendPromise = chatStore.sendMessage(text, { editMessageId, editForkMessageId })
+  await nextTick()
   scrollBottom()
+  await sendPromise
 }
 
 const beginEdit = (msg: any) => {
@@ -752,6 +767,11 @@ const formatToolName = (tc: any): string => {
 const isPlaceholderSegment = (seg: any) => !!seg.placeholder
 const hasVisibleOutput = (msg: any) => msg.content || (msg.toolCalls || []).length || messageSegments(msg).some((s: any) => !s.placeholder)
 const isStreamingMsg = (msg: any) => chatStore.isStreaming && chatStore.streamingMessageId === msg.id
+const isWaitingAfterToolCall = (msg: any) => {
+  if (!isStreamingMsg(msg)) return false
+  const segments = messageSegments(msg)
+  return segments[segments.length - 1]?.type === 'tool'
+}
 
 const currentConvTitle = computed(() => chatStore.conversations.find(c => c.id === chatStore.currentConvId)?.title || '新对话')
 
@@ -959,6 +979,8 @@ const sessionState = computed(() => {
           <div v-else-if="seg.type === 'compaction'" class="msg-body md compaction" v-html="renderMarkdown(seg.text || '')" />
           <div v-else class="msg-body md" :class="{ placeholder: isPlaceholderSegment(seg) }" v-html="renderMarkdown(seg.text || '')" />
         </template>
+
+        <div v-if="isWaitingAfterToolCall(msg)" class="typing-indicator"><span /><span /><span /></div>
 
         <div v-if="msg.metadata?.citations?.length" class="msg-cites">
           <button v-for="(c, i) in msg.metadata.citations" :key="i" class="cite-btn">📖 第{{ c.pageNumber }}页</button>
