@@ -417,8 +417,13 @@ const runtimeDir =
       : dirname(fileURLToPath(import.meta.url))
 const webDistDir = join(runtimeDir, '../../web/dist')
 
-// Serve static assets
-app.use('/assets/*', serveStatic({ root: webDistDir }))
+// Hashed Vite assets are immutable. Missing assets must stay 404 instead of
+// falling through to index.html, so stale lazy imports can be detected reliably.
+app.use('/assets/*', serveStatic({
+  root: webDistDir,
+  onFound: (_path, c) => c.header('Cache-Control', 'public, max-age=31536000, immutable'),
+}))
+app.get('/assets/*', (c) => c.notFound())
 
 // Backgrounds are runtime user data, served outside the frontend build output.
 app.get('/bg/*', async (c) => {
@@ -474,12 +479,14 @@ app.get('*', async (c) => {
     }
     const content = await readFile(filePath)
     c.header('Content-Type', mimeTypes[ext] || 'application/octet-stream')
+    if (ext === '.html' || path === '/sw.js') c.header('Cache-Control', 'no-cache')
     return c.body(content)
   } catch {
     // File not found, serve index.html (SPA fallback)
     try {
       const indexHtml = await readFile(join(webDistDir, 'index.html'), 'utf-8')
       c.header('Content-Type', 'text/html')
+      c.header('Cache-Control', 'no-cache')
       return c.body(indexHtml)
     } catch {
       return c.text('Frontend not built. Run: pnpm --filter @yarc/web build', 500)
