@@ -8,7 +8,7 @@ import { usePaperReferenceStore } from '@/stores/paperReference'
 
 const router = useRouter()
 const store = usePaperReferenceStore()
-const { open, loading, saving, error, reference, resolution, anchorRect } = storeToRefs(store)
+const { open, loading, saving, error, reference, resolution, anchorRect, anchorElement } = storeToRefs(store)
 const searchTitle = ref('')
 const showImport = ref(false)
 const importPapers = ref<SearchPaper[]>([])
@@ -89,12 +89,42 @@ const onDocumentPointerDown = (event: PointerEvent) => {
   if (!popoverRef.value?.contains(event.target as Node)) close()
 }
 const onDocumentKeydown = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
+let anchorRaf = 0
+const updateAnchorPosition = () => {
+  anchorRaf = 0
+  const anchor = anchorElement.value
+  if (!anchor?.isConnected) return
+  const rect = anchor.getBoundingClientRect()
+  const isVisible = rect.bottom > 0 && rect.top < viewportHeight.value && rect.right > 0 && rect.left < viewportWidth.value
+  if (!isVisible) {
+    close()
+    return
+  }
+  store.updateAnchorRect({
+    top: rect.top,
+    right: rect.right,
+    bottom: rect.bottom,
+    left: rect.left,
+    width: rect.width,
+    height: rect.height,
+  })
+}
+const scheduleAnchorPosition = () => {
+  cancelAnimationFrame(anchorRaf)
+  anchorRaf = requestAnimationFrame(updateAnchorPosition)
+}
 const onViewportChange = () => {
   viewportWidth.value = window.innerWidth
   viewportHeight.value = window.innerHeight
+  scheduleAnchorPosition()
 }
 const onDocumentScroll = (event: Event) => {
-  if (!popoverRef.value?.contains(event.target as Node)) close()
+  // Chat/tool output auto-scrolls in a separate pane; only close when the
+  // scrolling container can actually move the clicked Markdown reference.
+  const target = event.target
+  const anchor = anchorElement.value
+  if (!anchor?.isConnected || popoverRef.value?.contains(target as Node)) return
+  if (target === document || target === window || (target instanceof Node && target.contains(anchor))) close()
 }
 
 watch(open, async value => {
@@ -106,6 +136,7 @@ watch(open, async value => {
     document.addEventListener('scroll', onDocumentScroll, true)
     window.addEventListener('resize', onViewportChange)
   } else {
+    cancelAnimationFrame(anchorRaf)
     document.removeEventListener('pointerdown', onDocumentPointerDown)
     document.removeEventListener('keydown', onDocumentKeydown)
     document.removeEventListener('scroll', onDocumentScroll, true)
@@ -114,6 +145,7 @@ watch(open, async value => {
 })
 
 onBeforeUnmount(() => {
+  cancelAnimationFrame(anchorRaf)
   document.removeEventListener('pointerdown', onDocumentPointerDown)
   document.removeEventListener('keydown', onDocumentKeydown)
   document.removeEventListener('scroll', onDocumentScroll, true)

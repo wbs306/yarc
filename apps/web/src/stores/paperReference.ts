@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, shallowRef } from 'vue'
 import type { PaperReferenceInput, PaperReferenceResolution, SearchPaper } from '@yarc/shared'
 import { useApi } from '@/composables/useApi'
 import { usePaperStore } from '@/stores/paper'
@@ -24,15 +24,18 @@ export const usePaperReferenceStore = defineStore('paper-reference', () => {
   const reference = ref<PaperReferenceInput | null>(null)
   const resolution = ref<PaperReferenceResolution | null>(null)
   const anchorRect = ref<{ top: number; right: number; bottom: number; left: number; width: number; height: number } | null>(null)
+  const anchorElement = shallowRef<HTMLElement | null>(null)
   const cache = new Map<string, PaperReferenceResolution>()
 
   const resolve = async (
     input: PaperReferenceInput,
     force = false,
-    anchor?: { top: number; right: number; bottom: number; left: number; width: number; height: number }
+    anchor?: { top: number; right: number; bottom: number; left: number; width: number; height: number },
+    element?: HTMLElement
   ) => {
     reference.value = input
     if (anchor) anchorRect.value = anchor
+    if (element) anchorElement.value = element
     open.value = true
     error.value = ''
     const key = cacheKey(input)
@@ -151,7 +154,13 @@ export const usePaperReferenceStore = defineStore('paper-reference', () => {
   }
 
   const retry = () => reference.value ? resolve(reference.value, true) : Promise.resolve(null)
-  const close = () => { open.value = false }
+  const updateAnchorRect = (rect: { top: number; right: number; bottom: number; left: number; width: number; height: number }) => {
+    anchorRect.value = rect
+  }
+  const close = () => {
+    open.value = false
+    anchorElement.value = null
+  }
 
   return {
     open,
@@ -161,7 +170,9 @@ export const usePaperReferenceStore = defineStore('paper-reference', () => {
     reference,
     resolution,
     anchorRect,
+    anchorElement,
     resolve,
+    updateAnchorRect,
     chooseCandidate,
     saveToLibrary,
     retry,

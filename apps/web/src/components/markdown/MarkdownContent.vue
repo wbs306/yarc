@@ -35,7 +35,7 @@ const onClick = (event: MouseEvent) => {
     left: rect.left,
     width: rect.width,
     height: rect.height,
-  })
+  }, anchor)
 }
 </script>
 
