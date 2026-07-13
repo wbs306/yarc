@@ -1,8 +1,13 @@
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
-import { prisma } from '@yarc/db'
+import { prisma, type Prisma } from '@yarc/db'
 import { config } from '../lib/config.js'
-import { parseVectorLiteral, type SearchPaper } from '@yarc/shared'
+import {
+  parseVectorLiteral,
+  type PaperReferenceInput,
+  type PaperReferenceResolution,
+  type SearchPaper,
+} from '@yarc/shared'
 import { cleanSnippetForDisplay } from '../lib/text-cleaning.js'
 import { embeddingService } from './embedding.service.js'
 
@@ -175,6 +180,26 @@ const ieeePdfUrlForArticle = (articleNumber: unknown) => {
 }
 
 const normalizeForSearch = (value: unknown) => String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+const normalizeTitle = (value: unknown) => normalizeForSearch(value)
+  .normalize('NFKC')
+  .replace(/[\p{P}\p{S}]+/gu, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+const normalizeDoi = (value: unknown) => String(value ?? '')
+  .trim()
+  .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
+  .replace(/^doi:\s*/i, '')
+  .toLowerCase()
+const normalizeArxivId = (value: unknown) => String(value ?? '')
+  .trim()
+  .replace(/^https?:\/\/(?:www\.)?arxiv\.org\/(?:abs|pdf)\//i, '')
+  .replace(/\.pdf$/i, '')
+  .replace(/^arxiv:\s*/i, '')
+  .replace(/v\d+$/i, '')
+  .toLowerCase()
+const authorFamilyNames = (authors: string[] = []) => new Set(authors
+  .map(author => normalizeForSearch(author).split(/\s+/).filter(Boolean).at(-1))
+  .filter((name): name is string => !!name))
 
 const removeIEEEHighlights = (value: string) => value.replace(/\[::|::\]/g, '')
 
@@ -296,6 +321,271 @@ async function fetchWithCookieJar(
 }
 
 export class SearchService {
+  private localPaperToSearchPaper(paper: any): SearchPaper {
+    const metadata = (paper.metadata || {}) as Record<string, unknown>
+    return {
+      id: paper.id,
+      title: paper.title,
+      abstract: paper.abstract,
+      authors: paper.authors || [],
+      year: paper.year,
+      url: paper.url,
+      doi: paper.doi,
+      arxivId: paper.arxivId,
+      journal: typeof metadata.journal === 'string' ? metadata.journal : null,
+      venue: typeof metadata.venue === 'string' ? metadata.venue : null,
+      source: 'local',
+      filePath: paper.filePath,
+      parseStatus: paper.parseStatus,
+    }
+  }
+
+  private semanticScholarPaperToSearchPaper(paper: any): SearchPaper {
+    const externalIds = paper.externalIds || {}
+    const publicationVenue = paper.publicationVenue || {}
+    return {
+      id: paper.paperId,
+      title: cleanText(paper.title) || '',
+      abstract: cleanText(paper.abstract),
+      authors: Array.isArray(paper.authors)
+        ? paper.authors.map((author: any) => cleanText(author.name)).filter((author: string | null): author is string => !!author)
+        : [],
+      year: numberOrNull(paper.year),
+      url: cleanText(paper.url),
+      pdfUrl: cleanText(paper.openAccessPdf?.url),
+      doi: cleanText(externalIds.DOI),
+      arxivId: cleanText(externalIds.ArXiv),
+      journal: cleanText(publicationVenue.name),
+      venue: cleanText(paper.venue) || cleanText(publicationVenue.name),
+      source: 'semantic_scholar',
+      citationCount: numberOrNull(paper.citationCount),
+      referenceCount: numberOrNull(paper.referenceCount),
+      publicationDate: cleanText(paper.publicationDate),
+      publicationTypes: paper.publicationTypes || [],
+      fieldsOfStudy: paper.fieldsOfStudy || [],
+      openAccessPdf: paper.openAccessPdf || null,
+      tldr: cleanText(paper.tldr?.text),
+    }
+  }
+
+  private async findLocalReferenceCandidates(reference: PaperReferenceInput): Promise<SearchPaper[]> {
+    if (reference.localPaperId) {
+      const paper = await prisma.paper.findUnique({ where: { id: reference.localPaperId } })
+      return paper ? [this.localPaperToSearchPaper(paper)] : []
+    }
+
+    const doi = normalizeDoi(reference.doi)
+    const arxivId = normalizeArxivId(reference.arxivId)
+    const title = String(reference.title || '').trim()
+    const or: Prisma.PaperWhereInput[] = []
+    if (doi) or.push({ doi: { contains: doi, mode: 'insensitive' } })
+    if (arxivId) or.push({ arxivId: { contains: arxivId, mode: 'insensitive' } })
+    if (title) {
+      or.push({ title: { contains: title, mode: 'insensitive' } })
+      const titleProbe = title.split(/[^\p{L}\p{N}]+/u).filter(part => part.length >= 3).slice(0, 4).join(' ')
+      if (titleProbe && titleProbe !== title) or.push({ title: { contains: titleProbe, mode: 'insensitive' } })
+    }
+    if (!or.length) return []
+
+    const papers = await prisma.paper.findMany({ where: { OR: or }, take: 20, orderBy: { createdAt: 'desc' } })
+    return papers.map(paper => this.localPaperToSearchPaper(paper))
+  }
+
+  private scoreReferenceCandidate(reference: PaperReferenceInput, paper: SearchPaper) {
+    const doi = normalizeDoi(reference.doi)
+    const arxivId = normalizeArxivId(reference.arxivId)
+    if (doi && normalizeDoi(paper.doi) === doi) return 100
+    if (arxivId && normalizeArxivId(paper.arxivId) === arxivId) return 100
+    if (reference.semanticScholarId && paper.source === 'semantic_scholar' && paper.id === reference.semanticScholarId) return 100
+
+    const expectedTitle = normalizeTitle(reference.title)
+    const actualTitle = normalizeTitle(paper.title)
+    if (!expectedTitle || !actualTitle) return 0
+
+    let score = expectedTitle === actualTitle ? 80 : 0
+    if (!score && (actualTitle.includes(expectedTitle) || expectedTitle.includes(actualTitle))) score = 55
+    if (reference.year && paper.year === reference.year) score += 10
+
+    const expectedAuthors = authorFamilyNames(reference.authors)
+    const actualAuthors = authorFamilyNames(paper.authors)
+    if (expectedAuthors.size && Array.from(expectedAuthors).some(author => actualAuthors.has(author))) score += 10
+    return score
+  }
+
+  private async getSemanticScholarPaper(identifier: string): Promise<SearchPaper | null> {
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'User-Agent': 'YARC/2.0 SemanticScholarReferenceResolver',
+    }
+    if (config.semanticScholarApiKey) headers['x-api-key'] = config.semanticScholarApiKey
+
+    try {
+      const data = await fetchJsonWithRetry(
+        `${S2_API_BASE}/paper/${encodeURIComponent(identifier)}?fields=${encodeURIComponent(S2_FIELDS)}`,
+        { headers },
+        1
+      )
+      return data?.paperId ? this.semanticScholarPaperToSearchPaper(data) : null
+    } catch {
+      return null
+    }
+  }
+
+  private async resolvePaperReference(reference: PaperReferenceInput): Promise<PaperReferenceResolution> {
+    const original = { ...reference }
+    try {
+      const localCandidates = await this.findLocalReferenceCandidates(reference)
+      const rankedLocal = localCandidates
+        .map(paper => ({ paper, score: reference.localPaperId && paper.id === reference.localPaperId ? 100 : this.scoreReferenceCandidate(reference, paper) }))
+        .filter(item => item.score >= 55)
+        .sort((a, b) => b.score - a.score)
+
+      const localLeadIsClear = rankedLocal[0]?.score >= 80
+        && (!rankedLocal[1] || rankedLocal[0].score - rankedLocal[1].score >= 10)
+      if (rankedLocal[0]?.score === 100 || localLeadIsClear) {
+        const matchedBy = reference.localPaperId ? 'local'
+          : normalizeDoi(reference.doi) ? 'doi'
+            : normalizeArxivId(reference.arxivId) ? 'arxiv'
+              : 'title'
+        return {
+          key: reference.key,
+          status: 'resolved',
+          matchedBy,
+          confidence: rankedLocal[0].score === 100 ? 'exact' : 'high',
+          localPaper: rankedLocal[0].paper,
+          paper: rankedLocal[0].paper,
+          candidates: [],
+          original,
+        }
+      }
+
+      if (rankedLocal.length > 1) {
+        return {
+          key: reference.key,
+          status: 'ambiguous',
+          matchedBy: 'title',
+          confidence: 'medium',
+          localPaper: null,
+          paper: null,
+          candidates: rankedLocal.slice(0, 8).map(item => item.paper),
+          original,
+        }
+      }
+
+      const doi = normalizeDoi(reference.doi)
+      const arxivId = normalizeArxivId(reference.arxivId)
+      const exactIdentifier = reference.semanticScholarId
+        || (doi ? `DOI:${doi}` : '')
+        || (arxivId ? `ARXIV:${arxivId}` : '')
+      if (exactIdentifier) {
+        const paper = await this.getSemanticScholarPaper(exactIdentifier)
+        if (paper) {
+          return {
+            key: reference.key,
+            status: 'resolved',
+            matchedBy: reference.semanticScholarId ? 'semantic_scholar' : doi ? 'doi' : 'arxiv',
+            confidence: 'exact',
+            localPaper: null,
+            paper,
+            candidates: [],
+            original,
+          }
+        }
+      }
+
+      if (reference.ieeeArticleNumber) {
+        const response = await this.searchIEEE(reference.ieeeArticleNumber, 'all', 1, 8)
+        const exact = response.papers.filter(paper => String(paper.articleNumber || paper.id) === reference.ieeeArticleNumber)
+        if (exact.length === 1 || (exact.length === 0 && response.papers.length === 1)) {
+          return {
+            key: reference.key,
+            status: 'resolved',
+            matchedBy: 'ieee',
+            confidence: exact.length === 1 ? 'exact' : 'high',
+            localPaper: null,
+            paper: exact[0] || response.papers[0],
+            candidates: [],
+            original,
+          }
+        }
+        const candidates = exact.length > 1 ? exact : response.papers
+        if (candidates.length > 1) {
+          return {
+            key: reference.key,
+            status: 'ambiguous',
+            matchedBy: 'ieee',
+            confidence: 'medium',
+            localPaper: null,
+            paper: null,
+            candidates: candidates.slice(0, 8),
+            original,
+          }
+        }
+      }
+
+      const title = String(reference.title || '').trim()
+      if (title) {
+        const response = await this.searchSemanticScholar(title, 'title', 1, 8, reference.year || undefined, reference.year || undefined)
+        const ranked = response.papers
+          .map(paper => ({ paper, score: this.scoreReferenceCandidate(reference, paper) }))
+          .filter(item => item.score >= 55)
+          .sort((a, b) => b.score - a.score)
+
+        const externalLeadIsClear = ranked[0]?.score >= 80
+          && (!ranked[1] || ranked[0].score - ranked[1].score >= 10)
+        if (externalLeadIsClear) {
+          return {
+            key: reference.key,
+            status: 'resolved',
+            matchedBy: 'title',
+            confidence: 'high',
+            localPaper: null,
+            paper: ranked[0].paper,
+            candidates: [],
+            original,
+          }
+        }
+        if (ranked.length) {
+          return {
+            key: reference.key,
+            status: 'ambiguous',
+            matchedBy: 'title',
+            confidence: 'medium',
+            localPaper: null,
+            paper: null,
+            candidates: ranked.slice(0, 8).map(item => item.paper),
+            original,
+          }
+        }
+      }
+
+      return { key: reference.key, status: 'not_found', localPaper: null, paper: null, candidates: [], original }
+    } catch (err) {
+      return {
+        key: reference.key,
+        status: 'error',
+        localPaper: null,
+        paper: null,
+        candidates: [],
+        original,
+        error: (err as Error).message || 'Failed to resolve paper reference',
+      }
+    }
+  }
+
+  async resolvePaperReferences(references: PaperReferenceInput[]): Promise<PaperReferenceResolution[]> {
+    const results = new Array<PaperReferenceResolution>(references.length)
+    let cursor = 0
+    const worker = async () => {
+      while (cursor < references.length) {
+        const index = cursor++
+        results[index] = await this.resolvePaperReference(references[index])
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(3, references.length) }, () => worker()))
+    return results
+  }
+
   // ── Local Vector Search (pgvector) ──────────────────────────────────────
 
   async searchLocalVector(

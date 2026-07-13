@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useNoteStore, type Note } from '@/stores/note'
 import { confirm } from '@/composables/useConfirm'
-import { renderMarkdown } from '@/lib/markdown'
+import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 
 const props = defineProps<{ paperId: string; page: number }>()
 const emit = defineEmits<{ close: []; 'click-note': [note: any] }>()
@@ -52,7 +52,7 @@ const deleteNote = async (id: string) => {
             </div>
           </div>
           <blockquote v-if="note.highlightText" class="note-quote">"{{ note.highlightText }}"</blockquote>
-          <div class="note-content md" v-html="renderMarkdown(note.content)" />
+          <MarkdownContent class="note-content" :content="note.content" />
         </template>
         <template v-else>
           <textarea v-model="editContent" class="note-edit" rows="10" @keydown.enter.stop />

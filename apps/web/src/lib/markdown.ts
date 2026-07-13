@@ -1,5 +1,6 @@
 import katex, { type KatexOptions } from 'katex'
 import { marked, type MarkedExtension, type Tokens } from 'marked'
+import { linkifyImplicitPaperReferences } from './paper-reference'
 
 interface KatexToken extends Tokens.Generic {
   type: 'inlineKatex' | 'blockKatex'
@@ -146,7 +147,7 @@ export function renderMarkdown(text: string): string {
   if (!text) return ''
   configureMarked()
   try {
-    return marked.parse(normalizeBlockquoteMathBlocks(text)) as string
+    return marked.parse(linkifyImplicitPaperReferences(normalizeBlockquoteMathBlocks(text))) as string
   } catch {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')
   }

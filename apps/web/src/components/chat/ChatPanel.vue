@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { renderMarkdown as renderMd } from '@/lib/markdown'
 import { copyToClipboard } from '@/lib/clipboard'
 import { useChatStore } from '@/stores/chat'
 import { useThemeStore } from '@/stores/theme'
@@ -9,6 +8,7 @@ import { confirm } from '@/composables/useConfirm'
 import ModelSelector from './ModelSelector.vue'
 import ReasoningEffort from './ReasoningEffort.vue'
 import AgentInteractionHost from '@/components/agent/AgentInteractionHost.vue'
+import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 
 const emit = defineEmits<{ close: [] }>()
 const chatStore = useChatStore()
@@ -611,8 +611,6 @@ const onKeydown = (e: KeyboardEvent) => {
 
 // ── Markdown ────────────────────────────────────────────────────────────────
 
-const escapeHtml = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-const renderMarkdown = (text: string) => { try { return renderMd(text) } catch { return escapeHtml(text).replace(/\n/g, '<br>') } }
 
 const messageSegments = (msg: any) => {
   const stored = Array.isArray(msg.metadata?.segments) ? msg.metadata.segments.filter(Boolean) : []
@@ -832,7 +830,7 @@ const sessionState = computed(() => {
           <div v-else-if="item.error" class="btw-error">❌ {{ item.error }}</div>
           <div v-else-if="item.cancelled" class="btw-cancelled">已取消</div>
           <details v-if="item.thinking" class="btw-thinking"><summary>思考记录</summary><pre>{{ item.thinking }}</pre></details>
-          <div v-if="item.answer" class="btw-answer md" v-html="renderMarkdown(item.answer)" />
+          <MarkdownContent v-if="item.answer" class="btw-answer" :content="item.answer" />
           <div v-if="!item.loading && item.answer && !item.error" class="btw-actions">
             <button class="btw-action-btn" @click="chatStore.insertBtwAnswer(item.runId || item.id)" title="插入输入框">📋 插入</button>
             <button class="btw-action-btn" @click="chatStore.sendBtwAsMainMessage(item.runId || item.id)" title="作为主消息发送">💬 发送</button>
@@ -975,9 +973,9 @@ const sessionState = computed(() => {
               <div v-if="toolForSegment(msg, seg)?.result" class="tool-result">{{ toolForSegment(msg, seg)?.result }}</div>
             </template>
           </details>
-          <div v-else-if="seg.type === 'error'" class="msg-body md error" v-html="renderMarkdown(seg.text || '')" />
-          <div v-else-if="seg.type === 'compaction'" class="msg-body md compaction" v-html="renderMarkdown(seg.text || '')" />
-          <div v-else class="msg-body md" :class="{ placeholder: isPlaceholderSegment(seg) }" v-html="renderMarkdown(seg.text || '')" />
+          <MarkdownContent v-else-if="seg.type === 'error'" class="msg-body error" :content="seg.text || ''" />
+          <MarkdownContent v-else-if="seg.type === 'compaction'" class="msg-body compaction" :content="seg.text || ''" />
+          <MarkdownContent v-else class="msg-body" :class="{ placeholder: isPlaceholderSegment(seg) }" :content="seg.text || ''" />
         </template>
 
         <div v-if="isWaitingAfterToolCall(msg)" class="typing-indicator"><span /><span /><span /></div>

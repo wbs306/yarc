@@ -264,6 +264,35 @@ export interface SearchPaper {
   [key: string]: unknown
 }
 
+export interface PaperReferenceInput {
+  key?: string
+  title?: string
+  authors?: string[]
+  year?: number | null
+  localPaperId?: string
+  doi?: string
+  arxivId?: string
+  semanticScholarId?: string
+  ieeeArticleNumber?: string
+  url?: string
+  rawText?: string
+}
+
+export type PaperReferenceMatchType = 'local' | 'doi' | 'arxiv' | 'semantic_scholar' | 'ieee' | 'title'
+export type PaperReferenceConfidence = 'exact' | 'high' | 'medium'
+
+export interface PaperReferenceResolution {
+  key?: string
+  status: 'resolved' | 'ambiguous' | 'not_found' | 'error'
+  matchedBy?: PaperReferenceMatchType
+  confidence?: PaperReferenceConfidence
+  localPaper?: SearchPaper | null
+  paper?: SearchPaper | null
+  candidates?: SearchPaper[]
+  original: PaperReferenceInput
+  error?: string
+}
+
 // ── File ─────────────────────────────────────────────────────────────────────
 
 export interface FileNode {

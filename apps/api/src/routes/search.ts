@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { searchService } from '../services/search.service.js'
+import type { PaperReferenceInput } from '@yarc/shared'
 
 const search = new Hono()
 
@@ -81,6 +82,35 @@ search.get('/', async (c) => {
       502
     )
   }
+})
+
+// POST /api/search/resolve — resolve Markdown paper references against local and external sources
+search.post('/resolve', async (c) => {
+  const body = await c.req.json().catch(() => null) as { references?: PaperReferenceInput[] } | null
+  const references = body?.references
+  if (!Array.isArray(references) || references.length === 0) {
+    return c.json({ error: { code: 'INVALID_REFERENCES', message: 'references must be a non-empty array' } }, 400)
+  }
+  if (references.length > 20) {
+    return c.json({ error: { code: 'TOO_MANY_REFERENCES', message: 'At most 20 references can be resolved at once' } }, 400)
+  }
+
+  const normalized = references.map(reference => ({
+    key: typeof reference.key === 'string' ? reference.key.slice(0, 200) : undefined,
+    title: typeof reference.title === 'string' ? reference.title.slice(0, 1000) : undefined,
+    authors: Array.isArray(reference.authors) ? reference.authors.filter((author): author is string => typeof author === 'string').slice(0, 50) : undefined,
+    year: typeof reference.year === 'number' && Number.isInteger(reference.year) ? reference.year : undefined,
+    localPaperId: typeof reference.localPaperId === 'string' ? reference.localPaperId : undefined,
+    doi: typeof reference.doi === 'string' ? reference.doi.slice(0, 500) : undefined,
+    arxivId: typeof reference.arxivId === 'string' ? reference.arxivId.slice(0, 200) : undefined,
+    semanticScholarId: typeof reference.semanticScholarId === 'string' ? reference.semanticScholarId.slice(0, 200) : undefined,
+    ieeeArticleNumber: typeof reference.ieeeArticleNumber === 'string' ? reference.ieeeArticleNumber.slice(0, 100) : undefined,
+    url: typeof reference.url === 'string' ? reference.url.slice(0, 2000) : undefined,
+    rawText: typeof reference.rawText === 'string' ? reference.rawText.slice(0, 2000) : undefined,
+  }))
+
+  const results = await searchService.resolvePaperReferences(normalized)
+  return c.json({ results })
 })
 
 // GET /api/search/download-pdf

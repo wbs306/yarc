@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { renderMarkdown } from '@/lib/markdown'
 import { usePaperStore, type Paper } from '@/stores/paper'
 import { useChatStore } from '@/stores/chat'
 import { useNoteStore, type Note } from '@/stores/note'
@@ -23,6 +22,7 @@ import SaveToCategoryDialog from '@/components/search/SaveToCategoryDialog.vue'
 import ImportToLibraryDialog from '@/components/search/ImportToLibraryDialog.vue'
 import JournalRankingBadge from '@/components/rankings/JournalRankingBadge.vue'
 import Modal from '@/components/ui/Modal.vue'
+import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import Select from '@/components/ui/Select.vue'
 import SortControl, { type SortOption } from '@/components/ui/SortControl.vue'
 
@@ -192,7 +192,6 @@ const workspaceIsLegacyOffice = computed(() => isLegacyOfficeFile(selectedWorksp
 const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension === '.pdf')
 const workspaceIsMarkdown = computed(() => workspaceLanguage.value === 'markdown')
 const markdownPreview = ref(false)
-const workspaceMarkdownHtml = computed(() => renderMarkdown(workspaceContent.value))
 
 watch(() => currentLiveClient.value?.content.value, (content) => {
   if (currentLiveClient.value && content !== undefined) workspaceContent.value = content
@@ -1054,11 +1053,6 @@ const selectCategory = (id: string | null) => {
   selectedCategory.value = id
   clearSelection()
   localStorage.setItem('yarc_category', id || '')
-}
-
-const renderNoteContent = (content: string): string => {
-  if (!content) return ''
-  return renderMarkdown(content)
 }
 
 const getPaperRankings = (paper: any): { ccf: string | null; sci: string | null } => ({
@@ -2624,7 +2618,7 @@ const showSearchPaperPopup = (paper: any) => {
                   </span>
                 </div>
                 <blockquote v-if="note.highlightText" class="note-quote">{{ note.highlightText }}</blockquote>
-                <div class="note-content md" v-html="renderNoteContent(note.content || (note.kind === 'highlight' ? '高亮' : ''))" />
+                <MarkdownContent class="note-content" :content="note.content || (note.kind === 'highlight' ? '高亮' : '')" />
               </template>
               <template v-else>
                 <textarea v-model="editingNoteContent" class="note-edit" rows="12" @click.stop @keydown.enter.stop />
@@ -2864,11 +2858,11 @@ const showSearchPaperPopup = (paper: any) => {
             <div v-else-if="workspaceContentLoading" class="workspace-empty compact">正在读取文件…</div>
 
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
-              <div
+              <MarkdownContent
                 v-show="workspaceIsMarkdown && markdownPreview"
-                class="workspace-md-preview md"
+                class="workspace-md-preview"
                 :style="{ fontSize: `${theme.editor.markdownFontSize}px` }"
-                v-html="workspaceMarkdownHtml"
+                :content="workspaceContent"
               />
               <div v-if="currentLiveClient?.conflict.value" class="workspace-live-conflict">
                 文件在磁盘被外部程序修改，无法安全自动合并。

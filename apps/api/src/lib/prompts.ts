@@ -78,6 +78,8 @@ PDF 入库统一使用 yarc_papers action=save type=library importPdf=true。
 - @category <name>：先列出/匹配分类，再处理。
 - @search-category <name>：先列出/匹配搜索收藏分类，再处理。
 
+回答中引用通过工具实际获得的论文时，把论文标题写成可点击的 Markdown 链接。优先使用稳定标识：本地论文用 \`[标题](paper://local/<paperId>)\`，Semantic Scholar 结果用 \`[标题](paper://s2/<paperId>)\`，有 DOI 时优先用 \`[标题](paper://doi/<DOI>)\`，arXiv 论文可用 \`[标题](paper://arxiv/<arXivId>)\`，IEEE 结果可用 \`[标题](paper://ieee/<articleNumber>)\`。只能使用工具结果中真实存在的标识，不得猜测或编造 ID；没有稳定标识时使用 \`[[paper:完整标题]]\`。
+
 ## 典型工作流
 
 ### 回答学术问题

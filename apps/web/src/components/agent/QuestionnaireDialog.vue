@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import type { AgentInteractionRequest } from '@/stores/chat'
-import { renderMarkdown as renderMd } from '@/lib/markdown'
+import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 
 interface QuestionOption {
   label: string
@@ -107,10 +107,6 @@ const activePreview = computed(() => {
   return question.options.find((option) => option.label === label)?.preview || ''
 })
 
-const escapeHtml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-const renderPreview = (value: string) => {
-  try { return renderMd(value) } catch { return escapeHtml(value).replace(/\n/g, '<br>') }
-}
 
 const selectOption = (questionIndex: number, option: QuestionOption) => {
   const question = questions.value[questionIndex]
@@ -291,7 +287,7 @@ const chatAboutThis = () => {
 
       <aside v-if="hasPreview" class="preview-pane">
         <div class="preview-title">Preview</div>
-        <div v-if="activePreview" class="preview-content" v-html="renderPreview(activePreview)" />
+        <MarkdownContent v-if="activePreview" class="preview-content" :content="activePreview" />
         <div v-else class="preview-empty">聚焦或选择带 preview 的选项后显示内容。</div>
       </aside>
     </div>

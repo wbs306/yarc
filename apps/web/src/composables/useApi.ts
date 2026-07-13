@@ -1,3 +1,5 @@
+import type { PaperReferenceInput, PaperReferenceResolution } from '@yarc/shared'
+
 const API_BASE = '/api'
 
 interface RequestInitExt extends RequestInit {
@@ -270,6 +272,12 @@ export function useApi() {
     searchExternal: (q: string, source?: string, field?: string, page?: number) =>
       request('/search', {
         params: { q, ...(source && { source }), ...(field && { field }), ...(page && { page: String(page) }) },
+      }),
+
+    resolvePaperReferences: (references: PaperReferenceInput[]) =>
+      request<{ results: PaperReferenceResolution[] }>('/search/resolve', {
+        method: 'POST',
+        body: JSON.stringify({ references }),
       }),
 
     // Search Categories
