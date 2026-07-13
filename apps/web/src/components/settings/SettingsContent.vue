@@ -1422,11 +1422,20 @@ onBeforeUnmount(() => {
         <div class="card-body">
           <div class="setting-row">
             <div class="row-info">
-              <div class="row-label">字体大小</div>
+              <div class="row-label">编辑器字体大小</div>
               <div class="row-desc">当前 {{ theme.editor.fontSize }}px</div>
             </div>
             <div class="row-control" style="flex: 1; max-width: 200px;">
               <input type="range" :value="theme.editor.fontSize" min="10" max="22" step="1" class="range" @input="theme.setEditorSetting('fontSize', Number(($event.target as HTMLInputElement).value))" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="row-info">
+              <div class="row-label">Markdown 预览字号</div>
+              <div class="row-desc">当前 {{ theme.editor.markdownFontSize }}px，标题按比例缩放</div>
+            </div>
+            <div class="row-control" style="flex: 1; max-width: 200px;">
+              <input type="range" :value="theme.editor.markdownFontSize" min="10" max="24" step="1" class="range" @input="theme.setEditorSetting('markdownFontSize', Number(($event.target as HTMLInputElement).value))" />
             </div>
           </div>
           <div class="setting-row">

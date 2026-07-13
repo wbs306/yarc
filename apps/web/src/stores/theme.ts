@@ -6,6 +6,7 @@ export type ThemeMode = 'light' | 'dark' | 'auto'
 
 export interface EditorSettings {
   fontSize: number
+  markdownFontSize: number
   tabSize: number
   lineWrap: boolean
   lineNumbers: boolean
@@ -30,6 +31,7 @@ const STORAGE_KEY = 'yarc-theme'
 
 const DEFAULT_EDITOR: EditorSettings = {
   fontSize: 13,
+  markdownFontSize: 14,
   tabSize: 2,
   lineWrap: true,
   lineNumbers: true,
@@ -141,6 +143,7 @@ export const useThemeStore = defineStore('theme', () => {
       const e = theme.editor
       editor.value = {
         fontSize: typeof e.fontSize === 'number' ? clamp(e.fontSize, 10, 24) : DEFAULT_EDITOR.fontSize,
+        markdownFontSize: typeof e.markdownFontSize === 'number' ? clamp(e.markdownFontSize, 10, 24) : DEFAULT_EDITOR.markdownFontSize,
         tabSize: typeof e.tabSize === 'number' ? clamp(e.tabSize, 2, 8) : DEFAULT_EDITOR.tabSize,
         lineWrap: typeof e.lineWrap === 'boolean' ? e.lineWrap : DEFAULT_EDITOR.lineWrap,
         lineNumbers: typeof e.lineNumbers === 'boolean' ? e.lineNumbers : DEFAULT_EDITOR.lineNumbers,

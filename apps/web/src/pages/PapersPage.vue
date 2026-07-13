@@ -2867,6 +2867,7 @@ const showSearchPaperPopup = (paper: any) => {
               <div
                 v-show="workspaceIsMarkdown && markdownPreview"
                 class="workspace-md-preview md"
+                :style="{ fontSize: `${theme.editor.markdownFontSize}px` }"
                 v-html="workspaceMarkdownHtml"
               />
               <div v-if="currentLiveClient?.conflict.value" class="workspace-live-conflict">
@@ -3762,10 +3763,10 @@ const showSearchPaperPopup = (paper: any) => {
   scroll-padding-bottom: 32px;
   color: var(--color-text);
 }
-.workspace-md-preview :deep(h1) { font-size: 24px; font-weight: 700; margin: 20px 0 12px; }
-.workspace-md-preview :deep(h2) { font-size: 20px; font-weight: 700; margin: 18px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--color-border); }
-.workspace-md-preview :deep(h3) { font-size: 17px; font-weight: 600; margin: 16px 0 8px; }
-.workspace-md-preview :deep(h4) { font-size: 15px; font-weight: 600; margin: 14px 0 6px; }
+.workspace-md-preview :deep(h1) { font-size: 1.7em; font-weight: 700; margin: 1.4em 0 0.7em; }
+.workspace-md-preview :deep(h2) { font-size: 1.4em; font-weight: 700; margin: 1.3em 0 0.65em; padding-bottom: 0.4em; border-bottom: 1px solid var(--color-border); }
+.workspace-md-preview :deep(h3) { font-size: 1.2em; font-weight: 600; margin: 1.2em 0 0.6em; }
+.workspace-md-preview :deep(h4) { font-size: 1.05em; font-weight: 600; margin: 1.1em 0 0.5em; }
 .workspace-md-preview :deep(:first-child) { margin-top: 0; }
 .workspace-md-preview :deep(a) { color: var(--color-primary); text-decoration: underline; }
 .workspace-md-preview :deep(img) { max-width: 100%; border-radius: var(--radius); }
