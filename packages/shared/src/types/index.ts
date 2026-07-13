@@ -202,6 +202,7 @@ export type ChatEvent =
     }
   | { type: 'citation'; pageNumber: number; text: string }
   | { type: 'session_state'; model: string; thinkingLevel: string; models: Array<{ id: string; name?: string; reasoning?: boolean }> }
+  | { type: 'context_usage'; tokens: number | null; contextWindow: number; percent: number | null; model?: string }
   | AgentInteractionRequest
   | AgentInteractionResolved
   | { type: 'pi_user_entry'; conversationId: string; messageId: string; entryId: string; sessionFile: string }

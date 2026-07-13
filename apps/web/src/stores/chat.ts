@@ -836,6 +836,16 @@ export const useChatStore = defineStore('chat', () => {
         m.metadata.sessionState = { model: d.model, thinkingLevel: d.thinkingLevel };
         if (d.models?.length) m.metadata.availableModels = d.models;
         break;
+      case 'context_usage':
+        if (c === currentConvId.value) {
+          currentContextUsage.value = {
+            tokens: d.tokens ?? null,
+            contextWindow: Number(d.contextWindow || 0),
+            percent: d.percent ?? null,
+            model: d.model,
+          }
+        }
+        break;
       case 'agent_interaction_request':
         interactions.value[d.requestId] = d;
         if (d.kind === 'notification') {

@@ -1975,6 +1975,20 @@ export class PiService {
       } catch { /* ignore */ }
 
       const toolContext = new Map<string, { name: string; args: any }>()
+      const pushContextUsage = () => {
+        try {
+          const usage = session.getContextUsage?.()
+          const contextWindow = Number(usage?.contextWindow ?? session.model?.contextWindow ?? 0)
+          const tokens = usage?.tokens ?? null
+          push({
+            type: 'context_usage',
+            tokens,
+            contextWindow,
+            percent: usage?.percent ?? (contextWindow > 0 && tokens !== null ? (tokens / contextWindow) * 100 : null),
+            model: session.model?.id,
+          })
+        } catch { /* non-fatal */ }
+      }
 
       const unsubscribe = session.subscribe((event: any) => {
         if (event.type === 'message_update') {
@@ -1998,6 +2012,7 @@ export class PiService {
             toolName,
             input: JSON.stringify(args),
           })
+          pushContextUsage()
         } else if (event.type === 'tool_execution_end') {
           const toolCallId = String(event.toolCallId || '')
           const ctx = toolContext.get(toolCallId)
@@ -2006,6 +2021,7 @@ export class PiService {
             toolCallId,
             result: this.formatToolResult(event.result, event.isError),
           })
+          pushContextUsage()
           if (ctx) this.emitAgentToolEvent(event.isError ? 'failed' : 'completed', ctx.name, ctx.args, event.result, !!event.isError)
           if (ctx?.name === 'yarc_search_papers' && !event.isError) {
             const details = event.result?.details || {}
