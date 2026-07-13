@@ -1,7 +1,7 @@
 import { prisma } from '@yarc/db'
 import { AppError } from '../lib/errors.js'
 import { JOB_QUEUE_CONCURRENCY_SETTING_KEY, jobQueue } from './job-queue.service.js'
-import type { JobQueueConcurrency } from './job-queue.service.js'
+import type { JobQueueConcurrency, JobType } from './job-queue.service.js'
 
 export class TaskService {
   async list(status?: string, limit = 50, order: 'asc' | 'desc' = 'desc') {
@@ -55,10 +55,12 @@ export class TaskService {
       throw new AppError('INVALID_STATUS', 'Can only retry failed tasks', 400)
     }
 
-    return prisma.task.update({
+    const updated = await prisma.task.update({
       where: { id },
       data: { status: 'pending', error: null, progress: 0, result: null as any, completedAt: null },
     })
+    jobQueue.add(updated.type as JobType, updated.paperId, { persistTask: false, taskId: updated.id })
+    return updated
   }
 
   getConcurrency() {

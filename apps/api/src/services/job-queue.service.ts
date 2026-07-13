@@ -20,7 +20,7 @@ import {
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-type JobType = 'parse_pdf' | 'generate_embedding' | 'summarize' | 'enrich_metadata'
+export type JobType = 'parse_pdf' | 'generate_embedding' | 'summarize' | 'enrich_metadata'
 
 export interface JobQueueConcurrency {
   maxConcurrent: number
@@ -40,6 +40,8 @@ interface Job {
 
 class JobQueue {
   private queue: Job[] = []
+  private knownTaskIds = new Set<string>()
+  private knownJobKeys = new Set<string>()
   private running = 0
   private runningSummaries = 0
   private runningEmbeddings = 0
@@ -52,6 +54,16 @@ class JobQueue {
   add(type: JobType, paperId: string, options: { persistTask?: boolean; taskId?: string } = {}): Job {
     const persistTask = options.persistTask ?? true
     const taskId = options.taskId || (persistTask ? randomUUID() : undefined)
+    const jobKey = `${type}:${paperId}`
+    if (this.knownJobKeys.has(jobKey)) {
+      return this.queue.find(queuedJob => queuedJob.type === type && queuedJob.paperId === paperId) || {
+        id: randomUUID(),
+        taskId,
+        type,
+        paperId,
+        status: 'running',
+      }
+    }
     const job: Job = {
       id: randomUUID(),
       taskId,
@@ -60,6 +72,8 @@ class JobQueue {
       status: 'pending',
     }
     this.queue.push(job)
+    this.knownJobKeys.add(jobKey)
+    if (taskId) this.knownTaskIds.add(taskId)
     sseHub.emit({ type: 'paper-status', paperId, jobType: type, status: 'queued', jobId: taskId || job.id, at: new Date().toISOString() })
 
     if (persistTask) {
@@ -69,7 +83,14 @@ class JobQueue {
       // without letting the queued job run later.
       prisma.task.create({
         data: { ...(taskId ? { id: taskId } : {}), paperId, type, status: 'pending' },
-      }).then(() => this.process()).catch(console.error)
+      }).then(() => this.process()).catch((err) => {
+        const index = this.queue.findIndex(queuedJob => queuedJob.id === job.id)
+        if (index >= 0) this.queue.splice(index, 1)
+        this.knownJobKeys.delete(jobKey)
+        if (taskId) this.knownTaskIds.delete(taskId)
+        console.error(err)
+        this.process()
+      })
       return job
     }
 
@@ -82,12 +103,22 @@ class JobQueue {
     if (jobIndex < 0) return null
 
     const [job] = this.queue.splice(jobIndex, 1)
+    this.knownJobKeys.delete(`${job.type}:${job.paperId}`)
+    if (job.taskId) this.knownTaskIds.delete(job.taskId)
     job.status = 'failed'
     job.error = reason
     await this.markPaperJobFailed(job).catch(console.error)
     sseHub.emit({ type: 'paper-status', paperId: job.paperId, jobType: job.type, status: 'failed', error: reason })
     this.process()
     return job
+  }
+
+  hasTask(taskId: string): boolean {
+    return this.knownTaskIds.has(taskId)
+  }
+
+  hasJob(type: JobType, paperId: string): boolean {
+    return this.knownJobKeys.has(`${type}:${paperId}`)
   }
 
   getConcurrency(): JobQueueConcurrency {
@@ -178,6 +209,8 @@ class JobQueue {
       if (job.type === 'summarize') this.runningSummaries--
       if (job.type === 'generate_embedding') this.runningEmbeddings--
       if (job.type === 'parse_pdf') this.runningParses--
+      this.knownJobKeys.delete(`${job.type}:${job.paperId}`)
+      if (job.taskId) this.knownTaskIds.delete(job.taskId)
       this.process()
     }
   }
@@ -648,19 +681,41 @@ const loadPersistedConcurrency = async () => {
   }
 }
 
-// Recover incomplete jobs on startup
-export async function recoverJobs() {
-  try {
-    await loadPersistedConcurrency()
+let reconciliationTimer: ReturnType<typeof setInterval> | null = null
+let reconciliationRunning = false
 
+const reconcileIncompleteJobs = async () => {
+  if (reconciliationRunning) return
+  reconciliationRunning = true
+  try {
     const pendingTasks = await prisma.task.findMany({
       where: { status: { in: ['pending', 'active'] } },
-      distinct: ['paperId', 'type'],
+      orderBy: { createdAt: 'asc' },
     })
 
     for (const task of pendingTasks) {
+      const type = task.type as JobType
+      if (jobQueue.hasTask(task.id) || jobQueue.hasJob(type, task.paperId)) continue
       console.log(`[JobQueue] Recovering task: ${task.type} for paper ${task.paperId}`)
-      jobQueue.add(task.type as JobType, task.paperId, { persistTask: false, taskId: task.id })
+      jobQueue.add(type, task.paperId, { persistTask: false, taskId: task.id })
+    }
+  } catch (err) {
+    console.error('[JobQueue] Failed to reconcile jobs:', err)
+  } finally {
+    reconciliationRunning = false
+  }
+}
+
+// Recover incomplete jobs on startup and keep reconciling persisted pending
+// tasks. The periodic pass repairs missed enqueue callbacks and tasks moved
+// back to pending by retry operations without duplicating known in-memory jobs.
+export async function recoverJobs() {
+  try {
+    await loadPersistedConcurrency()
+    await reconcileIncompleteJobs()
+    if (reconciliationTimer === null) {
+      reconciliationTimer = setInterval(() => { void reconcileIncompleteJobs() }, 5000)
+      reconciliationTimer.unref?.()
     }
   } catch (err) {
     console.error('[JobQueue] Failed to recover jobs:', err)
