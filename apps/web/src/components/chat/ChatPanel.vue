@@ -135,6 +135,7 @@ const selectPaper = (paper: { id: string; title: string }) => {
 
 const fileTreeCache = ref<Array<{ path: string; type: 'file' | 'directory' }>>([])
 const categoriesCache = ref<Array<{ id: string; name: string }>>([])
+const dismissedSuggestionText = ref('')
 
 const flattenFileTree = (nodes: any[]): Array<{ path: string; type: 'file' | 'directory' }> => {
   const items: Array<{ path: string; type: 'file' | 'directory' }> = []
@@ -178,7 +179,7 @@ interface SuggestionItem {
 
 const suggestions = computed<SuggestionItem[]>(() => {
   const text = inputText.value
-  if (!text) return []
+  if (!text || text === dismissedSuggestionText.value) return []
 
   // Find the last @command in the input
   const atCommandRegex = /@(file|paper|category)(\s+[^@]*?)?$/i
@@ -271,10 +272,14 @@ const selectedSuggestion = ref(0)
 watch(suggestions, () => { selectedSuggestion.value = 0 })
 
 const applySuggestion = (item: SuggestionItem) => {
-  // Replace only the matched @command part, preserving the rest of the input
+  // Replace only the matched @command part, preserving the rest of the input.
+  // Suppress the palette for the completed value so the next Enter sends it
+  // instead of selecting the same suggestion repeatedly.
   const before = inputText.value.substring(0, item.matchStart)
   const after = inputText.value.substring(item.matchEnd)
-  inputText.value = before + item.insert + after
+  const nextText = before + item.insert + after
+  dismissedSuggestionText.value = nextText
+  inputText.value = nextText
   selectedSuggestion.value = 0
   nextTick(() => {
     const el = document.querySelector('.chat-textarea') as HTMLTextAreaElement | null
@@ -291,6 +296,7 @@ const applySelectedSuggestion = () => {
 
 // Preload data when @ is typed
 watch(inputText, (val) => {
+  if (dismissedSuggestionText.value && val !== dismissedSuggestionText.value) dismissedSuggestionText.value = ''
   if (val.includes('@file')) loadFileTree()
   if (val.includes('@category')) loadCategories()
   if (val.includes('@paper') && !paperStore.papers.length) paperStore.fetchPapers()
