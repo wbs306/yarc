@@ -846,13 +846,9 @@ const formatToolName = (tc: any): string => {
   return name
 }
 const isPlaceholderSegment = (seg: any) => !!seg.placeholder
-const hasVisibleOutput = (msg: any) => msg.content || (msg.toolCalls || []).length || messageSegments(msg).some((s: any) => !s.placeholder)
+// Same lifetime as the stop button: visible for the whole active stream (isStreaming),
+// not only before the first text/tool segment appears.
 const isStreamingMsg = (msg: any) => chatStore.isStreaming && chatStore.streamingMessageId === msg.id
-const isWaitingAfterToolCall = (msg: any) => {
-  if (!isStreamingMsg(msg)) return false
-  const segments = messageSegments(msg)
-  return segments[segments.length - 1]?.type === 'tool'
-}
 
 const currentConvTitle = computed(() => chatStore.conversations.find(c => c.id === chatStore.currentConvId)?.title || '新对话')
 
@@ -1061,7 +1057,7 @@ const sessionState = computed(() => {
           <MarkdownContent v-else class="msg-body" :class="{ placeholder: isPlaceholderSegment(seg) }" :content="seg.text || ''" />
         </template>
 
-        <div v-if="isWaitingAfterToolCall(msg)" class="typing-indicator"><span /><span /><span /></div>
+        <div v-if="isStreamingMsg(msg)" class="typing-indicator"><span /><span /><span /></div>
 
         <div v-if="msg.metadata?.citations?.length" class="msg-cites">
           <button v-for="(c, i) in msg.metadata.citations" :key="i" class="cite-btn">📖 第{{ c.pageNumber }}页</button>
@@ -1093,7 +1089,8 @@ const sessionState = computed(() => {
         </div>
       </div>
 
-      <div v-if="chatStore.isStreaming && !chatStore.messages?.some(m => m.role === 'assistant' && isStreamingMsg(m) && hasVisibleOutput(m))" class="msg assistant">
+      <!-- Placeholder dots only before stream_start attaches an assistant message -->
+      <div v-if="chatStore.isStreaming && !chatStore.messages?.some(m => isStreamingMsg(m))" class="msg assistant">
         <div class="typing-indicator"><span /><span /><span /></div>
       </div>
       <div style="min-height: 32px" />
