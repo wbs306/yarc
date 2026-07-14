@@ -3843,7 +3843,7 @@ const showSearchPaperPopup = (paper: any) => {
   padding: 10px;
   margin-bottom: 8px;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
   transition: border-color var(--transition), background var(--transition);
 }
 .note-card:hover { border-color: var(--color-primary); background: var(--color-bg-card); }
@@ -3874,8 +3874,10 @@ const showSearchPaperPopup = (paper: any) => {
   background: rgba(245, 158, 11, 0.10);
   border-radius: 0 5px 5px 0;
   color: var(--color-text-secondary);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 13px;
+  line-height: 1.6;
+  cursor: text;
+  user-select: text;
   display: -webkit-box;
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
@@ -3883,10 +3885,12 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .note-content {
   color: var(--color-text);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.7;
   word-break: break-word;
   overflow-wrap: anywhere;
+  cursor: text;
+  user-select: text;
 }
 .note-content :deep(p) { margin-bottom: 6px; }
 .note-content :deep(p:last-child) { margin-bottom: 0; }
@@ -3894,7 +3898,7 @@ const showSearchPaperPopup = (paper: any) => {
   background: var(--color-bg-muted);
   padding: 1px 4px;
   border-radius: 3px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .note-content :deep(pre) {
   background: var(--color-bg-muted);
@@ -3920,7 +3924,8 @@ const showSearchPaperPopup = (paper: any) => {
   border-radius: var(--radius-sm);
   background: var(--color-bg-card);
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.6;
   resize: vertical;
   font-family: inherit;
   min-height: 240px;
@@ -3949,7 +3954,8 @@ const showSearchPaperPopup = (paper: any) => {
   border-radius: var(--radius-sm);
   background: var(--color-bg-muted);
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.6;
   padding: 8px;
   resize: vertical;
   font-family: inherit;

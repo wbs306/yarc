@@ -264,8 +264,8 @@ onBeforeUnmount(() => {
 .reference-grid span { color: var(--color-text-muted); font-size: 10px; }
 .reference-grid strong { overflow-wrap: anywhere; font-size: 12px; font-weight: 500; }
 .reference-abstract { margin-top: 14px; }
-.reference-abstract > strong { font-size: 12px; }
-.reference-abstract p { margin: 5px 0 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
+.reference-abstract > strong { font-size: 13px; }
+.reference-abstract p { margin: 6px 0 0; color: var(--color-text-secondary); font-size: 14px; line-height: 1.75; cursor: text; user-select: text; }
 .reference-search { display: flex; gap: 8px; }
 .reference-search input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text); }
 .reference-search button { padding: 7px 10px; border: 0; border-radius: var(--radius-sm); background: var(--color-primary); color: #fff; cursor: pointer; }

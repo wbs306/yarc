@@ -119,7 +119,7 @@ const deleteNote = async (id: string) => {
   background: var(--color-bg-muted);
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
-  cursor: pointer;
+  cursor: default;
   transition: border-color var(--transition), background var(--transition);
 }
 .note-card:hover { border-color: var(--color-border-hover); background: var(--color-bg-hover); }
@@ -152,12 +152,15 @@ const deleteNote = async (id: string) => {
   border-left: 3px solid var(--color-warning);
   background: #fffbeb;
   border-radius: 0 4px 4px 0;
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.6;
   color: #92400e;
+  cursor: text;
+  user-select: text;
 }
 [data-theme="dark"] .note-quote { background: #451a03; color: #fde047; }
 
-.note-content { font-size: 13px; color: var(--color-text); line-height: 1.5; }
+.note-content { font-size: 14px; color: var(--color-text); line-height: 1.7; cursor: text; user-select: text; }
 
 .note-edit {
   width: 100%;
@@ -166,7 +169,8 @@ const deleteNote = async (id: string) => {
   border-radius: var(--radius-sm);
   background: var(--color-bg-card);
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.6;
   resize: vertical;
   font-family: inherit;
   min-height: 200px;
@@ -220,7 +224,8 @@ const deleteNote = async (id: string) => {
   border-radius: var(--radius-sm);
   background: var(--color-bg-muted);
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.6;
   font-family: inherit;
   resize: vertical;
 }
