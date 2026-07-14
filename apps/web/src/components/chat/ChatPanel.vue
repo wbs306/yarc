@@ -21,6 +21,7 @@ const inputText = ref('')
 const editingMessageId = ref('')
 const container = ref<HTMLDivElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
+const modelSelectorRef = ref<{ openDropdown: () => void }>()
 
 // Sent-message history (up-arrow recall)
 const sentHistory = ref<string[]>([])
@@ -39,13 +40,13 @@ const autoResize = () => {
 watch(inputText, () => nextTick(autoResize))
 
 const commandOptions = [
-  // Pi native commands
-  { trigger: '/model', label: '/model', hint: '切换模型' },
-  { trigger: '/thinking', label: '/thinking', hint: '切换思考级别' },
-  { trigger: '/compact', label: '/compact', hint: '压缩上下文' },
+  // Web-native session commands
+  { trigger: '/model', label: '/model [name]', hint: '打开或切换模型' },
+  { trigger: '/thinking', label: '/thinking [level]', hint: '切换思考级别' },
+  { trigger: '/compact', label: '/compact [instructions]', hint: '压缩上下文' },
   { trigger: '/new', label: '/new', hint: '新对话' },
   { trigger: '/btw ', label: '/btw <question>', hint: '基于当前上下文侧问' },
-  // YARC commands
+  // Agent-intent commands
   { trigger: '/help', label: '/help', hint: '查看 Agent 可用命令' },
   { trigger: '/files', label: '/files', hint: '列出 data 工作区文件' },
   { trigger: '/read ', label: '/read <path>', hint: '读取工作区文件' },
@@ -467,9 +468,85 @@ watch(convMenuOpen, (open) => {
 
 // ── Send / Edit ─────────────────────────────────────────────────────────────
 
+const resetComposer = () => {
+  inputText.value = ''
+  if (textareaRef.value) textareaRef.value.style.height = 'auto'
+}
+
+const handleWebSlashCommand = async (text: string): Promise<boolean> => {
+  if (/^\/new\s*$/i.test(text)) {
+    resetComposer()
+    await chatStore.createConversation()
+    return true
+  }
+
+  const modelMatch = text.match(/^\/model(?:\s+([\s\S]+?))?\s*$/i)
+  if (modelMatch) {
+    resetComposer()
+    const query = modelMatch[1]?.trim()
+    if (!query) {
+      if (!chatStore.models.length) chatStore.chatError = '当前没有可用模型'
+      else await nextTick(() => modelSelectorRef.value?.openDropdown())
+      return true
+    }
+
+    const normalized = query.toLowerCase()
+    const exact = chatStore.models.find(model =>
+      model.id.toLowerCase() === normalized || model.name.toLowerCase() === normalized
+    )
+    const matches = exact ? [exact] : chatStore.models.filter(model =>
+      model.id.toLowerCase().includes(normalized) || model.name.toLowerCase().includes(normalized)
+    )
+    if (matches.length === 1) {
+      chatStore.setCurrentModel(matches[0].id)
+      chatStore.chatError = ''
+    } else if (!matches.length) {
+      chatStore.chatError = `没有找到模型：${query}`
+    } else {
+      chatStore.chatError = `模型名称不唯一：${matches.slice(0, 5).map(model => model.id).join('、')}`
+    }
+    return true
+  }
+
+  const thinkingMatch = text.match(/^\/thinking(?:\s+([\s\S]+?))?\s*$/i)
+  if (thinkingMatch) {
+    resetComposer()
+    if (!currentModelReasoning.value) {
+      chatStore.chatError = '当前模型不支持思考级别设置'
+      return true
+    }
+
+    const levels = currentModelLevels.value?.length
+      ? currentModelLevels.value
+      : ['off', 'low', 'medium', 'high', 'xhigh']
+    const requested = thinkingMatch[1]?.trim().toLowerCase()
+    if (!requested) {
+      const currentIndex = levels.indexOf(chatStore.reasoningEffort)
+      chatStore.setReasoningEffort(levels[(currentIndex + 1 + levels.length) % levels.length])
+      chatStore.chatError = ''
+      return true
+    }
+
+    const aliases: Record<string, string> = { minimal: 'low', max: 'xhigh', xhigh: 'max' }
+    const target = levels.find(level => level.toLowerCase() === requested)
+      || levels.find(level => level.toLowerCase() === aliases[requested])
+    if (!target) {
+      chatStore.chatError = `无效思考级别：${requested}；可选 ${levels.join('、')}`
+    } else {
+      chatStore.setReasoningEffort(target)
+      chatStore.chatError = ''
+    }
+    return true
+  }
+
+  return false
+}
+
 const send = async () => {
   const text = inputText.value.trim()
   if (!text || chatStore.isStreaming) return
+
+  if (await handleWebSlashCommand(text)) return
 
   const btwMatch = text.match(/^\/btw(?:\s+([\s\S]+))?$/i)
   if (btwMatch) {
@@ -1085,7 +1162,7 @@ const sessionState = computed(() => {
         </button>
       </div>
       <div class="input-footer">
-        <ModelSelector :model-value="chatStore.currentModel" :models="chatStore.models" :disabled="!chatStore.models.length" @update:model-value="chatStore.setCurrentModel($event)" />
+        <ModelSelector ref="modelSelectorRef" :model-value="chatStore.currentModel" :models="chatStore.models" :disabled="!chatStore.models.length" @update:model-value="chatStore.setCurrentModel($event)" />
         <ReasoningEffort v-if="currentModelReasoning" :model-value="chatStore.reasoningEffort" :levels="currentModelLevels" @update:model-value="chatStore.setReasoningEffort($event)" />
       </div>
     </div>

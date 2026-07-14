@@ -191,7 +191,7 @@ export interface ChatRequest {
   type: 'chat'
   content: string
   model?: string
-  reasoning_effort?: 'off' | 'low' | 'medium' | 'high' | 'max'
+  reasoning_effort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   branchId?: string
   editMessageId?: string
   context?: {
@@ -224,6 +224,8 @@ export type ChatEvent =
   | { type: 'citation'; pageNumber: number; text: string }
   | { type: 'session_state'; model: string; thinkingLevel: string; models: Array<{ id: string; name?: string; reasoning?: boolean }> }
   | { type: 'context_usage'; tokens: number | null; contextWindow: number; percent: number | null; model?: string }
+  | { type: 'compaction_start' }
+  | { type: 'compaction_complete'; summary: string; tokensBefore: number; estimatedTokensAfter?: number }
   | AgentInteractionRequest
   | AgentInteractionResolved
   | { type: 'pi_user_entry'; conversationId: string; messageId: string; entryId: string; sessionFile: string }

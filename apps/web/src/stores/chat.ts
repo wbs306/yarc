@@ -840,6 +840,23 @@ export const useChatStore = defineStore('chat', () => {
         m.metadata.sessionState = { model: d.model, thinkingLevel: d.thinkingLevel };
         if (d.models?.length) m.metadata.availableModels = d.models;
         break;
+      case 'compaction_start': {
+        m.metadata.compactionStatus = 'running'
+        m.content = '正在压缩上下文…'
+        m.metadata.segments = [{ type: 'text', text: m.content }]
+        break
+      }
+      case 'compaction_complete': {
+        const before = Number(d.tokensBefore || 0)
+        const after = typeof d.estimatedTokensAfter === 'number' ? d.estimatedTokensAfter : null
+        m.metadata.compactionStatus = 'completed'
+        m.metadata.compactionSummary = d.summary
+        m.content = after === null
+          ? `上下文压缩完成（压缩前 ${before.toLocaleString()} tokens）`
+          : `上下文压缩完成（${before.toLocaleString()} → ${after.toLocaleString()} tokens）`
+        m.metadata.segments = [{ type: 'text', text: m.content }]
+        break
+      }
       case 'context_usage':
         if (c === currentConvId.value) {
           currentContextUsage.value = {

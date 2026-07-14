@@ -28,6 +28,12 @@ const select = (value: string) => {
   open.value = false
 }
 
+const openDropdown = () => {
+  if (!props.disabled) open.value = true
+}
+
+defineExpose({ openDropdown })
+
 const onDocClick = (e: MouseEvent) => {
   if (container.value && !container.value.contains(e.target as Node)) open.value = false
 }

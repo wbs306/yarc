@@ -69,6 +69,20 @@ export class ChatService {
     }
 
     try {
+      const compactCommand = this.parseCompactCommand(content)
+      if (compactCommand) {
+        yield* piService.compactEvents({
+          conversationId,
+          branchId: branchId || 'main',
+          assistantMessageId,
+          model,
+          reasoningEffort: reasoning_effort,
+          customInstructions: compactCommand.customInstructions,
+          _cancelled: options.cancelledMessageId,
+        })
+        return
+      }
+
       // Build context block and collect stored context for message metadata.
       const { contextBlock } = yield* this.buildContextBlock(content, context, conversationId)
 
@@ -273,6 +287,13 @@ export class ChatService {
       .trim()
       .replace(/\s+/g, ' ')
       .toLowerCase()
+  }
+
+  private parseCompactCommand(content: string): { customInstructions?: string } | null {
+    const match = content.match(/^\s*\/compact(?:\s+([\s\S]*?))?\s*$/i)
+    if (!match) return null
+    const customInstructions = match[1]?.trim()
+    return customInstructions ? { customInstructions } : {}
   }
 
   /**

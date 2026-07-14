@@ -1851,6 +1851,126 @@ export class PiService {
     return { answer: answer.trim() || 'Pi 没有返回内容。', thinking: thinking || undefined, events }
   }
 
+  async *compactEvents(options: {
+    conversationId?: string
+    branchId?: string
+    assistantMessageId?: string
+    model?: string
+    reasoningEffort?: string
+    customInstructions?: string
+    _cancelled?: string
+  }): AsyncGenerator<ChatEvent> {
+    await this.initPi()
+
+    if (!this.piModule) {
+      yield { type: 'error', message: 'Pi SDK not available' }
+      yield { type: 'done' }
+      return
+    }
+    await this.refreshPiState()
+
+    const { createAgentSession, DefaultResourceLoader } = this.piModule
+    const agentWorkspace = await ensureAgentWorkspace()
+
+    let model: any = undefined
+    if (options.model) {
+      const parts = options.model.split('/')
+      if (parts.length === 2) model = this.modelRegistry?.find(parts[0], parts[1])
+      if (!model) {
+        const available = await this.modelRegistry?.getAvailable()
+        model = available?.find((item: any) => item.id === options.model)
+      }
+    }
+
+    let resourceLoader: any
+    try {
+      resourceLoader = new DefaultResourceLoader({
+        cwd: agentWorkspace.cwd,
+        agentDir: agentWorkspace.agentDir,
+        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
+          agentsFiles: base.agentsFiles.filter((file) => file.path !== agentWorkspace.legacyAgentsMd),
+        }),
+        systemPromptOverride: (baseSystemPrompt?: string) => baseSystemPrompt?.trim() || DEFAULT_CHAT_SYSTEM_PROMPT,
+      })
+      await resourceLoader.reload()
+    } catch (err) {
+      console.error('[PiService] ResourceLoader error for compaction:', err)
+      yield { type: 'error', message: `ResourceLoader init failed: ${(err as Error).message}` }
+      yield { type: 'done' }
+      return
+    }
+
+    const sessionManager = await this.resolveSessionManager(
+      options.conversationId,
+      options.branchId,
+      agentWorkspace.cwd
+    )
+
+    let session: any
+    try {
+      const result = await createAgentSession({
+        sessionManager,
+        authStorage: this.authStorage,
+        modelRegistry: this.modelRegistry,
+        ...(model ? { model } : {}),
+        resourceLoader,
+      })
+      session = result.session
+    } catch (err) {
+      console.error('[PiService] Compaction session creation failed:', err)
+      yield { type: 'error', message: `Session creation failed: ${(err as Error).message}` }
+      yield { type: 'done' }
+      return
+    }
+
+    session.setThinkingLevel(options.reasoningEffort || 'off')
+    let unregisterAbortHandler: (() => void) | null = null
+
+    try {
+      if (options._cancelled) {
+        unregisterAbortHandler = chatStreamControl.registerAbortHandler(options._cancelled, () => {
+          session.abortCompaction?.()
+        })
+      }
+
+      yield { type: 'compaction_start' }
+      console.log('[PiService] Sending /compact to Pi SDK', options.customInstructions ? 'with custom instructions' : '')
+
+      const result = await session.compact(options.customInstructions)
+      if (options._cancelled && chatStreamControl.isCancelled(options._cancelled)) return
+
+      yield {
+        type: 'compaction_complete',
+        summary: result.summary,
+        tokensBefore: result.tokensBefore,
+        estimatedTokensAfter: result.estimatedTokensAfter,
+      }
+
+      const contextWindow = Number(session.model?.contextWindow || 0)
+      const tokens = typeof result.estimatedTokensAfter === 'number' ? result.estimatedTokensAfter : null
+      yield {
+        type: 'context_usage',
+        tokens,
+        contextWindow,
+        percent: contextWindow > 0 && tokens !== null ? (tokens / contextWindow) * 100 : null,
+        model: session.model?.id,
+      }
+      yield { type: 'done' }
+    } catch (err) {
+      if (!(options._cancelled && chatStreamControl.isCancelled(options._cancelled))) {
+        yield { type: 'error', message: `上下文压缩失败：${(err as Error).message || '未知错误'}` }
+        yield { type: 'done' }
+      }
+    } finally {
+      if (options.conversationId && options.branchId) {
+        await this.savePiSessionInfo(options.conversationId, options.branchId, session)
+      }
+      unregisterAbortHandler?.()
+      agentInteractionRegistry.cancelByStream(options.assistantMessageId || '', 'session_disposed')
+      await session.dispose()
+    }
+  }
+
   async *completeEvents(options: {
     conversationId?: string
     branchId?: string
@@ -1995,6 +2115,7 @@ export class PiService {
       } catch { /* ignore */ }
 
       const toolContext = new Map<string, { name: string; args: any }>()
+      let agentEnded = false
       const pushContextUsage = () => {
         try {
           const usage = session.getContextUsage?.()
@@ -2064,6 +2185,7 @@ export class PiService {
             }
           }
         } else if (event.type === 'agent_end') {
+          agentEnded = true
           push({ type: 'done' })
         } else if (event.type === 'message_end') {
           // Phase 2: Track assistant entry ID for Pi ↔ YARC message mapping.
@@ -2098,10 +2220,17 @@ export class PiService {
       // at the start of prompt(), so getLeafId() returns the user entry ID
       // immediately after the call begins.
       console.log('[PiService] Sending prompt to agent:', options.prompt.slice(0, 200) + (options.prompt.length > 200 ? '...' : ''))
-      const promptPromise = session.prompt(options.prompt).catch((err: Error) => {
-        push({ type: 'error', message: err.message })
-        push({ type: 'done' })
-      })
+      const promptPromise = session.prompt(options.prompt)
+        .then(() => {
+          // Registered extension slash commands may finish without starting an
+          // agent turn, so they do not emit agent_end. Close the web stream once
+          // the SDK command handler itself has completed.
+          if (!agentEnded) push({ type: 'done' })
+        })
+        .catch((err: Error) => {
+          push({ type: 'error', message: err.message })
+          push({ type: 'done' })
+        })
 
       // Phase 2: Emit user entry ID mapping right after prompt starts.
       // At this point the SDK has already written the user message to JSONL.
