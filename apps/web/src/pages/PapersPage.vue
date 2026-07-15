@@ -59,6 +59,11 @@ const showConfirm = (message: string, danger = false): Promise<boolean> =>
   confirm({ message, danger, confirmText: danger ? '删除' : '确认', icon: danger ? 'trash' : 'alert' })
 
 const isMobile = ref(window.innerWidth < 768)
+const PANEL_MAX_VIEWPORT_RATIO = 0.4
+const SIDEBAR_MIN_WIDTH = 240
+const CHAT_MIN_WIDTH = 300
+const getPanelMaxWidth = (minWidth: number) => Math.max(minWidth, Math.floor(window.innerWidth * PANEL_MAX_VIEWPORT_RATIO))
+const clampPanelWidth = (width: number, minWidth: number) => Math.min(getPanelMaxWidth(minWidth), Math.max(minWidth, width))
 const sidebarWidth = ref(300)
 const chatWidth = ref(380)
 const sidebarPanelWidth = computed(() => (sidebarOpen.value ? sidebarWidth.value : 0))
@@ -1234,6 +1239,8 @@ const closeReaderTab = (event: Event, paperId: string) => {
 
 const onResize = () => {
   isMobile.value = window.innerWidth < 768
+  sidebarWidth.value = clampPanelWidth(sidebarWidth.value, SIDEBAR_MIN_WIDTH)
+  chatWidth.value = clampPanelWidth(chatWidth.value, CHAT_MIN_WIDTH)
   if (!isMobile.value) {
     mobileSidebar.value = false
     mobileChat.value = false
@@ -1258,10 +1265,10 @@ onMounted(async () => {
   document.addEventListener('click', onDocumentClick)
   document.addEventListener('keydown', onDocumentKeydown)
   document.addEventListener('scroll', closeAllContextMenus, true)
-  const saved = localStorage.getItem('yarc-sidebar-width')
-  if (saved) sidebarWidth.value = parseInt(saved)
-  const savedChat = localStorage.getItem('yarc-chat-width')
-  if (savedChat) chatWidth.value = parseInt(savedChat)
+  const saved = Number.parseInt(localStorage.getItem('yarc-sidebar-width') || '', 10)
+  if (Number.isFinite(saved)) sidebarWidth.value = clampPanelWidth(saved, SIDEBAR_MIN_WIDTH)
+  const savedChat = Number.parseInt(localStorage.getItem('yarc-chat-width') || '', 10)
+  if (Number.isFinite(savedChat)) chatWidth.value = clampPanelWidth(savedChat, CHAT_MIN_WIDTH)
 
   await Promise.all([
     paperStore.fetchPapers({ limit: 500 }),
@@ -1321,8 +1328,11 @@ const applyDrag = () => {
   const x = pendingDragX
   pendingDragX = null
   const d = x - startX
-  if (resizing === 'left') sidebarWidth.value = Math.min(460, Math.max(240, startW + d))
-  else chatWidth.value = Math.min(600, Math.max(300, startW - d))
+  if (resizing === 'left') {
+    sidebarWidth.value = clampPanelWidth(startW + d, SIDEBAR_MIN_WIDTH)
+  } else {
+    chatWidth.value = clampPanelWidth(startW - d, CHAT_MIN_WIDTH)
+  }
 }
 
 const onDrag = (e: MouseEvent) => {
