@@ -1243,7 +1243,7 @@ const sessionState = computed(() => {
 .state-thinking { font-size: 10px; color: var(--color-primary); padding: 2px 6px; background: rgba(99,102,241,0.1); border-radius: 999px; }
 .state-context { font-size: 10px; color: var(--color-text-secondary); padding: 2px 6px; background: var(--color-bg-muted); border-radius: 999px; white-space: nowrap; }
 .chat-messages-wrap { position: relative; flex: 1; min-height: 0; }
-.chat-messages { position: absolute; inset: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.chat-messages { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .scroll-bottom-btn { position: absolute; bottom: 8px; left: 12px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--color-border); background: var(--color-bg-card); color: var(--color-text-secondary); border-radius: 50%; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 5; transition: opacity 0.15s; }
 .scroll-bottom-btn:hover { color: var(--color-primary); border-color: var(--color-primary); }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.15s; }
@@ -1252,11 +1252,18 @@ const sessionState = computed(() => {
 .chat-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--color-text-muted); }
 .chat-empty .empty-icon { opacity: 0.4; }
 .chat-empty p { font-size: 14px; color: var(--color-text-secondary); }
-.msg { max-width: 88%; position: relative; min-width: 0; }
+.msg { width: 88%; max-width: 88%; position: relative; min-width: 0; }
 .msg > .msg-body, .msg > .msg-tool, .msg > .msg-thinking { margin-top: 6px; }
 .msg > .msg-body:first-child, .msg > .msg-tool:first-child { margin-top: 0; }
-.msg-body { max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; word-break: break-word; }
-.msg-body :deep(*) { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.msg-body { width: fit-content; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-wrap: anywhere; word-break: break-word; white-space: normal; }
+.msg-body :deep(p), .msg-body :deep(li), .msg-body :deep(blockquote), .msg-body :deep(a) { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.msg-body :deep(img), .msg-body :deep(video), .msg-body :deep(iframe) { max-width: 100%; height: auto; }
+.msg-body :deep(pre) { max-width: 100%; overflow-x: auto; }
+.msg-body :deep(table) { max-width: 100%; overflow-x: auto; }
+/* KaTeX display math is intentionally unbroken; keep its scrollbar inside the bubble. */
+.msg-body :deep(.katex-display) { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+.msg-body :deep(.katex-display > .katex) { width: max-content; max-width: none; min-width: max-content; }
+.msg-body :deep(.katex), .msg-body :deep(.katex *) { overflow-wrap: normal; word-break: normal; }
 @keyframes msg-in { from { opacity: 0; transform: translateY(4px); } }
 /* Only animate the typing indicator, not regular messages */
 .msg.user { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; }
