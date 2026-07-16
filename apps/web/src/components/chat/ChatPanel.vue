@@ -713,6 +713,20 @@ const toolForSegment = (msg: any, seg: any) => (msg.toolCalls || []).find((tc: a
 // The provider does not expose its tokenizer here; use a conservative
 // character-based estimate while tool JSON is still being streamed.
 const toolInputTokens = (tc: any) => Math.max(1, Math.ceil(Array.from(String(tc?.inputText || '')).length / 4))
+const formatToolInputTokens = (tc: any) => {
+  const tokens = toolInputTokens(tc)
+  if (tokens < 1000) return `${tokens} tokens`
+  const units = ['k', 'm', 'b', 't']
+  let value = tokens
+  let unit = ''
+  for (const nextUnit of units) {
+    value /= 1000
+    unit = nextUnit
+    if (value < 1000 || nextUnit === units[units.length - 1]) break
+  }
+  const formatted = value >= 100 ? Math.round(value).toString() : value.toFixed(1).replace(/\.0$/, '')
+  return `${formatted}${unit} tokens`
+}
 const isSubagentTool = (tc: any) => tc?.name === 'subagent'
 const subagentMode = (tc: any) => {
   const input = tc?.input || {}
@@ -1022,7 +1036,7 @@ const sessionState = computed(() => {
 
         <template v-for="(seg, i) in messageSegments(msg)" :key="`${msg.id}-${i}`">
           <details v-if="seg.type === 'tool' && toolForSegment(msg, seg)" class="msg-tool" :class="{ subagent: isSubagentTool(toolForSegment(msg, seg)) }" :open="isSubagentTool(toolForSegment(msg, seg)) || chatStore.toolsExpanded">
-            <summary>🔧 {{ formatToolName(toolForSegment(msg, seg)) }}<span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress"> · ~{{ toolInputTokens(toolForSegment(msg, seg)) }} tokens</span></summary>
+            <summary>🔧 {{ formatToolName(toolForSegment(msg, seg)) }}<span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress"> · {{ formatToolInputTokens(toolForSegment(msg, seg)) }}</span></summary>
             <template v-if="isSubagentTool(toolForSegment(msg, seg))">
               <div class="subagent-card">
                 <div class="subagent-meta">
