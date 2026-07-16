@@ -710,6 +710,9 @@ const messageSegments = (msg: any) => {
 }
 
 const toolForSegment = (msg: any, seg: any) => (msg.toolCalls || []).find((tc: any) => tc.id === seg.toolCallId)
+// The provider does not expose its tokenizer here; use a conservative
+// character-based estimate while tool JSON is still being streamed.
+const toolInputTokens = (tc: any) => Math.max(1, Math.ceil(Array.from(String(tc?.inputText || '')).length / 4))
 const isSubagentTool = (tc: any) => tc?.name === 'subagent'
 const subagentMode = (tc: any) => {
   const input = tc?.input || {}
@@ -1019,7 +1022,7 @@ const sessionState = computed(() => {
 
         <template v-for="(seg, i) in messageSegments(msg)" :key="`${msg.id}-${i}`">
           <details v-if="seg.type === 'tool' && toolForSegment(msg, seg)" class="msg-tool" :class="{ subagent: isSubagentTool(toolForSegment(msg, seg)) }" :open="isSubagentTool(toolForSegment(msg, seg)) || chatStore.toolsExpanded">
-            <summary>🔧 {{ formatToolName(toolForSegment(msg, seg)) }}</summary>
+            <summary>🔧 {{ formatToolName(toolForSegment(msg, seg)) }}<span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress"> · ~{{ toolInputTokens(toolForSegment(msg, seg)) }} tokens</span></summary>
             <template v-if="isSubagentTool(toolForSegment(msg, seg))">
               <div class="subagent-card">
                 <div class="subagent-meta">
@@ -1048,7 +1051,7 @@ const sessionState = computed(() => {
               </div>
             </template>
             <template v-else>
-              <div class="tool-input">{{ JSON.stringify(toolForSegment(msg, seg)?.input) }}</div>
+              <div v-if="!toolForSegment(msg, seg)?.inputText" class="tool-input">{{ JSON.stringify(toolForSegment(msg, seg)?.input) }}</div>
               <div v-if="toolForSegment(msg, seg)?.result" class="tool-result">{{ toolForSegment(msg, seg)?.result }}</div>
             </template>
           </details>
@@ -1292,6 +1295,7 @@ const sessionState = computed(() => {
 .ctx-item-icon { flex: 0 0 auto; }
 .msg-thinking, .msg-tool, .msg-compaction { font-size: 12px; margin-bottom: 6px; }
 .msg-thinking summary, .msg-tool summary, .msg-compaction summary { cursor: pointer; color: var(--color-text-muted); font-size: 12px; }
+.msg-tool .tool-progress { color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
 .msg-thinking > div, .msg-tool > div, .msg-compaction > div { margin-top: 4px; padding: 8px 10px; background: var(--color-bg-muted); border-radius: var(--radius-sm); font-size: 12px; color: var(--color-text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .msg-tool .tool-result { border-left: 2px solid var(--color-primary); opacity: 0.9; }
 .msg-tool.subagent > div { border-left: 2px solid #8b5cf6; }

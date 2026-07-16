@@ -832,7 +832,19 @@ export const useChatStore = defineStore('chat', () => {
     switch (d.type) {
       case 'text': enqueue(m, d.content, c); break
       case 'thinking': m.metadata.thinking = (m.metadata.thinking || '') + d.content; break
-      case 'tool_call': { if (!m.toolCalls) m.toolCalls = []; let inp = d.input; if (typeof inp === 'string') try { inp = JSON.parse(inp) } catch {}; const ex = m.toolCalls.find((t: any) => t.id === d.toolCallId); if (ex) { ex.name = d.toolName; ex.input = inp } else m.toolCalls.push({ id: d.toolCallId, name: d.toolName, input: inp }); pushTool(m, d.toolCallId); break }
+      case 'tool_call_delta': {
+        if (!m.toolCalls) m.toolCalls = []
+        const ex = m.toolCalls.find((t: any) => t.id === d.toolCallId)
+        if (ex) {
+          ex.name = d.toolName || ex.name
+          ex.inputText = (ex.inputText || '') + String(d.inputDelta || '')
+        } else {
+          m.toolCalls.push({ id: d.toolCallId, name: d.toolName || 'tool', input: {}, inputText: String(d.inputDelta || '') })
+        }
+        pushTool(m, d.toolCallId)
+        break
+      }
+      case 'tool_call': { if (!m.toolCalls) m.toolCalls = []; let inp = d.input; if (typeof inp === 'string') try { inp = JSON.parse(inp) } catch {}; const ex = m.toolCalls.find((t: any) => t.id === d.toolCallId); if (ex) { ex.name = d.toolName; ex.input = inp; delete ex.inputText } else m.toolCalls.push({ id: d.toolCallId, name: d.toolName, input: inp }); pushTool(m, d.toolCallId); break }
       case 'tool_result': if (m.toolCalls) { const tc = m.toolCalls.find((t: any) => t.id === d.toolCallId); if (tc) tc.result = d.result }; break
       case 'search_results': window.dispatchEvent(new CustomEvent('yarc-agent-search-results', { detail: d })); break
       case 'citation': if (!m.metadata.citations) m.metadata.citations = []; m.metadata.citations.push({ pageNumber: d.pageNumber, text: d.text }); break

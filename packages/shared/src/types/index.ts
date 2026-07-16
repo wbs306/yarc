@@ -205,6 +205,7 @@ export type ChatEvent =
   | { type: 'text'; content: string }
   | { type: 'thinking'; content: string }
   | { type: 'tool_call'; toolCallId: string; toolName: string; input: string }
+  | { type: 'tool_call_delta'; toolCallId: string; toolName?: string; inputDelta: string }
   | { type: 'tool_result'; toolCallId: string; result: string }
   | {
       type: 'search_results'

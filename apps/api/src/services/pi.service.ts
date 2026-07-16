@@ -2138,6 +2138,20 @@ export class PiService {
             push({ type: 'text', content: String(update.delta) })
           } else if (update?.type === 'thinking_delta' && update.delta) {
             push({ type: 'thinking', content: String(update.delta) })
+          } else if (update?.type === 'toolcall_delta' && update.delta) {
+            // Pi AI exposes provider tool-input streaming as toolcall_delta.
+            // Forward it before tool_execution_start so long write calls are
+            // visible while the model is still generating their arguments.
+            const block = update.partial?.content?.[update.contentIndex]
+            const toolCallId = String(block?.type === 'toolCall' ? block.id : '')
+              || `${options.assistantMessageId || 'tool'}:${update.contentIndex}`
+            const toolName = block?.type === 'toolCall' ? String(block.name || '') : undefined
+            push({
+              type: 'tool_call_delta',
+              toolCallId,
+              ...(toolName ? { toolName } : {}),
+              inputDelta: String(update.delta),
+            })
           } else if (update?.type === 'error') {
             push({ type: 'error', message: update.error?.errorMessage || 'Pi error' })
           }
