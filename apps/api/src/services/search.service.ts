@@ -792,7 +792,7 @@ export class SearchService {
     }
 
     const whereSql = paperId
-      ? `(${clauses.join(' OR ')}) AND p.id = $${values.push(paperId)}`
+      ? `(${clauses.join(' OR ')}) AND p.id = $${values.push(paperId)}::uuid`
       : clauses.join(' OR ')
 
     values.push(limit, offset)
