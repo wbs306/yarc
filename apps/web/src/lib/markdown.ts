@@ -14,6 +14,7 @@ const inlineRule = /^([\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{
 const blockRule = /^(\${1,2})\n((?:\\[^]|[^\\])+?)\n\1(?:\n|$)/
 const inlineBoundaryChar = /^[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{P}]$/u
 const blockquoteLineRule = /^((?:[ \t]*>[ \t]?)+)(.*)$/
+const listItemRule = /^([ \t]*)(?:[-+*]|\d+[.)])[ \t]+/
 const codeFenceRule = /^(`{3,}|~{3,})/
 
 let configured = false
@@ -94,6 +95,55 @@ function normalizeBlockquoteMathBlocks(markdown: string): string {
   return normalized.join('\n')
 }
 
+function normalizeListMathBlocks(markdown: string): string {
+  const lines = markdown.split('\n')
+  const normalized = [...lines]
+  let inCodeFence = false
+  let codeFenceChar = ''
+  let codeFenceLength = 0
+
+  for (let index = 0; index < lines.length; index++) {
+    const fenceMatch = lines[index].trimStart().match(codeFenceRule)
+    if (fenceMatch) {
+      const fence = fenceMatch[1]
+      if (!inCodeFence) {
+        inCodeFence = true
+        codeFenceChar = fence.charAt(0)
+        codeFenceLength = fence.length
+      } else if (fence.charAt(0) === codeFenceChar && fence.length >= codeFenceLength) {
+        inCodeFence = false
+        codeFenceChar = ''
+        codeFenceLength = 0
+      }
+      continue
+    }
+
+    if (inCodeFence) continue
+
+    const listItemMatch = lines[index].match(listItemRule)
+    const mathStartIndex = index + 1
+    if (!listItemMatch || lines[mathStartIndex] !== `${listItemMatch[1]}$$`) continue
+
+    const mathEndIndex = lines.findIndex((line, lineIndex) =>
+      lineIndex > mathStartIndex && line === `${listItemMatch[1]}$$`)
+    if (mathEndIndex === -1) continue
+
+    // A display-math block at the list item's indentation ends the list in
+    // CommonMark. Indent this common editor input as list-item content instead.
+    const contentIndent = listItemMatch[0].replace(/[^\t]/g, ' ')
+    for (let lineIndex = mathStartIndex; lineIndex <= mathEndIndex; lineIndex++) {
+      const content = lines[lineIndex].slice(listItemMatch[1].length)
+      // Otherwise Marked recognizes a standalone minus inside the formula as
+      // a nested list marker before the math extension sees the block.
+      const normalizedContent = content.trim() === '-' ? content.replace('-', '\\mathbin{-}') : content
+      normalized[lineIndex] = `${contentIndent}${normalizedContent}`
+    }
+    index = mathEndIndex
+  }
+
+  return normalized.join('\n')
+}
+
 function createCjkAwareKatexExtension(options: KatexOptions): MarkedExtension {
   return {
     extensions: [
@@ -147,7 +197,7 @@ export function renderMarkdown(text: string): string {
   if (!text) return ''
   configureMarked()
   try {
-    return marked.parse(linkifyImplicitPaperReferences(normalizeBlockquoteMathBlocks(text))) as string
+    return marked.parse(linkifyImplicitPaperReferences(normalizeListMathBlocks(normalizeBlockquoteMathBlocks(text)))) as string
   } catch {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')
   }
