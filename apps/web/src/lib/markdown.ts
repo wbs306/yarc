@@ -11,7 +11,9 @@ interface KatexToken extends Tokens.Generic {
 }
 
 const inlineRule = /^([\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{P}]?)(\${1,2})(?!\$)((?:\\.|[^\\\n\$])*?(?:\\.|[^\\\n\$]))\2(?=[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{P}]|$)/u
-const blockRule = /^(\${1,2})\n((?:\\[^]|[^\\])+?)\n\1(?:\n|$)/
+// Allow trailing spaces on $$ lines — common with Markdown hard breaks (two trailing spaces).
+const blockRule = /^(\${1,2})[ \t]*\n((?:\\[^]|[^\\])+?)\n\1[ \t]*(?:\n|$)/
+const displayMathLineRule = /^[ \t]*\$\$[ \t]*$/
 const inlineBoundaryChar = /^[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{P}]$/u
 const blockquoteLineRule = /^((?:[ \t]*>[ \t]?)+)(.*)$/
 const listItemRule = /^([ \t]*)(?:[-+*]|\d+[.)])[ \t]+/
@@ -42,6 +44,40 @@ function findInlineKatexStart(src: string): number | undefined {
     }
 
     index = src.indexOf('$', index + 1)
+  }
+}
+
+// Marked only truncates paragraphs for custom block extensions that provide start().
+// Without this, a $$ block right after a paragraph line is swallowed into the paragraph.
+function findBlockKatexStart(src: string): number | undefined {
+  let searchFrom = 0
+
+  while (searchFrom < src.length) {
+    const dollar = src.indexOf('$$', searchFrom)
+    if (dollar === -1) return undefined
+
+    const lineStart = src.lastIndexOf('\n', dollar - 1) + 1
+    const lineEnd = src.indexOf('\n', dollar)
+    const line = src.slice(lineStart, lineEnd === -1 ? src.length : lineEnd)
+
+    if (!displayMathLineRule.test(line) || lineEnd === -1) {
+      searchFrom = dollar + 2
+      continue
+    }
+
+    // Require a matching closing $$ line so we don't cut paragraphs on stray delimiters.
+    const indent = line.match(/^[ \t]*/)?.[0] ?? ''
+    const restLines = src.slice(lineEnd + 1).split('\n')
+    const hasClose = restLines.some(candidate =>
+      displayMathLineRule.test(candidate)
+      && candidate.startsWith(indent)
+      && candidate.trim() === '$$')
+    if (!hasClose) {
+      searchFrom = dollar + 2
+      continue
+    }
+
+    return dollar
   }
 }
 
@@ -122,10 +158,15 @@ function normalizeListMathBlocks(markdown: string): string {
 
     const listItemMatch = lines[index].match(listItemRule)
     const mathStartIndex = index + 1
-    if (!listItemMatch || lines[mathStartIndex] !== `${listItemMatch[1]}$$`) continue
+    const isListMathDelimiter = (line: string | undefined) =>
+      !!line
+      && displayMathLineRule.test(line)
+      && line.startsWith(listItemMatch?.[1] ?? '')
+      && line.trim() === '$$'
+    if (!listItemMatch || !isListMathDelimiter(lines[mathStartIndex])) continue
 
     const mathEndIndex = lines.findIndex((line, lineIndex) =>
-      lineIndex > mathStartIndex && line === `${listItemMatch[1]}$$`)
+      lineIndex > mathStartIndex && isListMathDelimiter(line))
     if (mathEndIndex === -1) continue
 
     // A display-math block at the list item's indentation ends the list in
@@ -168,6 +209,7 @@ function createCjkAwareKatexExtension(options: KatexOptions): MarkedExtension {
       {
         name: 'blockKatex',
         level: 'block',
+        start: findBlockKatexStart,
         tokenizer(src) {
           const match = src.match(blockRule)
           if (!match) return undefined
