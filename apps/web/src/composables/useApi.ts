@@ -1,4 +1,12 @@
-import type { NoteFileSyncResult, PaperReferenceInput, PaperReferenceResolution } from '@yarc/shared'
+import type {
+  IeeeJournalBrowserPreferences,
+  IeeeSearchMode,
+  IeeeSearchResponse,
+  IeeeSearchSort,
+  NoteFileSyncResult,
+  PaperReferenceInput,
+  PaperReferenceResolution,
+} from '@yarc/shared'
 
 const API_BASE = '/api'
 
@@ -280,6 +288,35 @@ export function useApi() {
         params: { q, ...(source && { source }), ...(field && { field }), ...(page && { page: String(page) }) },
       }),
 
+    searchIeee: (params: {
+      mode?: IeeeSearchMode
+      q?: string
+      journalId?: string
+      articleNumber?: string
+      sort?: IeeeSearchSort
+      page?: number
+      limit?: number
+      refresh?: boolean
+    }) => {
+      const query: Record<string, string> = {
+        source: 'ieee',
+        ieee_mode: params.mode || 'search',
+      }
+      if (params.q) query.q = params.q
+      if (params.journalId) query.journal_id = params.journalId
+      if (params.articleNumber) query.article_number = params.articleNumber
+      if (params.sort) query.sort = params.sort
+      if (params.page) query.page = String(params.page)
+      if (params.limit) query.limit = String(params.limit)
+      if (params.refresh) query.refresh = '1'
+      return request<IeeeSearchResponse>('/search', { params: query })
+    },
+
+    getIeeeArticleAbstract: (articleNumber: string) =>
+      request<IeeeSearchResponse>('/search', {
+        params: { source: 'ieee', ieee_mode: 'article_abstract', article_number: articleNumber },
+      }),
+
     resolvePaperReferences: (references: PaperReferenceInput[]) =>
       request<{ results: PaperReferenceResolution[] }>('/search/resolve', {
         method: 'POST',
@@ -397,6 +434,15 @@ export function useApi() {
 
     // Settings
     getSettings: () => request<{ settings: Record<string, any> }>('/settings'),
+
+    getIeeeJournalBrowserPreferences: () =>
+      request<{ preferences: IeeeJournalBrowserPreferences }>('/settings/ieee-journal-browser'),
+
+    updateIeeeJournalBrowserPreferences: (preferences: IeeeJournalBrowserPreferences) =>
+      request<{ preferences: IeeeJournalBrowserPreferences }>('/settings/ieee-journal-browser', {
+        method: 'PUT',
+        body: JSON.stringify({ preferences }),
+      }),
 
     getSystemStatus: () => request<{ status: any }>('/settings/system-status'),
 

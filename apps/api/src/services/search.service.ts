@@ -10,6 +10,7 @@ import {
 } from '@yarc/shared'
 import { cleanSnippetForDisplay } from '../lib/text-cleaning.js'
 import { embeddingService } from './embedding.service.js'
+import { ieeeXploreService, readIeeeJournalBrowserPreferences } from './ieee-xplore.service.js'
 
 interface SearchResult {
   id: string
@@ -36,8 +37,6 @@ interface SearchResponse {
 }
 
 const S2_API_BASE = 'https://api.semanticscholar.org/graph/v1'
-const IEEE_ARTICLES_ENDPOINT = 'https://ieeexploreapi.ieee.org/api/v1/search/articles'
-const IEEE_REST_SEARCH_ENDPOINT = 'https://ieeexplore.ieee.org/rest/search'
 const IEEE_BASE_URL = 'https://ieeexplore.ieee.org'
 
 const S2_FIELDS = [
@@ -59,37 +58,6 @@ const S2_FIELDS = [
   's2FieldsOfStudy',
   'tldr',
 ].join(',')
-
-const IEEE_FIELD_MAP: Record<string, string> = {
-  all: 'querytext',
-  title: 'article_title',
-  author: 'author',
-  abstract: 'abstract',
-  journal: 'publication_title',
-  venue: 'publication_title',
-  doi: 'doi',
-}
-
-const IEEE_TOP_PUBLICATIONS: Record<string, string> = {
-  tmc: 'IEEE Transactions on Mobile Computing',
-  tpds: 'IEEE Transactions on Parallel and Distributed Systems',
-  twc: 'IEEE Transactions on Wireless Communications',
-  ton: 'IEEE/ACM Transactions on Networking',
-  tc: 'IEEE Transactions on Computers',
-  jsac: 'IEEE Journal on Selected Areas in Communications',
-  tcc: 'IEEE Transactions on Cloud Computing',
-  tsc: 'IEEE Transactions on Services Computing',
-  tnsm: 'IEEE Transactions on Network and Service Management',
-  tdsc: 'IEEE Transactions on Dependable and Secure Computing',
-  tkde: 'IEEE Transactions on Knowledge and Data Engineering',
-  tpami: 'IEEE Transactions on Pattern Analysis and Machine Intelligence',
-  tnnls: 'IEEE Transactions on Neural Networks and Learning Systems',
-  tvt: 'IEEE Transactions on Vehicular Technology',
-  tii: 'IEEE Transactions on Industrial Informatics',
-  tits: 'IEEE Transactions on Intelligent Transportation Systems',
-  tccn: 'IEEE Transactions on Cognitive Communications and Networking',
-  tcom: 'IEEE Transactions on Communications',
-}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -141,31 +109,6 @@ const numberOrNull = (value: unknown) => {
   return Number.isFinite(n) ? n : null
 }
 
-const parseCount = (value: unknown) => {
-  const n = Number(String(value ?? '').replace(/,/g, ''))
-  return Number.isFinite(n) ? n : 0
-}
-
-const decodeHtml = (value: string) => value
-  .replace(/&nbsp;/g, ' ')
-  .replace(/&amp;/g, '&')
-  .replace(/&lt;/g, '<')
-  .replace(/&gt;/g, '>')
-  .replace(/&quot;/g, '"')
-  .replace(/&#39;/g, "'")
-  .replace(/&#x27;/g, "'")
-
-const stripHtml = (value: unknown) => cleanText(
-  removeIEEEHighlights(decodeHtml(String(value ?? '').replace(/<[^>]+>/g, ' ')))
-)
-
-const absoluteIEEEUrl = (value: unknown) => {
-  const path = cleanText(value)
-  if (!path) return null
-  if (/^https?:\/\//i.test(path)) return path
-  return `${IEEE_BASE_URL}${path.startsWith('/') ? '' : '/'}${path}`
-}
-
 const extractIEEEArticleNumber = (value: unknown) => {
   const text = cleanText(value)
   if (!text) return null
@@ -200,15 +143,6 @@ const normalizeArxivId = (value: unknown) => String(value ?? '')
 const authorFamilyNames = (authors: string[] = []) => new Set(authors
   .map(author => normalizeForSearch(author).split(/\s+/).filter(Boolean).at(-1))
   .filter((name): name is string => !!name))
-
-const removeIEEEHighlights = (value: string) => value.replace(/\[::|::\]/g, '')
-
-const normalizeIEEEPublication = (value: unknown) => {
-  const text = cleanText(value)
-  if (!text) return null
-  const key = text.toLowerCase().replace(/[^a-z0-9]+/g, '')
-  return IEEE_TOP_PUBLICATIONS[key] || text
-}
 
 const readSetCookieHeaders = (headers: Headers) => {
   const values = (headers as any).getSetCookie?.()
@@ -881,248 +815,47 @@ export class SearchService {
     }]))
   }
 
-  // ── IEEE Xplore Search ────────────────────────────────────────────────
+  // ── IEEE Xplore Search (compatibility delegation) ─────────────────────
 
   async searchIEEE(
     query: string,
-    field = 'all',
+    _field = 'all',
     page = 1,
     limit = 25,
-    yearFrom?: number,
-    yearTo?: number,
-    options?: { earlyAccess?: boolean; publication?: string }
+    _yearFrom?: number,
+    _yearTo?: number,
+    options?: { earlyAccess?: boolean; publication?: string; sort?: 'relevance' | 'newest' }
   ): Promise<SearchResponse> {
-    if (options?.publication || !config.ieeeApiKey) {
-      return this.searchIEEECrawler(query, field, page, limit, yearFrom, yearTo, options)
-    }
-
-    const boundedLimit = Math.min(Math.max(limit, 1), 200)
-    const startRecord = (Math.max(page, 1) - 1) * boundedLimit + 1
-    const ieeeField = IEEE_FIELD_MAP[field] || 'querytext'
-
-    const params = new URLSearchParams({
-      apikey: config.ieeeApiKey,
-      format: 'json',
-      max_records: String(boundedLimit),
-      start_record: String(startRecord),
-      sort_order: 'desc',
-      sort_field: 'publication_year',
-    })
-
-    params.set(ieeeField, query)
-    if (yearFrom) params.set('start_year', String(yearFrom))
-    if (yearTo) params.set('end_year', String(yearTo))
-
     try {
-      const data = await fetchJsonWithRetry(`${IEEE_ARTICLES_ENDPOINT}?${params}`, {
-        headers: { Accept: 'application/json' },
-      })
-
-      const papers = (data.articles || []).map((article: any): SearchPaper => {
-        const authors = Array.isArray(article.authors)
-          ? article.authors
-              .map((a: any) => cleanText(a.full_name || a.name))
-              .filter((a: string | null): a is string => !!a)
-          : []
-        const doi = cleanText(article.doi)
-        const title = cleanText(article.article_title) || ''
-        const url =
-          cleanText(article.html_url) ||
-          cleanText(article.pdf_url) ||
-          (doi ? `https://doi.org/${doi}` : null)
-        const venue = cleanText(article.publication_title) || cleanText(article.conference_location)
-
-        return {
-          id: cleanText(article.article_number) || doi || title,
-          title,
-          abstract: cleanText(article.abstract),
-          authors,
-          year: numberOrNull(article.publication_year),
-          url,
-          doi,
-          arxivId: null,
-          journal: cleanText(article.publication_title),
-          venue,
-          source: 'ieee' as const,
-          articleNumber: cleanText(article.article_number),
-          publicationNumber: cleanText(article.publication_number),
-          contentType: cleanText(article.content_type),
-          citationCount: null,
-          pdfUrl: cleanText(article.pdf_url) || ieeePdfUrlForArticle(article.article_number),
-          provider: 'ieee_xplore_api',
-          isEarlyAccess: /early access/i.test(String(article.content_type || '')),
-        }
-      }).filter((paper: SearchPaper) => !options?.earlyAccess || !!paper.isEarlyAccess)
-      const apiTotal = Number(data.total_records || 0)
-
-      if (!papers.length) {
-        console.warn('IEEE API returned no papers, falling back to crawler')
-        const fallback = await this.searchIEEECrawler(query, field, page, limit, yearFrom, yearTo, options)
-        if (fallback.papers.length || !fallback.error) return fallback
-        return {
-          papers: [],
-          total: apiTotal,
-          page,
-          limit: boundedLimit,
-          error: `IEEE API returned no papers; crawler fallback failed: ${fallback.error}`,
-        }
-      }
-
-      return {
-        papers,
-        total: options?.earlyAccess ? papers.length : apiTotal,
+      const preferences = await readIeeeJournalBrowserPreferences()
+      const publication = String(options?.publication || '').trim().toLowerCase()
+      const journal = publication
+        ? preferences.journals.find(item =>
+          item.id.toLowerCase() === publication ||
+          item.publicationNumber === publication ||
+          item.publicationTitle.toLowerCase() === publication ||
+          item.displayName.toLowerCase() === publication
+        )
+        : undefined
+      // Legacy publication remains a range hint only. It is deliberately never
+      // substituted for the article query.
+      return await ieeeXploreService.searchArticles({
+        mode: 'search',
+        q: query,
+        journal,
+        sort: options?.sort || 'relevance',
         page,
-        limit: boundedLimit,
-      }
+        limit,
+      })
     } catch (err) {
-      console.error('IEEE API search failed, falling back to crawler:', err)
-      const fallback = await this.searchIEEECrawler(query, field, page, limit, yearFrom, yearTo, options)
-      if (fallback.papers.length || !fallback.error) return fallback
       return {
         papers: [],
         total: 0,
-        page,
-        limit: boundedLimit,
-        error: `IEEE search failed: ${(err as Error).message}; crawler fallback failed: ${fallback.error}`,
+        page: Math.max(page, 1),
+        limit: Math.min(Math.max(limit, 1), 25),
+        error: (err as Error).message || 'IEEE search failed',
       }
     }
-  }
-
-  private async searchIEEECrawler(
-    query: string,
-    field = 'all',
-    page = 1,
-    limit = 25,
-    yearFrom?: number,
-    yearTo?: number,
-    options?: { earlyAccess?: boolean; publication?: string }
-  ): Promise<SearchResponse> {
-    const boundedLimit = Math.min(Math.max(limit, 1), 25)
-    const pageNumber = Math.max(page, 1)
-    const publication = normalizeIEEEPublication(options?.publication)
-    const publicationOnlyList = !!publication && options?.earlyAccess && (!query.trim() || normalizeIEEEPublication(query) === publication)
-    const refinements = [
-      ...(options?.earlyAccess ? ['ContentType:Early Access Articles'] : []),
-      ...(publication ? [`PublicationTitle:${publication}`] : []),
-    ]
-    const requestBody = {
-      newsearch: true,
-      queryText: publicationOnlyList ? publication : query,
-      highlight: true,
-      returnFacets: ['ALL'],
-      returnType: 'SEARCH',
-      matchPubs: true,
-      pageNumber,
-      rowsPerPage: boundedLimit,
-      sortType: 'newest',
-      ...(refinements.length ? { refinements } : {}),
-    }
-
-    try {
-      const data = await fetchJsonWithRetry(IEEE_REST_SEARCH_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json, text/plain, */*',
-          'Content-Type': 'application/json',
-          Origin: IEEE_BASE_URL,
-          Referer: `${IEEE_BASE_URL}/search/searchresult.jsp?queryText=${encodeURIComponent(query)}&sortType=newest`,
-          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-        },
-        body: JSON.stringify(requestBody),
-      })
-
-      const papers = (Array.isArray(data.records) ? data.records : [])
-        .map((record: any): SearchPaper => this.mapIEEERestRecord(record, data.userInfo))
-        .filter((paper: SearchPaper) => this.matchesIEEECrawlerFilters(paper, publicationOnlyList ? '' : query, field, yearFrom, yearTo, options))
-      const remoteTotal = parseCount(data.totalRecords || data.total_records || data.total)
-      const locallyFiltered = field !== 'all' || !!yearFrom || !!yearTo
-
-      return {
-        papers,
-        total: locallyFiltered ? papers.length : remoteTotal || papers.length,
-        page: pageNumber,
-        limit: boundedLimit,
-      }
-    } catch (err) {
-      console.error('IEEE crawler search failed:', err)
-      return {
-        papers: [],
-        total: 0,
-        page: pageNumber,
-        limit: boundedLimit,
-        error: `IEEE crawler search failed: ${(err as Error).message}`,
-      }
-    }
-  }
-
-  private mapIEEERestRecord(record: any, userInfo: any): SearchPaper {
-    const authors = Array.isArray(record.authors)
-      ? record.authors
-          .map((a: any) => cleanText(a.preferredName || a.fullName || a.name || a.normalizedName))
-          .filter((a: string | null): a is string => !!a)
-      : []
-    const doi = cleanText(record.doi)
-    const title = stripHtml(record.articleTitle) || ''
-    const articleNumber = cleanText(record.articleNumber)
-    const documentUrl = absoluteIEEEUrl(record.documentLink || record.htmlLink)
-      || (articleNumber ? `${IEEE_BASE_URL}/document/${articleNumber}/` : null)
-    const pdfUrl = ieeePdfUrlForArticle(articleNumber) || absoluteIEEEUrl(record.pdfLink)
-    const venue = stripHtml(record.displayPublicationTitle || record.publicationTitle)
-
-    return {
-      id: articleNumber || doi || title,
-      title,
-      abstract: stripHtml(record.abstract),
-      authors,
-      year: numberOrNull(record.publicationYear),
-      url: documentUrl,
-      doi,
-      arxivId: null,
-      journal: venue,
-      venue,
-      source: 'ieee' as const,
-      articleNumber,
-      publicationNumber: cleanText(record.publicationNumber),
-      contentType: cleanText(record.contentType),
-      citationCount: numberOrNull(record.citationCount),
-      downloadCount: numberOrNull(record.downloadCount),
-      accessType: cleanText(record.accessType?.type || record.accessType?.message),
-      pdfUrl,
-      provider: 'ieee_xplore_rest_crawler',
-      isEarlyAccess: record.isEarlyAccess === true || /early access/i.test(String(record.displayContentType || record.contentType || record.articleContentType || '')),
-      institutionName: cleanText(userInfo?.institutionName),
-    }
-  }
-
-  private matchesIEEECrawlerFilters(
-    paper: SearchPaper,
-    query: string,
-    field: string,
-    yearFrom?: number,
-    yearTo?: number,
-    options?: { earlyAccess?: boolean; publication?: string }
-  ) {
-    if (yearFrom && paper.year && paper.year < yearFrom) return false
-    if (yearTo && paper.year && paper.year > yearTo) return false
-    if (options?.earlyAccess && !paper.isEarlyAccess) return false
-    const publication = normalizeIEEEPublication(options?.publication)
-    if (publication) {
-      const venue = normalizeForSearch(`${paper.journal || ''} ${paper.venue || ''}`)
-      if (!venue.includes(normalizeForSearch(publication))) return false
-    }
-
-    const needle = normalizeForSearch(query)
-    if (!needle || field === 'all') return true
-
-    if (field === 'title') return normalizeForSearch(paper.title).includes(needle)
-    if (field === 'author') return normalizeForSearch(paper.authors.join(' ')).includes(needle)
-    if (field === 'abstract') return normalizeForSearch(paper.abstract).includes(needle)
-    if (field === 'journal' || field === 'venue') {
-      return normalizeForSearch(`${paper.journal || ''} ${paper.venue || ''}`).includes(needle)
-    }
-    if (field === 'doi') return normalizeForSearch(paper.doi).includes(needle)
-    if (field === 'year') return paper.year === Number(query)
-    return true
   }
 
   // ── Semantic Scholar Search (direct TypeScript integration) ────────────

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import type { PaperSource, SearchPaper } from '@yarc/shared'
+import type { IeeeJournalConfig, PaperSource, SearchPaper } from '@yarc/shared'
 import Checkbox from '../ui/Checkbox.vue'
 import { usePrefsStore } from '@/stores/prefs'
+import { useApi } from '@/composables/useApi'
 
 const prefs = usePrefsStore()
+const api = useApi()
 
 const props = defineProps<{ autofocus?: boolean }>()
 
@@ -13,8 +15,8 @@ interface SearchFilters {
   field: 'all' | 'title' | 'author' | 'year' | 'journal'
   yearFrom?: number
   yearTo?: number
-  earlyAccess?: boolean
-  publication?: string
+  journalId?: string
+  ieeeSort: 'relevance' | 'newest'
   sortBy: 'relevance' | 'year_desc' | 'year_asc' | 'title_asc'
 }
 
@@ -52,8 +54,21 @@ const containerRef = ref<HTMLDivElement>()
 const filters = ref<SearchFilters>({
   source: prefs.searchSource,
   field: 'all',
+  ieeeSort: 'relevance',
   sortBy: 'relevance'
 })
+
+const ieeeJournals = ref<IeeeJournalConfig[]>([])
+const ieeeJournalsError = ref('')
+
+const loadIeeeJournals = async () => {
+  try {
+    const response = await api.getIeeeJournalBrowserPreferences()
+    ieeeJournals.value = response.preferences.journals || []
+  } catch (err) {
+    ieeeJournalsError.value = (err as Error).message || '无法加载已配置 IEEE 期刊'
+  }
+}
 
 // Keep the search box source and the saved default in sync both ways.
 watch(() => prefs.searchSource, (v) => { if (filters.value.source !== v) filters.value.source = v })
@@ -101,30 +116,7 @@ const sortOptions = [
   { id: 'title_asc', label: '标题' }
 ]
 
-const topPublications = [
-  { id: 'tmc', label: 'TMC' },
-  { id: 'tpds', label: 'TPDS' },
-  { id: 'twc', label: 'TWC' },
-  { id: 'ton', label: 'ToN' },
-  { id: 'tc', label: 'TC' },
-  { id: 'jsac', label: 'JSAC' },
-  { id: 'tcc', label: 'TCC' },
-  { id: 'tsc', label: 'TSC' },
-  { id: 'tnsm', label: 'TNSM' },
-  { id: 'tdsc', label: 'TDSC' },
-  { id: 'tkde', label: 'TKDE' },
-  { id: 'tpami', label: 'TPAMI' },
-  { id: 'tnnls', label: 'TNNLS' },
-  { id: 'tvt', label: 'TVT' },
-  { id: 'tii', label: 'TII' },
-  { id: 'tits', label: 'T-ITS' },
-  { id: 'tccn', label: 'TCCN' },
-  { id: 'tcom', label: 'TCOM' }
-]
-
-const canSearch = computed(() =>
-  !!query.value.trim() || (filters.value.source === 'ieee' && !!filters.value.earlyAccess && !!filters.value.publication)
-)
+const canSearch = computed(() => !!query.value.trim())
 
 const expand = (focusInput = true) => {
   isExpanded.value = true
@@ -155,10 +147,6 @@ const applyAgentSearchResults = (event: Event) => {
   if (source === 'local' || source === 'ieee' || source === 'semantic_scholar') filters.value.source = source
   const field = detail.field
   if (field === 'all' || field === 'title' || field === 'author' || field === 'year' || field === 'journal') filters.value.field = field
-  if (source === 'ieee') {
-    filters.value.earlyAccess = !!detail.earlyAccess
-    filters.value.publication = typeof detail.publication === 'string' ? detail.publication : ''
-  }
   page.value = Number(detail.page || 1)
   results.value = Array.isArray(detail.papers) ? detail.papers : []
   total.value = Number(detail.total || results.value.length)
@@ -174,7 +162,7 @@ const search = async () => {
   loading.value = true
   try {
     const params = new URLSearchParams({
-      q: query.value || filters.value.publication || '',
+      q: query.value,
       source: filters.value.source,
       field: filters.value.field,
       page: page.value.toString(),
@@ -183,8 +171,11 @@ const search = async () => {
     
     if (filters.value.yearFrom) params.append('year_from', filters.value.yearFrom.toString())
     if (filters.value.yearTo) params.append('year_to', filters.value.yearTo.toString())
-    if (filters.value.source === 'ieee' && filters.value.earlyAccess) params.append('early_access', 'true')
-    if (filters.value.source === 'ieee' && filters.value.publication) params.append('publication', filters.value.publication)
+    if (filters.value.source === 'ieee') {
+      params.append('ieee_mode', 'search')
+      params.append('sort', filters.value.ieeeSort)
+      if (filters.value.journalId) params.append('journal_id', filters.value.journalId)
+    }
     
     const res = await fetch(`/api/search?${params}`)
     const data = await res.json()
@@ -511,6 +502,7 @@ onMounted(() => {
   window.addEventListener('yarc-import-job-failed', applyImportJobEvent)
   window.addEventListener('yarc-import-job-item-completed', applyImportJobItemCompleted)
   window.addEventListener('yarc-paper-status', applyPaperStatusEvent)
+  void loadIeeeJournals()
   if (props.autofocus) nextTick(() => searchInput.value?.focus())
 })
 
@@ -588,7 +580,7 @@ onUnmounted(() => {
             <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
           </svg>
         </button>
-        <button v-if="query || (filters.source === 'ieee' && filters.earlyAccess && filters.publication)" class="search-btn" @mousedown.stop @click.stop.prevent="search" :disabled="loading || !canSearch">
+        <button v-if="query" class="search-btn" @mousedown.stop @click.stop.prevent="search" :disabled="loading || !canSearch">
           <svg v-if="!loading" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
           </svg>
@@ -627,7 +619,7 @@ onUnmounted(() => {
             @mousedown.prevent="filters.field = f.id as any"
           >{{ f.label }}</button>
         </div>
-        <div class="filter-pills desktop-only">
+        <div v-if="filters.source !== 'ieee'" class="filter-pills desktop-only">
           <span class="filter-label">排序</span>
           <button
             v-for="s in sortOptions"
@@ -645,26 +637,32 @@ onUnmounted(() => {
           <select v-model="filters.field" class="filter-select">
             <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.label }}</option>
           </select>
-          <select v-model="filters.sortBy" class="filter-select">
+          <select v-if="filters.source !== 'ieee'" v-model="filters.sortBy" class="filter-select">
             <option v-for="s in sortOptions" :key="s.id" :value="s.id">{{ s.label }}</option>
           </select>
+          <select v-else v-model="filters.ieeeSort" class="filter-select">
+            <option value="relevance">相关度</option>
+            <option value="newest">最新</option>
+          </select>
         </div>
-        <div class="year-filter">
+        <div v-if="filters.source !== 'ieee'" class="year-filter">
           <span class="filter-label">年份</span>
           <input v-model.number="filters.yearFrom" type="number" placeholder="起始" class="year-input" />
           <span class="year-sep">—</span>
           <input v-model.number="filters.yearTo" type="number" placeholder="结束" class="year-input" />
         </div>
-        <button
-          v-if="filters.source === 'ieee'"
-          class="pill"
-          :class="{ active: filters.earlyAccess }"
-          @mousedown.prevent="filters.earlyAccess = !filters.earlyAccess"
-        >Early Access</button>
-        <select v-if="filters.source === 'ieee' && filters.earlyAccess" v-model="filters.publication" class="filter-select">
-          <option value="">全部顶刊</option>
-          <option v-for="p in topPublications" :key="p.id" :value="p.id">{{ p.label }}</option>
-        </select>
+        <template v-if="filters.source === 'ieee'">
+          <select v-model="filters.journalId" class="filter-select" title="IEEE 搜索范围">
+            <option value="">全 IEEE</option>
+            <option v-for="journal in ieeeJournals" :key="journal.id" :value="journal.id">{{ journal.displayName }}</option>
+          </select>
+          <div class="filter-pills desktop-only">
+            <span class="filter-label">IEEE 排序</span>
+            <button class="pill" :class="{ active: filters.ieeeSort === 'relevance' }" @mousedown.prevent="filters.ieeeSort = 'relevance'">相关度</button>
+            <button class="pill" :class="{ active: filters.ieeeSort === 'newest' }" @mousedown.prevent="filters.ieeeSort = 'newest'">最新</button>
+          </div>
+          <span v-if="ieeeJournalsError" class="filter-error">{{ ieeeJournalsError }}</span>
+        </template>
       </div>
 
       <!-- Results -->
@@ -1092,6 +1090,11 @@ onUnmounted(() => {
 .pill:hover {
   border-color: var(--color-primary);
   color: var(--color-primary);
+}
+
+.filter-error {
+  color: #dc2626;
+  font-size: 11px;
 }
 
 .pill.active {

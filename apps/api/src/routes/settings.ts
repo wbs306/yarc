@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { prisma } from '@yarc/db'
+import { prisma, type Prisma } from '@yarc/db'
 import { piService } from '../services/pi.service.js'
 import { paperService } from '../services/paper.service.js'
 import { jobQueue } from '../services/job-queue.service.js'
@@ -23,6 +23,12 @@ import { access, mkdir, readFile, writeFile, readdir, stat } from 'node:fs/promi
 import { dirname, extname, join, parse, resolve } from 'node:path'
 import { readModelCatalog, fetchAndCacheModelCatalog } from '../lib/model-catalog.js'
 import { randomUUID } from 'node:crypto'
+import {
+  emptyIeeeJournalBrowserPreferences,
+  IeeeXploreError,
+  normalizeIeeeJournalBrowserPreferences,
+  readIeeeJournalBrowserPreferences,
+} from '../services/ieee-xplore.service.js'
 
 const settings = new Hono()
 
@@ -774,6 +780,34 @@ settings.put('/pi-auth', async (c) => {
 // For now, we just indicate that OAuth login needs to be done via `pi` CLI.
 settings.post('/pi-auth/oauth-start', async (c) => {
   return c.json({ error: { code: 'NOT_SUPPORTED', message: 'OAuth 登录请使用 pi CLI 的 /login 命令完成。在终端运行 pi，然后输入 /login 选择 Provider。' } }, 400)
+})
+
+// GET /api/settings/ieee-journal-browser
+settings.get('/ieee-journal-browser', async (c) => {
+  return c.json({ preferences: await readIeeeJournalBrowserPreferences() })
+})
+
+// PUT /api/settings/ieee-journal-browser — validated journal configuration.
+// This must stay above the generic /:key route.
+settings.put('/ieee-journal-browser', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => null) as { preferences?: unknown } | null
+    if (!body || typeof body !== 'object') {
+      return c.json({ error: { code: 'INVALID_BODY', message: 'preferences must be an object' } }, 400)
+    }
+    const preferences = normalizeIeeeJournalBrowserPreferences(body.preferences ?? emptyIeeeJournalBrowserPreferences())
+    await prisma.setting.upsert({
+      where: { key: 'ieee_journal_browser' },
+      create: { key: 'ieee_journal_browser', value: preferences as unknown as Prisma.InputJsonValue },
+      update: { value: preferences as unknown as Prisma.InputJsonValue, updatedAt: new Date() },
+    })
+    return c.json({ preferences })
+  } catch (err) {
+    if (err instanceof IeeeXploreError) {
+      return c.json({ error: { code: err.code, message: err.message } }, err.status as any)
+    }
+    return c.json({ error: { code: 'INVALID_IEEE_JOURNAL_PREFERENCES', message: (err as Error).message } }, 400)
+  }
 })
 
 // PUT /api/settings/:key — generic setting update (MUST be after all specific PUT routes)

@@ -1,22 +1,19 @@
 import { Hono } from 'hono'
 import { searchService } from '../services/search.service.js'
-import type { PaperReferenceInput } from '@yarc/shared'
+import {
+  IeeeXploreError,
+  ieeeXploreService,
+  readIeeeJournalBrowserPreferences,
+} from '../services/ieee-xplore.service.js'
+import type { IeeeSearchMode, IeeeSearchSort, PaperReferenceInput } from '@yarc/shared'
 
 const search = new Hono()
 
 // GET /api/search
 search.get('/', async (c) => {
   const source = c.req.query('source') || 'semantic_scholar'
-  const publication = c.req.query('publication')
-  const earlyAccess = c.req.query('early_access') === 'true'
-  const query = c.req.query('q') || (source === 'ieee' && earlyAccess && publication ? publication : '')
-  if (!query) {
-    return c.json(
-      { error: { code: 'MISSING_QUERY', message: 'Query is required' } },
-      400
-    )
-  }
-
+  const legacyPublication = c.req.query('publication')?.trim().toLowerCase()
+  const query = c.req.query('q') || ''
   const field = c.req.query('field') || 'all'
   const page = parseInt(c.req.query('page') || '1')
   const limit = parseInt(c.req.query('limit') || '20')
@@ -29,6 +26,66 @@ search.get('/', async (c) => {
 
   try {
     let results
+
+    if (source === 'ieee') {
+      const rawMode = c.req.query('ieee_mode') || 'search'
+      if (!['search', 'current_issue', 'early_access', 'article_abstract'].includes(rawMode)) {
+        return c.json({ error: { code: 'INVALID_IEEE_MODE', message: 'ieee_mode must be search, current_issue, early_access, or article_abstract' } }, 400)
+      }
+      const mode = rawMode as IeeeSearchMode
+      const journalId = c.req.query('journal_id')?.trim()
+      const preferences = await readIeeeJournalBrowserPreferences()
+      const journal = journalId
+        ? preferences.journals.find(item => item.id === journalId)
+        : legacyPublication
+          ? preferences.journals.find(item =>
+            item.id.toLowerCase() === legacyPublication ||
+            item.publicationNumber === legacyPublication ||
+            item.displayName.toLowerCase() === legacyPublication ||
+            item.publicationTitle.toLowerCase() === legacyPublication
+          )
+          : undefined
+      if (journalId && !journal) {
+        return c.json({ error: { code: 'IEEE_JOURNAL_NOT_FOUND', message: 'Configured IEEE journal was not found' } }, 404)
+      }
+      if ((mode === 'current_issue' || mode === 'early_access') && !journalId) {
+        return c.json({ error: { code: 'MISSING_JOURNAL_ID', message: 'journal_id is required for IEEE journal browsing' } }, 400)
+      }
+      const articleNumber = c.req.query('article_number')?.trim()
+      if (mode === 'article_abstract' && !/^\d{4,20}$/.test(articleNumber || '')) {
+        return c.json({ error: { code: 'INVALID_IEEE_ARTICLE_NUMBER', message: 'article_number must contain only digits' } }, 400)
+      }
+      if (mode === 'search' && !query.trim()) {
+        return c.json({ error: { code: 'MISSING_QUERY', message: 'q is required for IEEE article search' } }, 400)
+      }
+      const rawSort = c.req.query('sort') || 'relevance'
+      if (!['relevance', 'newest'].includes(rawSort)) {
+        return c.json({ error: { code: 'INVALID_IEEE_SORT', message: 'sort must be relevance or newest' } }, 400)
+      }
+      if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 25) {
+        return c.json({ error: { code: 'INVALID_PAGINATION', message: 'page must be positive and limit must be between 1 and 25' } }, 400)
+      }
+      // `q` is intentionally ignored in directory modes; the browser filters
+      // the returned in-memory list without repeatedly querying IEEE.
+      results = await ieeeXploreService.execute({
+        mode,
+        q: mode === 'search' ? query : undefined,
+        journal,
+        sort: rawSort as IeeeSearchSort,
+        page,
+        limit,
+        refresh: c.req.query('refresh') === '1',
+        articleNumber,
+      })
+      return c.json(results)
+    }
+
+    if (!query) {
+      return c.json(
+        { error: { code: 'MISSING_QUERY', message: 'Query is required' } },
+        400
+      )
+    }
 
     switch (source) {
       case 'local':
@@ -49,19 +106,6 @@ search.get('/', async (c) => {
         results = await searchService.searchLocalVector(query, limit)
         break
 
-      case 'ieee':
-        // IEEE Xplore official API when configured; otherwise bounded campus-IP crawler fallback.
-        results = await searchService.searchIEEE(
-          query,
-          field,
-          page,
-          limit,
-          yearFrom,
-          yearTo,
-          { earlyAccess, publication }
-        )
-        break
-
       case 'semantic_scholar':
       default:
         results = await searchService.searchSemanticScholar(
@@ -77,6 +121,9 @@ search.get('/', async (c) => {
 
     return c.json(results)
   } catch (err) {
+    if (err instanceof IeeeXploreError) {
+      return c.json({ error: { code: err.code, message: err.message } }, err.status as any)
+    }
     return c.json(
       { error: { code: 'SEARCH_ERROR', message: (err as Error).message } },
       502

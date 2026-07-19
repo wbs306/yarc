@@ -257,6 +257,50 @@ export interface SearchResult {
 
 export type PaperSource = 'local' | 'ieee' | 'semantic_scholar'
 
+export type IeeeSearchMode = 'search' | 'current_issue' | 'early_access' | 'article_abstract'
+export type IeeeBrowseMode = 'current_issue' | 'early_access'
+export type IeeeSearchSort = 'relevance' | 'newest'
+
+export interface IeeeJournalConfig {
+  id: string
+  displayName: string
+  publicationTitle: string
+  publicationNumber: string
+}
+
+export interface IeeeJournalBrowserPreferences {
+  journals: IeeeJournalConfig[]
+  defaultRankingKeywords: string
+}
+
+export interface IeeeSearchRequest {
+  mode: IeeeSearchMode
+  q?: string
+  journal?: IeeeJournalConfig
+  sort?: IeeeSearchSort
+  page?: number
+  limit?: number
+  refresh?: boolean
+  articleNumber?: string
+}
+
+export interface IeeeSearchContext {
+  mode: IeeeSearchMode
+  journal?: IeeeJournalConfig
+  sourceUrl?: string
+  fetchedAt?: string
+  cached?: boolean
+}
+
+export interface IeeeSearchResponse {
+  papers: SearchPaper[]
+  total: number
+  page: number
+  limit: number
+  error?: string
+  ieee?: IeeeSearchContext
+}
+
 export interface SearchPaper {
   id: string
   title: string

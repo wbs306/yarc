@@ -51,7 +51,7 @@ export const CHAT_TOOLS_BLOCK = `# YARC 内置研究 Agent 指南
 
 1. ask_user_question - 在 YARC Web UI 中向用户提出结构化问题。适用于目标不清、需要选择分类/论文/策略、删除或覆盖前确认。questions 数量 1-4；每个问题 options 数量 2-4；header 最多 16 字符；option label 最多 60 字符。不要自己添加 Type something、Chat about this 或 Other 选项。
 
-2. yarc_search_papers - 搜索论文并把结果同步到前端搜索结果列表。query 必填，除非使用 IEEE 顶刊 Early Access 列表时可用 publication 作为查询；source 可为 local、ieee、semantic_scholar；field 可为 all、title、author、year、abstract、journal、venue；支持 page、limit、yearFrom、yearTo。查本地库用 source=local；查外部论文优先 semantic_scholar，用户指定 IEEE 时用 ieee。IEEE 支持 earlyAccess=true 抓 Early Access Articles；支持 publication 指定顶刊别名或完整刊名，例如 tmc、tpds、twc、ton、tc、jsac、tcc、tsc、tnsm、tdsc、tkde、tpami、tnnls、tvt、tii、tits、tccn、tcom。
+2. yarc_search_papers - 搜索论文并把结果同步到前端搜索结果列表。query 始终必填；source 可为 local、ieee、semantic_scholar；field 可为 all、title、author、year、abstract、journal、venue；支持 page、limit、yearFrom、yearTo。查本地库用 source=local；查外部论文优先 semantic_scholar，用户指定 IEEE 时用 ieee。IEEE 搜索默认同时包含正式文章和 Early Access，若传 publication，它仅作为已配置期刊的范围提示，绝不能替代 query。
 
 3. yarc_categories - 统一分类管理。action 为 list、create、update、delete；type 为 library（本地文献库，默认）或 search（外部搜索收藏）；常用参数 name、parentId、color、id、ids。删除前确认影响：library 分类删除会使其中论文变未分类并处理子分类父级；search 分类删除会移除该收藏分类及其中收藏论文。
 
@@ -91,7 +91,7 @@ PDF 入库统一使用 yarc_papers action=save type=library importPdf=true。
 
 ### 搜索外部论文并收藏
 
-1. 调用 yarc_search_papers，通常 source=semantic_scholar；用户指定 IEEE 时用 source=ieee。若用户要求某个 IEEE 顶刊的 Early Access 列表，设置 source=ieee、earlyAccess=true、publication=<顶刊别名/完整刊名>，query 可填同一 publication 或用户额外关键词。
+1. 调用 yarc_search_papers，通常 source=semantic_scholar；用户指定 IEEE 时用 source=ieee。IEEE 工具搜索是文章搜索，query 必须是用户想找的文章关键词；publication（如提供）只用于期刊范围，不能填入或替代 query。期刊目录浏览请引导用户使用 IEEE 期刊浏览页面。
 2. 基于标题、摘要、年份、venue/journal 等证据筛选；不确定时列出候选让用户选择。
 3. 用户要求收藏时，先确认或创建 search 分类。
 4. 使用 yarc_papers action=save、type=search、papers[] 批量保存，可用 category + parentCategory 自动创建分类。

@@ -9,6 +9,7 @@ import { useApi } from '@/composables/useApi'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
+import type { IeeeJournalBrowserPreferences } from '@yarc/shared'
 
 import PdfViewer from '@/components/pdf/PdfViewer.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
@@ -16,6 +17,7 @@ import FileTree from '@/components/files/FileTree.vue'
 import CodeEditor from '@/components/files/CodeEditor.vue'
 import OfficePreview from '@/components/files/OfficePreview.vue'
 import SettingsContent from '@/components/settings/SettingsContent.vue'
+import IeeeJournalBrowser from '@/components/ieee/IeeeJournalBrowser.vue'
 import UploadDialog from '@/components/papers/UploadDialog.vue'
 import TopSearchBar from '@/components/search/TopSearchBar.vue'
 import SaveToCategoryDialog from '@/components/search/SaveToCategoryDialog.vue'
@@ -72,13 +74,26 @@ const chatPanelWidth = computed(() => (chatOpen.value ? chatWidth.value : 0))
 const query = ref('')
 const selectedCategory = ref<string | null>(localStorage.getItem('yarc_category') || null)
 // Route takes precedence over localStorage for sidebar mode
-const getInitialSidebarMode = (): 'library' | 'files' | 'settings' => {
+const getInitialSidebarMode = (): 'library' | 'files' | 'settings' | 'ieee' => {
   if (route.name === 'files') return 'files'
   if (route.name === 'settings') return 'settings'
-  return (localStorage.getItem('yarc_sidebar_mode') as 'library' | 'files' | 'settings') || 'library'
+  if (route.query.view === 'ieee') return 'ieee'
+  return (localStorage.getItem('yarc_sidebar_mode') as 'library' | 'files' | 'settings' | 'ieee') || 'library'
 }
-const sidebarMode = ref<'library' | 'files' | 'settings'>(getInitialSidebarMode())
-const settingsSection = ref('general')
+const sidebarMode = ref<'library' | 'files' | 'settings' | 'ieee'>(getInitialSidebarMode())
+const settingsSection = ref(typeof route.query.section === 'string' ? route.query.section : 'general')
+
+const ieeeJournalPreferences = ref<IeeeJournalBrowserPreferences>({ journals: [], defaultRankingKeywords: '' })
+const selectedIeeeJournalId = ref('')
+const ieeeJournalLoading = ref(false)
+const ieeeJournalError = ref('')
+const showIeeeJournalDialog = ref(false)
+const savingIeeeJournal = ref(false)
+const newIeeeJournal = ref({ displayName: '', publicationTitle: '', publicationNumber: '' })
+const showEditIeeeJournalDialog = ref(false)
+const editingIeeeJournalId = ref('')
+const editingIeeeJournal = ref({ displayName: '', publicationTitle: '', publicationNumber: '' })
+const ieeeJournalContextMenu = ref<{ visible: boolean; x: number; y: number; id: string; displayName: string }>({ visible: false, x: 0, y: 0, id: '', displayName: '' })
 
 // Multi-select mode for papers
 const selectionMode = ref(false)
@@ -446,15 +461,164 @@ const loadWorkspaceFiles = async (silent = false) => {
   }
 }
 
-const setSidebarMode = (mode: 'library' | 'files' | 'settings') => {
+const loadIeeeJournalPreferences = async () => {
+  ieeeJournalLoading.value = true
+  ieeeJournalError.value = ''
+  try {
+    const response = await api.getIeeeJournalBrowserPreferences()
+    ieeeJournalPreferences.value = response.preferences
+    if (!ieeeJournalPreferences.value.journals.some(journal => journal.id === selectedIeeeJournalId.value)) {
+      selectedIeeeJournalId.value = ieeeJournalPreferences.value.journals[0]?.id || ''
+    }
+  } catch (err) {
+    ieeeJournalError.value = (err as Error).message || '加载 IEEE 期刊失败'
+  } finally {
+    ieeeJournalLoading.value = false
+  }
+}
+
+const ieeeJournalIdFrom = (displayName: string, publicationNumber: string) => {
+  const base = displayName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48)
+  const existing = new Set(ieeeJournalPreferences.value.journals.map(journal => journal.id))
+  let id = base || `journal-${publicationNumber}`
+  let suffix = 2
+  while (existing.has(id)) id = `${(base || `journal-${publicationNumber}`).slice(0, 56)}-${suffix++}`
+  return id
+}
+
+const addIeeeJournal = async () => {
+  const displayName = newIeeeJournal.value.displayName.trim()
+  const publicationTitle = newIeeeJournal.value.publicationTitle.trim()
+  const publicationNumber = newIeeeJournal.value.publicationNumber.trim()
+  if (!displayName || !publicationTitle || !/^\d{1,20}$/.test(publicationNumber)) {
+    ieeeJournalError.value = '请填写显示名、IEEE 期刊全称和仅包含数字的 publicationNumber'
+    return
+  }
+  if (ieeeJournalPreferences.value.journals.some(journal => journal.publicationNumber === publicationNumber)) {
+    ieeeJournalError.value = '该 publicationNumber 已存在'
+    return
+  }
+  savingIeeeJournal.value = true
+  ieeeJournalError.value = ''
+  try {
+    const journal = {
+      id: ieeeJournalIdFrom(displayName, publicationNumber), displayName, publicationTitle, publicationNumber,
+    }
+    const response = await api.updateIeeeJournalBrowserPreferences({
+      journals: [...ieeeJournalPreferences.value.journals, journal],
+      defaultRankingKeywords: ieeeJournalPreferences.value.defaultRankingKeywords,
+    })
+    ieeeJournalPreferences.value = response.preferences
+    selectedIeeeJournalId.value = journal.id
+    newIeeeJournal.value = { displayName: '', publicationTitle: '', publicationNumber: '' }
+    showIeeeJournalDialog.value = false
+  } catch (err) {
+    ieeeJournalError.value = (err as Error).message || '添加 IEEE 期刊失败'
+  } finally {
+    savingIeeeJournal.value = false
+  }
+}
+
+const openIeeeJournalContextMenu = (event: MouseEvent, journal: { id: string; displayName: string }) => {
+  event.preventDefault()
+  event.stopPropagation()
+  const width = 180
+  ieeeJournalContextMenu.value = {
+    visible: true,
+    x: Math.min(event.clientX, window.innerWidth - width - 8),
+    y: event.clientY,
+    id: journal.id,
+    displayName: journal.displayName,
+  }
+}
+
+const startEditingIeeeJournal = () => {
+  const { id } = ieeeJournalContextMenu.value
+  const journal = ieeeJournalPreferences.value.journals.find(item => item.id === id)
+  ieeeJournalContextMenu.value.visible = false
+  if (!journal) return
+  editingIeeeJournalId.value = journal.id
+  editingIeeeJournal.value = {
+    displayName: journal.displayName,
+    publicationTitle: journal.publicationTitle,
+    publicationNumber: journal.publicationNumber,
+  }
+  ieeeJournalError.value = ''
+  showEditIeeeJournalDialog.value = true
+}
+
+const saveIeeeJournalEdit = async () => {
+  const id = editingIeeeJournalId.value
+  const displayName = editingIeeeJournal.value.displayName.trim()
+  const publicationTitle = editingIeeeJournal.value.publicationTitle.trim()
+  const publicationNumber = editingIeeeJournal.value.publicationNumber.trim()
+  if (!id || !displayName || !publicationTitle || !/^\d{1,20}$/.test(publicationNumber)) {
+    ieeeJournalError.value = '请填写显示名、IEEE 期刊全称和仅包含数字的 publicationNumber'
+    return
+  }
+  if (ieeeJournalPreferences.value.journals.some(journal => journal.id !== id && journal.publicationNumber === publicationNumber)) {
+    ieeeJournalError.value = '该 publicationNumber 已存在'
+    return
+  }
+  savingIeeeJournal.value = true
+  ieeeJournalError.value = ''
+  try {
+    const response = await api.updateIeeeJournalBrowserPreferences({
+      journals: ieeeJournalPreferences.value.journals.map(journal => journal.id === id
+        ? { ...journal, displayName, publicationTitle, publicationNumber }
+        : journal),
+      defaultRankingKeywords: ieeeJournalPreferences.value.defaultRankingKeywords,
+    })
+    ieeeJournalPreferences.value = response.preferences
+    showEditIeeeJournalDialog.value = false
+  } catch (err) {
+    ieeeJournalError.value = (err as Error).message || '更新 IEEE 期刊失败'
+  } finally {
+    savingIeeeJournal.value = false
+  }
+}
+
+const deleteIeeeJournal = async () => {
+  const { id, displayName } = ieeeJournalContextMenu.value
+  ieeeJournalContextMenu.value.visible = false
+  if (!id || !(await showConfirm(`删除 IEEE 期刊「${displayName}」？该操作不会删除已保存的论文。`, true))) return
+  try {
+    const journals = ieeeJournalPreferences.value.journals.filter(journal => journal.id !== id)
+    const response = await api.updateIeeeJournalBrowserPreferences({
+      journals,
+      defaultRankingKeywords: ieeeJournalPreferences.value.defaultRankingKeywords,
+    })
+    ieeeJournalPreferences.value = response.preferences
+    if (selectedIeeeJournalId.value === id) selectedIeeeJournalId.value = journals[0]?.id || ''
+    if (!selectedIeeeJournalId.value) setSidebarMode('library')
+  } catch (err) {
+    ieeeJournalError.value = (err as Error).message || '删除 IEEE 期刊失败'
+  }
+}
+
+const openIeeeJournal = (id: string) => {
+  selectedIeeeJournalId.value = id
+  selectedSearchCategory.value = null
+  selectedCategory.value = null
+  clearSelection()
+  setSidebarMode('ieee')
+}
+
+const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee') => {
   sidebarMode.value = mode
   localStorage.setItem('yarc_sidebar_mode', mode)
-  // Sync URL for bookmarking (silent, no navigation)
-  const targetPath = mode === 'files' ? '/files' : mode === 'settings' ? '/settings' : '/'
-  if (route.path !== targetPath) {
-    router.replace(targetPath).catch(() => {})
+  // IEEE browsing is a workspace view, not a separate page. Keep a compact
+  // query marker only so the active view can be restored on refresh.
+  const target = mode === 'ieee'
+    ? { path: '/', query: { view: 'ieee' } }
+    : { path: mode === 'files' ? '/files' : mode === 'settings' ? '/settings' : '/' }
+  if (route.fullPath !== router.resolve(target).fullPath) {
+    router.replace(target).catch(() => {})
   }
   if (mode === 'files' && !workspaceFiles.value.length) void loadWorkspaceFiles()
+  if (mode === 'ieee' && !ieeeJournalPreferences.value.journals.length && !ieeeJournalLoading.value) {
+    void loadIeeeJournalPreferences()
+  }
 }
 
 const prepareWorkspaceSwitch = async () => {
@@ -892,7 +1056,13 @@ const fileCtxDownload = () => {
 watch(() => route.name, (name) => {
   if (name === 'files') setSidebarMode('files')
   else if (name === 'settings') setSidebarMode('settings')
-  else if (name === 'home') setSidebarMode('library')
+  else if (name === 'home') setSidebarMode(route.query.view === 'ieee' ? 'ieee' : 'library')
+}, { immediate: true })
+
+watch(() => route.query.section, (section) => {
+  if (typeof section === 'string' && settingsSections.some(item => item.id === section)) {
+    settingsSection.value = section
+  }
 }, { immediate: true })
 
 // Sort options with localStorage persistence
@@ -1054,6 +1224,7 @@ const toggleCategoryExpand = (id: string) => {
 }
 
 const selectCategory = (id: string | null) => {
+  if (sidebarMode.value === 'ieee') setSidebarMode('library')
   selectedSearchCategory.value = null
   selectedCategory.value = id
   if (id === null) {
@@ -1275,7 +1446,8 @@ onMounted(async () => {
     api.getCategories().then((res) => { categories.value = res.categories }).catch(() => {}),
     chatStore.fetchConversations(),
     chatStore.fetchModels(),
-    fetchSearchCategories()
+    fetchSearchCategories(),
+    loadIeeeJournalPreferences(),
   ])
 
   // Restore workspace file if in files mode
@@ -1582,6 +1754,7 @@ const closeAllContextMenus = () => {
   if (searchCategoryContextMenu.value.visible) closeSearchCategoryContextMenu()
   if (searchPaperContextMenu.value.visible) closeSearchPaperContextMenu()
   if (fileContextMenu.value.visible) closeFileContextMenu()
+  if (ieeeJournalContextMenu.value.visible) ieeeJournalContextMenu.value.visible = false
 }
 
 const contextAddChild = () => {
@@ -1637,6 +1810,7 @@ const onDocumentClick = () => {
   if (searchCategoryContextMenu.value.visible) closeSearchCategoryContextMenu()
   if (searchPaperContextMenu.value.visible) closeSearchPaperContextMenu()
   if (fileContextMenu.value.visible) closeFileContextMenu()
+  if (ieeeJournalContextMenu.value.visible) ieeeJournalContextMenu.value.visible = false
 }
 
 const openPaperContextMenu = (e: MouseEvent, paper: any) => {
@@ -2112,6 +2286,7 @@ const confirmAddSearchCategory = async () => {
 }
 
 const selectSearchCategory = async (id: string) => {
+  if (sidebarMode.value === 'ieee') setSidebarMode('library')
   selectedSearchCategory.value = id
   selectedCategory.value = null
   clearSelection()
@@ -2231,12 +2406,12 @@ const showSearchPaperPopup = (paper: any) => {
       >
         <section v-if="!hasPaper" class="side-panel category-panel">
           <div class="side-header">
-            <h2>{{ sidebarMode === 'library' ? '文献库' : sidebarMode === 'files' ? '文件' : '设置' }}</h2>
+            <h2>{{ sidebarMode === 'files' ? '文件' : sidebarMode === 'settings' ? '设置' : '文献库' }}</h2>
             <button v-if="sidebarMode === 'files'" class="side-mini-btn" :disabled="filesLoading" @click="loadWorkspaceFiles()">刷新</button>
           </div>
 
           <Transition name="panel" mode="out-in">
-          <div v-if="sidebarMode === 'library'" key="m-library" class="category-list" @contextmenu="openContextMenu($event)" @click="onCategoryListBlankClick">
+          <div v-if="sidebarMode === 'library' || sidebarMode === 'ieee'" key="m-library" class="category-list" @contextmenu="openContextMenu($event)" @click="onCategoryListBlankClick">
             <div class="section-divider">
               <span class="divider-text">文献库</span>
               <button class="add-search-cat-btn" @click.stop="addingToParentId = null" title="新建分类">
@@ -2387,6 +2562,31 @@ const showSearchPaperPopup = (paper: any) => {
                 </div>
               </div>
             </div>
+
+            <div class="search-categories-section ieee-journals-section">
+              <div class="section-divider">
+                <span class="divider-text">期刊浏览</span>
+                <button class="add-search-cat-btn" title="添加 IEEE 期刊" @click.stop="showIeeeJournalDialog = true; ieeeJournalError = ''">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                </button>
+              </div>
+              <div v-if="ieeeJournalLoading" class="side-empty">正在加载期刊…</div>
+              <div v-else-if="ieeeJournalError" class="side-empty error-text">{{ ieeeJournalError }}</div>
+              <template v-else>
+                <button
+                  v-for="journal in ieeeJournalPreferences.journals"
+                  :key="journal.id"
+                  class="category-item"
+                  :class="{ active: sidebarMode === 'ieee' && selectedIeeeJournalId === journal.id }"
+                  @click="openIeeeJournal(journal.id)"
+                  @contextmenu="openIeeeJournalContextMenu($event, journal)"
+                >
+                  <span class="cat-spacer" />
+                  <span class="cat-name">{{ journal.displayName }}</span>
+                </button>
+                <div v-if="!ieeeJournalPreferences.journals.length" class="side-empty">点击 + 添加 IEEE 期刊</div>
+              </template>
+            </div>
           </div>
 
           <div
@@ -2430,7 +2630,7 @@ const showSearchPaperPopup = (paper: any) => {
             />
           </div>
 
-          <div v-else key="m-settings" class="category-list settings-inline-list">
+          <div v-else-if="sidebarMode === 'settings'" key="m-settings" class="category-list settings-inline-list">
             <button
               v-for="section in settingsSections"
               :key="section.id"
@@ -2442,6 +2642,7 @@ const showSearchPaperPopup = (paper: any) => {
               <span class="cat-name">{{ section.label }}</span>
             </button>
           </div>
+
           </Transition>
 
           <!-- Context menu -->
@@ -2458,6 +2659,20 @@ const showSearchPaperPopup = (paper: any) => {
                 <div class="ctx-sep" />
                 <button class="ctx-item danger" @click="contextDelete">🗑️ 删除</button>
               </template>
+            </div>
+          </Teleport>
+
+          <!-- IEEE journal context menu -->
+          <Teleport to="body">
+            <div
+              v-if="ieeeJournalContextMenu.visible"
+              class="cat-context-menu"
+              :style="{ left: ieeeJournalContextMenu.x + 'px', top: ieeeJournalContextMenu.y + 'px' }"
+              @click.stop
+            >
+              <button class="ctx-item" @click="startEditingIeeeJournal">✏️ 编辑期刊信息</button>
+              <div class="ctx-sep" />
+              <button class="ctx-item danger" @click="deleteIeeeJournal">🗑️ 删除期刊</button>
             </div>
           </Teleport>
 
@@ -2928,6 +3143,15 @@ const showSearchPaperPopup = (paper: any) => {
           </section>
         </section>
 
+        <section v-show="!hasPaper && sidebarMode === 'ieee'" class="paper-library workspace-panel ieee-workspace-panel">
+          <IeeeJournalBrowser
+            :journals="ieeeJournalPreferences.journals"
+            :selected-journal-id="selectedIeeeJournalId"
+            :default-ranking-keywords="ieeeJournalPreferences.defaultRankingKeywords"
+            @select-journal="openIeeeJournal"
+          />
+        </section>
+
         <section v-show="!hasPaper && sidebarMode === 'settings'" class="paper-library workspace-panel settings-workspace-panel">
           <div class="library-header">
             <div>
@@ -2954,6 +3178,32 @@ const showSearchPaperPopup = (paper: any) => {
     </div>
 
     <UploadDialog v-if="showUpload" :categoryId="uploadCategoryId" @close="showUpload = false; refreshLibrary()" />
+    <Modal v-model="showIeeeJournalDialog" title="添加 IEEE 期刊" maxWidth="560px" @close="newIeeeJournal = { displayName: '', publicationTitle: '', publicationNumber: '' }">
+      <div class="ieee-journal-dialog">
+        <p>填写 IEEE Xplore 期刊信息。publicationNumber 是期刊固定的 <code>punumber</code>，不是动态的 <code>isnumber</code>。</p>
+        <label>显示名<input v-model="newIeeeJournal.displayName" placeholder="例如：TMC" maxlength="120" /></label>
+        <label>IEEE 期刊全称<input v-model="newIeeeJournal.publicationTitle" placeholder="例如：IEEE Transactions on Mobile Computing" maxlength="500" /></label>
+        <label>publicationNumber<input v-model="newIeeeJournal.publicationNumber" inputmode="numeric" pattern="[0-9]*" placeholder="例如：7755" maxlength="20" @input="newIeeeJournal.publicationNumber = newIeeeJournal.publicationNumber.replace(/\D/g, '')" /></label>
+        <p v-if="ieeeJournalError" class="error-text">{{ ieeeJournalError }}</p>
+      </div>
+      <template #footer>
+        <button class="btn btn-ghost" @click="showIeeeJournalDialog = false">取消</button>
+        <button class="btn btn-primary" :disabled="savingIeeeJournal" @click="addIeeeJournal">{{ savingIeeeJournal ? '添加中…' : '添加期刊' }}</button>
+      </template>
+    </Modal>
+    <Modal v-model="showEditIeeeJournalDialog" title="编辑 IEEE 期刊" maxWidth="560px" @close="editingIeeeJournalId = ''">
+      <div class="ieee-journal-dialog">
+        <p>修改显示名、IEEE 期刊全称或固定的 <code>publicationNumber</code>。</p>
+        <label>显示名<input v-model="editingIeeeJournal.displayName" maxlength="120" /></label>
+        <label>IEEE 期刊全称<input v-model="editingIeeeJournal.publicationTitle" maxlength="500" /></label>
+        <label>publicationNumber<input v-model="editingIeeeJournal.publicationNumber" inputmode="numeric" pattern="[0-9]*" maxlength="20" @input="editingIeeeJournal.publicationNumber = editingIeeeJournal.publicationNumber.replace(/\D/g, '')" /></label>
+        <p v-if="ieeeJournalError" class="error-text">{{ ieeeJournalError }}</p>
+      </div>
+      <template #footer>
+        <button class="btn btn-ghost" @click="showEditIeeeJournalDialog = false">取消</button>
+        <button class="btn btn-primary" :disabled="savingIeeeJournal" @click="saveIeeeJournalEdit">{{ savingIeeeJournal ? '保存中…' : '保存修改' }}</button>
+      </template>
+    </Modal>
     <SaveToCategoryDialog
       v-model="showSaveToCategory"
       :papers="papersToSave"
@@ -3186,6 +3436,12 @@ const showSearchPaperPopup = (paper: any) => {
   color: var(--color-text-secondary);
 }
 .icon-btn:active { transform: scale(0.92); }
+
+.ieee-journal-dialog { display: grid; gap: 14px; }
+.ieee-journal-dialog p { margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.55; }
+.ieee-journal-dialog label { display: grid; gap: 6px; color: var(--color-text); font-size: 13px; font-weight: 600; }
+.ieee-journal-dialog input { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text); font: inherit; font-weight: 400; }
+.ieee-journal-dialog input:focus { outline: none; border-color: var(--color-primary); }
 
 .icon-btn.active {
   color: var(--color-primary);
@@ -3791,6 +4047,7 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-preview-panel img { max-width: 100%; height: auto; border-radius: var(--radius); box-shadow: var(--shadow-lg); background: var(--color-bg-card); }
 .workspace-office-preview-wrap { flex: 1; min-height: 0; padding: 16px; background: var(--color-bg-card); }
 .paper-library.settings-workspace-panel { overflow-y: auto; }
+.paper-library.ieee-workspace-panel { overflow: hidden; }
 .settings-workspace-panel :deep(.settings-content) { width: min(760px, calc(100% - 48px)); padding: 0 24px 24px; }
 
 /* ── Notes side ───────────────────────────────────────────────────────────── */
