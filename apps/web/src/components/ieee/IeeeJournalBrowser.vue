@@ -14,7 +14,7 @@ const emit = defineEmits<{
 }>()
 
 const api = useApi()
-const mode = ref<IeeeBrowseMode>('current_issue')
+const mode = ref<IeeeBrowseMode>('early_access')
 const rankingKeywords = ref('')
 const papers = ref<SearchPaper[]>([])
 const total = ref(0)
@@ -170,8 +170,8 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
       </div>
       <div v-if="selectedJournal" class="header-actions">
         <div class="mode-tabs" role="tablist" aria-label="目录类型">
-          <button :class="{ active: mode === 'current_issue' }" role="tab" :aria-selected="mode === 'current_issue'" @click="mode = 'current_issue'">Current Issue</button>
           <button :class="{ active: mode === 'early_access' }" role="tab" :aria-selected="mode === 'early_access'" @click="mode = 'early_access'">Early Access</button>
+          <button :class="{ active: mode === 'current_issue' }" role="tab" :aria-selected="mode === 'current_issue'" @click="mode = 'current_issue'">Current Issue</button>
         </div>
         <button class="secondary-btn" :disabled="loading || loadingMore" @click="loadDirectory(true)">{{ loading ? '加载中…' : '刷新' }}</button>
       </div>
