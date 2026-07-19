@@ -71,14 +71,40 @@ const chatWidth = ref(380)
 const sidebarPanelWidth = computed(() => (sidebarOpen.value ? sidebarWidth.value : 0))
 const chatPanelWidth = computed(() => (chatOpen.value ? chatWidth.value : 0))
 
+type PersistedLibraryView =
+  | { kind: 'category'; id: string | null }
+  | { kind: 'search_category'; id: string }
+  | { kind: 'ieee_journal'; id: string }
+
+const LIBRARY_VIEW_STORAGE_KEY = 'yarc_library_view'
+
+const readPersistedLibraryView = (): PersistedLibraryView | null => {
+  try {
+    const value = JSON.parse(localStorage.getItem(LIBRARY_VIEW_STORAGE_KEY) || 'null') as unknown
+    if (!value || typeof value !== 'object') return null
+    const view = value as { kind?: unknown; id?: unknown }
+    if (view.kind === 'category' && (typeof view.id === 'string' || view.id === null)) return { kind: view.kind, id: view.id }
+    if ((view.kind === 'search_category' || view.kind === 'ieee_journal') && typeof view.id === 'string' && view.id) {
+      return { kind: view.kind, id: view.id }
+    }
+  } catch { /* Ignore malformed stale localStorage. */ }
+  return null
+}
+
+const persistLibraryView = (view: PersistedLibraryView) => {
+  localStorage.setItem(LIBRARY_VIEW_STORAGE_KEY, JSON.stringify(view))
+}
+
 const query = ref('')
-const selectedCategory = ref<string | null>(localStorage.getItem('yarc_category') || null)
+const initialLibraryView = readPersistedLibraryView()
+const selectedCategory = ref<string | null>(initialLibraryView
+  ? (initialLibraryView.kind === 'category' ? initialLibraryView.id : null)
+  : localStorage.getItem('yarc_category') || null)
 // Route takes precedence over localStorage for sidebar mode
 const getInitialSidebarMode = (): 'library' | 'files' | 'settings' | 'ieee' => {
   if (route.name === 'files') return 'files'
   if (route.name === 'settings') return 'settings'
-  if (route.query.view === 'ieee') return 'ieee'
-  return (localStorage.getItem('yarc_sidebar_mode') as 'library' | 'files' | 'settings' | 'ieee') || 'library'
+  return readPersistedLibraryView()?.kind === 'ieee_journal' ? 'ieee' : 'library'
 }
 const sidebarMode = ref<'library' | 'files' | 'settings' | 'ieee'>(getInitialSidebarMode())
 const settingsSection = ref(typeof route.query.section === 'string' ? route.query.section : 'general')
@@ -467,8 +493,16 @@ const loadIeeeJournalPreferences = async () => {
   try {
     const response = await api.getIeeeJournalBrowserPreferences()
     ieeeJournalPreferences.value = response.preferences
-    if (!ieeeJournalPreferences.value.journals.some(journal => journal.id === selectedIeeeJournalId.value)) {
+    const savedView = readPersistedLibraryView()
+    const requestedJournalId = savedView?.kind === 'ieee_journal'
+      ? savedView.id
+      : localStorage.getItem('yarc_ieee_journal_id') || ''
+    if (ieeeJournalPreferences.value.journals.some(journal => journal.id === requestedJournalId)) {
+      selectedIeeeJournalId.value = requestedJournalId
+    } else if (!ieeeJournalPreferences.value.journals.some(journal => journal.id === selectedIeeeJournalId.value)) {
       selectedIeeeJournalId.value = ieeeJournalPreferences.value.journals[0]?.id || ''
+      if (selectedIeeeJournalId.value) localStorage.setItem('yarc_ieee_journal_id', selectedIeeeJournalId.value)
+      else localStorage.removeItem('yarc_ieee_journal_id')
     }
   } catch (err) {
     ieeeJournalError.value = (err as Error).message || '加载 IEEE 期刊失败'
@@ -510,6 +544,8 @@ const addIeeeJournal = async () => {
     })
     ieeeJournalPreferences.value = response.preferences
     selectedIeeeJournalId.value = journal.id
+    localStorage.setItem('yarc_ieee_journal_id', journal.id)
+    persistLibraryView({ kind: 'ieee_journal', id: journal.id })
     newIeeeJournal.value = { displayName: '', publicationTitle: '', publicationNumber: '' }
     showIeeeJournalDialog.value = false
   } catch (err) {
@@ -590,6 +626,13 @@ const deleteIeeeJournal = async () => {
     })
     ieeeJournalPreferences.value = response.preferences
     if (selectedIeeeJournalId.value === id) selectedIeeeJournalId.value = journals[0]?.id || ''
+    if (selectedIeeeJournalId.value) {
+      localStorage.setItem('yarc_ieee_journal_id', selectedIeeeJournalId.value)
+      persistLibraryView({ kind: 'ieee_journal', id: selectedIeeeJournalId.value })
+    } else {
+      localStorage.removeItem('yarc_ieee_journal_id')
+      persistLibraryView({ kind: 'category', id: null })
+    }
     if (!selectedIeeeJournalId.value) setSidebarMode('library')
   } catch (err) {
     ieeeJournalError.value = (err as Error).message || '删除 IEEE 期刊失败'
@@ -598,6 +641,8 @@ const deleteIeeeJournal = async () => {
 
 const openIeeeJournal = (id: string) => {
   selectedIeeeJournalId.value = id
+  localStorage.setItem('yarc_ieee_journal_id', id)
+  persistLibraryView({ kind: 'ieee_journal', id })
   selectedSearchCategory.value = null
   selectedCategory.value = null
   clearSelection()
@@ -607,11 +652,9 @@ const openIeeeJournal = (id: string) => {
 const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee') => {
   sidebarMode.value = mode
   localStorage.setItem('yarc_sidebar_mode', mode)
-  // IEEE browsing is a workspace view, not a separate page. Keep a compact
-  // query marker only so the active view can be restored on refresh.
-  const target = mode === 'ieee'
-    ? { path: '/', query: { view: 'ieee' } }
-    : { path: mode === 'files' ? '/files' : mode === 'settings' ? '/settings' : '/' }
+  // Like the existing library category, the active IEEE workspace and
+  // journal are restored from localStorage rather than encoded in the URL.
+  const target = { path: mode === 'files' ? '/files' : mode === 'settings' ? '/settings' : '/' }
   if (route.fullPath !== router.resolve(target).fullPath) {
     router.replace(target).catch(() => {})
   }
@@ -1056,7 +1099,9 @@ const fileCtxDownload = () => {
 watch(() => route.name, (name) => {
   if (name === 'files') setSidebarMode('files')
   else if (name === 'settings') setSidebarMode('settings')
-  else if (name === 'home') setSidebarMode(route.query.view === 'ieee' ? 'ieee' : 'library')
+  else if (name === 'home') {
+    setSidebarMode(readPersistedLibraryView()?.kind === 'ieee_journal' ? 'ieee' : 'library')
+  }
 }, { immediate: true })
 
 watch(() => route.query.section, (section) => {
@@ -1064,6 +1109,7 @@ watch(() => route.query.section, (section) => {
     settingsSection.value = section
   }
 }, { immediate: true })
+
 
 // Sort options with localStorage persistence
 const sortOptions: { field: string; label: string }[] = [
@@ -1123,9 +1169,9 @@ const papersToSave = ref<any[]>([])
 const showImportToLibrary = ref(false)
 const papersToImport = ref<any[]>([])
 const searchCategories = ref<any[]>([])
-const selectedSearchCategory = ref<string | null>(null)
+const selectedSearchCategory = ref<string | null>(initialLibraryView?.kind === 'search_category' ? initialLibraryView.id : null)
 const searchCategoryPapers = ref<any[]>([])
-const loadingSearchPapers = ref(false)
+const loadingSearchPapers = ref(initialLibraryView?.kind === 'search_category')
 const showSearchPaperDetail = ref(false)
 const selectedSearchPaper = ref<any>(null)
 const showPaperDetailsModal = ref(false)
@@ -1235,6 +1281,7 @@ const selectCategory = (id: string | null) => {
   }
   clearSelection()
   localStorage.setItem('yarc_category', id || '')
+  persistLibraryView({ kind: 'category', id })
   // Category changes also act as an explicit refresh. This recovers cleanly if
   // a background import completed while its SSE event was missed or delayed.
   void refreshLibrary().catch(() => {})
@@ -1449,6 +1496,8 @@ onMounted(async () => {
     fetchSearchCategories(),
     loadIeeeJournalPreferences(),
   ])
+
+  if (route.name === 'home') await restorePersistedLibraryView()
 
   // Restore workspace file if in files mode
   if (sidebarMode.value === 'files') {
@@ -2219,6 +2268,7 @@ const deleteSearchCategoryFromMenu = async () => {
     if (selectedSearchCategory.value === id) {
       selectedSearchCategory.value = null
       searchCategoryPapers.value = []
+      persistLibraryView({ kind: 'category', id: null })
       clearSelection()
     }
     await fetchSearchCategories()
@@ -2289,6 +2339,7 @@ const selectSearchCategory = async (id: string) => {
   if (sidebarMode.value === 'ieee') setSidebarMode('library')
   selectedSearchCategory.value = id
   selectedCategory.value = null
+  persistLibraryView({ kind: 'search_category', id })
   clearSelection()
   loadingSearchPapers.value = true
   searchCategoryPapers.value = []
@@ -2302,6 +2353,38 @@ const selectSearchCategory = async (id: string) => {
   } finally {
     loadingSearchPapers.value = false
   }
+}
+
+const restorePersistedLibraryView = async () => {
+  const view = readPersistedLibraryView()
+  if (!view) return
+
+  if (view.kind === 'ieee_journal') {
+    if (ieeeJournalPreferences.value.journals.some(journal => journal.id === view.id)) {
+      selectedIeeeJournalId.value = view.id
+      sidebarMode.value = 'ieee'
+      return
+    }
+    persistLibraryView({ kind: 'category', id: null })
+  } else if (view.kind === 'search_category') {
+    if (searchCategories.value.some(category => category.id === view.id)) {
+      await selectSearchCategory(view.id)
+      return
+    }
+    persistLibraryView({ kind: 'category', id: null })
+  } else {
+    selectedSearchCategory.value = null
+    selectedCategory.value = view.id && !categories.value.some(category => category.id === view.id) && view.id !== '__uncategorized'
+      ? null
+      : view.id
+    sidebarMode.value = 'library'
+    localStorage.setItem('yarc_category', selectedCategory.value || '')
+    return
+  }
+
+  selectedSearchCategory.value = null
+  selectedCategory.value = null
+  sidebarMode.value = 'library'
 }
 
 const showSearchPaperPopup = (paper: any) => {
@@ -2421,7 +2504,7 @@ const showSearchPaperPopup = (paper: any) => {
               </button>
             </div>
 
-            <button class="category-item" :class="{ active: !selectedCategory }" @click="selectCategory(null)" @contextmenu="openContextMenu($event)">
+            <button class="category-item" :class="{ active: sidebarMode !== 'ieee' && !selectedCategory && !selectedSearchCategory }" @click="selectCategory(null)" @contextmenu="openContextMenu($event)">
               <span class="cat-spacer" />
               <span class="cat-name">全部</span>
               <span class="cat-count">{{ paperStore.total || paperStore.papers.length }}</span>
@@ -2444,7 +2527,7 @@ const showSearchPaperPopup = (paper: any) => {
               <div class="category-node">
                 <div
                   class="category-item"
-                  :class="{ active: selectedCategory === cat.id }"
+                  :class="{ active: sidebarMode !== 'ieee' && selectedCategory === cat.id }"
                   @click="cat.children.length ? toggleCategoryExpand(cat.id) : selectCategory(cat.id)"
                   @contextmenu="openContextMenu($event, cat)"
                 >
@@ -2488,7 +2571,7 @@ const showSearchPaperPopup = (paper: any) => {
                     v-for="child in cat.children"
                     :key="child.id"
                     class="category-item child"
-                    :class="{ active: selectedCategory === child.id }"
+                    :class="{ active: sidebarMode !== 'ieee' && selectedCategory === child.id }"
                     @click="selectCategory(child.id)"
                     @contextmenu="openContextMenu($event, child)"
                   >
@@ -2515,7 +2598,7 @@ const showSearchPaperPopup = (paper: any) => {
             <button
               v-if="uncategorizedCount"
               class="category-item"
-              :class="{ active: selectedCategory === '__uncategorized' }"
+              :class="{ active: sidebarMode !== 'ieee' && selectedCategory === '__uncategorized' }"
               @click="selectCategory('__uncategorized')"
             >
               <span class="cat-spacer" />
@@ -2552,7 +2635,7 @@ const showSearchPaperPopup = (paper: any) => {
               <div v-for="cat in searchCategories" :key="cat.id" class="search-category-item">
                 <div
                   class="category-item"
-                  :class="{ active: selectedSearchCategory === cat.id }"
+                  :class="{ active: sidebarMode !== 'ieee' && selectedSearchCategory === cat.id }"
                   @click="selectSearchCategory(cat.id)"
                   @contextmenu="openSearchCategoryContextMenu($event, cat)"
                 >
