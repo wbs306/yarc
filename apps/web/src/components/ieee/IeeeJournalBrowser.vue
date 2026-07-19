@@ -11,6 +11,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'select-journal', id: string): void
+  (e: 'importPdf', papers: SearchPaper[]): void
+  (e: 'save', papers: SearchPaper[]): void
 }>()
 
 const api = useApi()
@@ -225,7 +227,17 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
           </div>
         </div>
         <div class="paper-row-side">
-          <a v-if="articleUrl(paper)" :href="articleUrl(paper)!" target="_blank" rel="noopener noreferrer" class="paper-action-link">在 IEEE Xplore 打开 ↗</a>
+          <div class="paper-actions">
+            <button v-if="paper.pdfUrl" type="button" class="paper-action-button" title="导入文献库" aria-label="导入文献库" @click="emit('importPdf', [paper])">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            </button>
+            <button type="button" class="paper-action-button" title="保存到搜索收藏" aria-label="保存到搜索收藏" @click="emit('save', [paper])">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+            </button>
+            <a v-if="articleUrl(paper)" :href="articleUrl(paper)!" target="_blank" rel="noopener noreferrer" class="paper-action-button" title="在 IEEE Xplore 打开" aria-label="在 IEEE Xplore 打开">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
+            </a>
+          </div>
         </div>
       </article>
       <div v-if="loadingMore" class="directory-more-state">正在加载下一页…</div>
@@ -262,7 +274,7 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
 .abstract-load-button:disabled { color: var(--color-text-muted); cursor: wait; }
 .abstract-complete { color: var(--color-text-muted); font-size: 12px; }
 .abstract-error { color: var(--color-danger); font-size: 12px; }
-.paper-row-side { width: 150px; flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; }
+.paper-row-side { width: 92px; flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .library-empty { display: flex; flex: 1; flex-direction: column; justify-content: center; align-items: center; padding: 48px 28px; color: var(--color-text-muted); font-size: 14px; text-align: center; }
 .ieee-library-header { padding-bottom: 14px; }
 .mode-tabs { display: flex; align-items: center; padding: 2px; gap: 2px; border-radius: var(--radius-sm); background: var(--color-bg-muted); }
@@ -278,8 +290,12 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
 .ieee-paper-row { cursor: default; }
 .ieee-paper-row:hover { transform: none; }
 .early-access { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 999px; background: rgba(245, 158, 11, .14); color: #c46b00; font-size: 11px; font-weight: 700; }
-.paper-action-link { color: var(--color-primary); font-size: 12px; font-weight: 600; text-decoration: none; white-space: nowrap; }
-.paper-action-link:hover { text-decoration: underline; }
+.paper-actions { margin-top: auto; display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s; }
+.ieee-paper-row:hover .paper-actions, .ieee-paper-row:focus-within .paper-actions { opacity: 1; }
+.paper-action-button { display: flex; width: 28px; height: 28px; align-items: center; justify-content: center; padding: 0; border: none; border-radius: 4px; background: transparent; color: var(--color-text-muted); cursor: pointer; text-decoration: none; }
+.paper-action-button:hover { background: var(--color-primary-soft); color: var(--color-primary); }
+.paper-action-button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+@media (hover: none) { .paper-actions { opacity: 1; } }
 .error-state { gap: 8px; }.error-state strong { color: var(--color-danger); }.error-state span { color: var(--color-text-secondary); }
-@media (max-width: 720px) { .ieee-library-header { align-items: flex-start; flex-direction: column; gap: 12px; }.paper-row-side { width: auto; align-items: flex-start; margin-top: 10px; }.ieee-paper-row { flex-direction: column; gap: 0; } }
+@media (max-width: 720px) { .ieee-library-header { align-items: flex-start; flex-direction: column; gap: 12px; }.paper-row-side { width: 100%; flex-direction: row; align-items: center; margin-top: 10px; }.paper-actions { margin-left: auto; }.ieee-paper-row { flex-direction: column; gap: 0; } }
 </style>

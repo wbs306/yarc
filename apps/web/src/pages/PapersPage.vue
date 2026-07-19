@@ -3232,6 +3232,8 @@ const showSearchPaperPopup = (paper: any) => {
             :selected-journal-id="selectedIeeeJournalId"
             :default-ranking-keywords="ieeeJournalPreferences.defaultRankingKeywords"
             @select-journal="openIeeeJournal"
+            @importPdf="handleSearchImportPdf"
+            @save="handleSearchSave"
           />
         </section>
 
