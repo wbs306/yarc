@@ -5,6 +5,7 @@ interface Option {
   value: string
   label: string
   disabled?: boolean
+  level?: number
 }
 
 interface OptionGroup {
@@ -138,9 +139,11 @@ onUnmounted(() => {
             v-for="opt in options"
             :key="opt.value"
             class="select-option"
-            :class="{ active: opt.value === modelValue, disabled: opt.disabled }"
+            :class="{ active: opt.value === modelValue, disabled: opt.disabled, child: (opt.level || 0) > 0 }"
+            :style="{ paddingLeft: `${10 + Math.max(opt.level || 0, 0) * 16}px` }"
             @mousedown.prevent="!opt.disabled && select(opt.value)"
           >
+            <span v-if="(opt.level || 0) > 0" class="select-option-tree" aria-hidden="true">└</span>
             {{ opt.label }}
           </div>
         </template>
@@ -152,9 +155,11 @@ onUnmounted(() => {
               v-for="opt in group.options"
               :key="opt.value"
               class="select-option"
-              :class="{ active: opt.value === modelValue, disabled: opt.disabled }"
+              :class="{ active: opt.value === modelValue, disabled: opt.disabled, child: (opt.level || 0) > 0 }"
+              :style="{ paddingLeft: `${10 + Math.max(opt.level || 0, 0) * 16}px` }"
               @mousedown.prevent="!opt.disabled && select(opt.value)"
             >
+              <span v-if="(opt.level || 0) > 0" class="select-option-tree" aria-hidden="true">└</span>
               {{ opt.label }}
             </div>
           </template>
@@ -256,6 +261,9 @@ onUnmounted(() => {
 }
 
 .select-option {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   padding: 8px 10px;
   font-size: 13px;
   font-weight: 500;
@@ -263,6 +271,11 @@ onUnmounted(() => {
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.1s ease, color 0.1s ease;
+}
+
+.select-option-tree {
+  color: var(--color-text-muted);
+  font-weight: 400;
 }
 
 .select-option:hover {

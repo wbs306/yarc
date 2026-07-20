@@ -36,12 +36,12 @@ const requirePdf = ref(true)
 const jobPollTimers = new Map<string, number>()
 
 const categoryOptions = computed(() => {
-  const result: { value: string; label: string }[] = [
+  const result: { value: string; label: string; level?: number }[] = [
     { value: '', label: '未分类' },
   ]
   const flatten = (cats: Category[], level = 0) => {
     for (const cat of cats) {
-      result.push({ value: cat.id, label: '  '.repeat(level) + cat.name })
+      result.push({ value: cat.id, label: cat.name, level })
       if (cat.children?.length) flatten(cat.children, level + 1)
     }
   }
