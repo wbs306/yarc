@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { IeeeBrowseMode, IeeeJournalConfig, SearchPaper } from '@yarc/shared'
 import { useApi } from '@/composables/useApi'
+import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 
 const props = defineProps<{
   journals: IeeeJournalConfig[]
@@ -31,6 +32,7 @@ const rankingInitialized = ref(false)
 const fullAbstracts = ref<Record<string, string>>({})
 const loadingAbstracts = ref<Set<string>>(new Set())
 const abstractErrors = ref<Record<string, string>>({})
+const directoryScrolled = ref(false)
 
 const selectedJournal = computed(() => props.journals.find(journal => journal.id === props.selectedJournalId) || null)
 
@@ -146,6 +148,7 @@ const loadNextDirectoryPage = () => {
 
 const onDirectoryScroll = (event: Event) => {
   const element = event.target as HTMLElement
+  directoryScrolled.value = element.scrollTop > 12
   if (element.scrollTop + element.clientHeight >= element.scrollHeight - 160) loadNextDirectoryPage()
 }
 
@@ -158,6 +161,7 @@ watch(() => props.defaultRankingKeywords, (value) => {
 
 watch(() => props.selectedJournalId, (id, previous) => {
   if (!id || id === previous) return
+  directoryScrolled.value = false
   void loadDirectory()
 }, { immediate: true })
 
@@ -166,7 +170,7 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
 
 <template>
   <div class="ieee-browser">
-    <div class="library-header ieee-library-header">
+    <div class="library-header ieee-library-header" :class="{ condensed: directoryScrolled }">
       <div class="library-header-titles">
         <h1>{{ selectedJournal?.displayName || 'IEEE 期刊目录' }}</h1>
         <p>{{ selectedJournal?.publicationTitle || '请从左侧添加并选择一个期刊' }}</p>
@@ -214,7 +218,7 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
             <span v-if="paper.isEarlyAccess" class="early-access">Early Access</span>
           </div>
           <div v-if="paper.abstract || paper.articleNumber" class="paper-abstract-wrap">
-            <p v-if="displayedAbstract(paper)" class="paper-abstract expanded">{{ displayedAbstract(paper) }}</p>
+            <MarkdownContent v-if="displayedAbstract(paper)" class="paper-abstract expanded" :content="displayedAbstract(paper)" />
             <div class="abstract-load-row">
               <button
                 v-if="!fullAbstracts[articleKey(paper)]"
@@ -253,9 +257,12 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
 
 <style scoped>
 .ieee-browser { height: 100%; min-height: 0; display: flex; flex-direction: column; color: var(--color-text); }
-.library-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 28px 16px; }
-.library-header h1 { margin: 0; font-size: 24px; font-weight: 700; color: var(--color-text); letter-spacing: -.03em; }
-.library-header p { margin: 4px 0 0; color: var(--color-text-muted); font-size: 13px; }
+.library-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 28px 16px; transition: padding var(--transition); }
+.library-header h1 { margin: 0; font-size: 24px; font-weight: 700; color: var(--color-text); letter-spacing: -.03em; transition: font-size var(--transition); }
+.library-header p { margin: 4px 0 0; color: var(--color-text-muted); font-size: 13px; max-height: 22px; overflow: hidden; transition: opacity var(--transition), max-height var(--transition), margin-top var(--transition); }
+.library-header.condensed { padding: 10px 28px; }
+.library-header.condensed h1 { font-size: 16px; }
+.library-header.condensed p { opacity: 0; max-height: 0; margin-top: 0; }
 .header-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 .secondary-btn { padding: 8px 16px; border: 1px solid var(--color-border); background: var(--color-bg-card); color: var(--color-text); border-radius: var(--radius-sm); font: inherit; font-size: 13px; cursor: pointer; transition: all var(--transition); }
 .secondary-btn:hover:not(:disabled) { background: var(--color-bg-muted); border-color: var(--color-primary); }
@@ -272,6 +279,10 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
 .paper-venue { color: var(--color-text-secondary); font-weight: 500; }
 .paper-abstract-wrap { margin-top: 8px; }
 .paper-abstract { margin: 0; color: var(--color-text-secondary); font-size: 15px; white-space: pre-wrap; }
+.paper-abstract :deep(p) { margin: 0; }
+.paper-abstract :deep(.katex-display) { max-width: 100%; margin: 8px 0; overflow-x: auto; overflow-y: hidden; }
+.paper-abstract :deep(.katex-display > .katex) { width: max-content; max-width: none; min-width: max-content; }
+.paper-abstract :deep(.katex), .paper-abstract :deep(.katex *) { overflow-wrap: normal; word-break: normal; }
 .abstract-load-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 7px; }
 .abstract-load-button { padding: 0; border: none; background: transparent; color: var(--color-primary); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
 .abstract-load-button:hover:not(:disabled) { text-decoration: underline; }
