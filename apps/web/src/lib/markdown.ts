@@ -131,15 +131,27 @@ function normalizeBlockquoteMathBlocks(markdown: string): string {
   return normalized.join('\n')
 }
 
+function leadingWhitespace(line: string): string {
+  return line.match(/^[ \t]*/)?.[0] ?? ''
+}
+
+function isDisplayMathDelimiter(line: string | undefined, minIndent = ''): boolean {
+  return !!line
+    && displayMathLineRule.test(line)
+    && line.startsWith(minIndent)
+    && line.trim() === '$$'
+}
+
 function normalizeListMathBlocks(markdown: string): string {
   const lines = markdown.split('\n')
-  const normalized = [...lines]
+  const normalized: string[] = []
   let inCodeFence = false
   let codeFenceChar = ''
   let codeFenceLength = 0
 
   for (let index = 0; index < lines.length; index++) {
-    const fenceMatch = lines[index].trimStart().match(codeFenceRule)
+    const line = lines[index]
+    const fenceMatch = line.trimStart().match(codeFenceRule)
     if (fenceMatch) {
       const fence = fenceMatch[1]
       if (!inCodeFence) {
@@ -151,34 +163,75 @@ function normalizeListMathBlocks(markdown: string): string {
         codeFenceChar = ''
         codeFenceLength = 0
       }
+      normalized.push(line)
       continue
     }
 
-    if (inCodeFence) continue
+    if (inCodeFence) {
+      normalized.push(line)
+      continue
+    }
 
-    const listItemMatch = lines[index].match(listItemRule)
-    const mathStartIndex = index + 1
-    const isListMathDelimiter = (line: string | undefined) =>
-      !!line
-      && displayMathLineRule.test(line)
-      && line.startsWith(listItemMatch?.[1] ?? '')
-      && line.trim() === '$$'
-    if (!listItemMatch || !isListMathDelimiter(lines[mathStartIndex])) continue
+    const listItemMatch = line.match(listItemRule)
+    if (!listItemMatch) {
+      normalized.push(line)
+      continue
+    }
 
-    const mathEndIndex = lines.findIndex((line, lineIndex) =>
-      lineIndex > mathStartIndex && isListMathDelimiter(line))
+    normalized.push(line)
+
+    // Find a display-math block that belongs to this list item before the next
+    // sibling/outer list item. Authors often indent $$ under "1. " / "- ".
+    const listIndent = listItemMatch[1]
+    let mathStartIndex = -1
+    for (let cursor = index + 1; cursor < lines.length; cursor++) {
+      const candidate = lines[cursor]
+      const nextList = candidate.match(listItemRule)
+      if (nextList && nextList[1].length <= listIndent.length) break
+      if (isDisplayMathDelimiter(candidate, listIndent)) {
+        mathStartIndex = cursor
+        break
+      }
+      // Only skip blank lines between the list marker line and $$; other text
+      // stays on the normal path and can be revisited as its own list item.
+      if (candidate.trim() !== '') break
+    }
+    if (mathStartIndex === -1) continue
+
+    let mathEndIndex = -1
+    for (let cursor = mathStartIndex + 1; cursor < lines.length; cursor++) {
+      if (isDisplayMathDelimiter(lines[cursor], listIndent)) {
+        mathEndIndex = cursor
+        break
+      }
+      const nextList = lines[cursor].match(listItemRule)
+      if (nextList && nextList[1].length <= listIndent.length) break
+    }
     if (mathEndIndex === -1) continue
 
-    // A display-math block at the list item's indentation ends the list in
-    // CommonMark. Indent this common editor input as list-item content instead.
+    const mathLines = lines.slice(mathStartIndex, mathEndIndex + 1)
+    const commonIndentLen = mathLines.reduce((min, mathLine) => {
+      if (mathLine.trim() === '') return min
+      return Math.min(min, leadingWhitespace(mathLine).length)
+    }, Number.POSITIVE_INFINITY)
+    const stripLen = Number.isFinite(commonIndentLen) ? commonIndentLen : 0
+
+    // Keep the formula inside the list item, and insert blank lines so Marked
+    // treats $$ as a nested block instead of paragraph text.
     const contentIndent = listItemMatch[0].replace(/[^\t]/g, ' ')
-    for (let lineIndex = mathStartIndex; lineIndex <= mathEndIndex; lineIndex++) {
-      const content = lines[lineIndex].slice(listItemMatch[1].length)
+    if (normalized[normalized.length - 1]?.trim()) normalized.push('')
+
+    for (const mathLine of mathLines) {
+      const stripped = mathLine.slice(Math.min(stripLen, leadingWhitespace(mathLine).length))
       // Otherwise Marked recognizes a standalone minus inside the formula as
       // a nested list marker before the math extension sees the block.
-      const normalizedContent = content.trim() === '-' ? content.replace('-', '\\mathbin{-}') : content
-      normalized[lineIndex] = `${contentIndent}${normalizedContent}`
+      const body = stripped.trim() === '-' ? stripped.replace('-', '\\mathbin{-}') : stripped
+      normalized.push(`${contentIndent}${body}`)
     }
+
+    const nextLine = lines[mathEndIndex + 1]
+    if (nextLine !== undefined && nextLine.trim() !== '') normalized.push('')
+
     index = mathEndIndex
   }
 
