@@ -5,6 +5,7 @@ import { sseHub } from '../lib/sse.js'
 import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
 import { paperService } from './paper.service.js'
 import { searchService } from './search.service.js'
+import { ieeeXploreService } from './ieee-xplore.service.js'
 
 export type ImportJobStatus = 'queued' | 'running' | 'completed' | 'failed'
 
@@ -82,12 +83,18 @@ class ImportJobService {
     this.emit(job, 'import-job-started')
 
     for (const paper of papers) {
+      const resolved = await this.resolveImportPaper(paper)
+      const importPaper = resolved.paper
+      if (resolved.warning) {
+        job.warnings.push({ id: paper.id, title: paper.title, message: resolved.warning })
+      }
+
       try {
-        this.emit(job, 'import-job-item-started', { paper: this.paperSummary(paper) })
-        const pdfBuffer = await this.resolvePdfBuffer(paper)
+        this.emit(job, 'import-job-item-started', { paper: this.paperSummary(importPaper) })
+        const pdfBuffer = await this.resolvePdfBuffer(importPaper)
         if (!pdfBuffer) throw new Error('PDF download failed')
         const imported = await paperService.importFromSearchResult(
-          paper,
+          importPaper,
           pdfBuffer,
           job.categoryId,
           job.extractMetadata
@@ -95,7 +102,7 @@ class ImportJobService {
         job.results.push(imported)
         job.completed += 1
         this.emit(job, 'import-job-item-completed', {
-          paper: this.paperSummary(paper),
+          paper: this.paperSummary(importPaper),
           importedPaperId: imported.id,
         })
       } catch (err) {
@@ -105,28 +112,28 @@ class ImportJobService {
         if (!job.requirePdf) {
           try {
             const fallback = await paperService.create({
-              title: paper.title || 'Untitled',
-              abstract: paper.abstract,
-              authors: paper.authors || [],
-              year: paper.year,
-              doi: paper.doi,
-              arxivId: paper.arxivId,
-              url: paper.url,
+              title: importPaper.title || 'Untitled',
+              abstract: importPaper.abstract,
+              authors: importPaper.authors || [],
+              year: importPaper.year,
+              doi: importPaper.doi,
+              arxivId: importPaper.arxivId,
+              url: importPaper.url,
               categoryId: job.categoryId,
               metadata: {
-                source: paper.source || 'external',
-                provider: paper.provider,
-                journal: paper.journal,
-                venue: paper.venue,
+                source: importPaper.source || 'external',
+                provider: importPaper.provider,
+                journal: importPaper.journal,
+                venue: importPaper.venue,
                 importPdfError: message,
               },
             })
             job.results.push(fallback)
             job.completed += 1
             job.metadataOnly += 1
-            job.warnings.push({ id: paper.id, title: paper.title, message: `PDF download failed; saved metadata only: ${message}` })
+            job.warnings.push({ id: importPaper.id, title: importPaper.title, message: `PDF download failed; saved metadata only: ${message}` })
             this.emit(job, 'import-job-item-completed', {
-              paper: this.paperSummary(paper),
+              paper: this.paperSummary(importPaper),
               importedPaperId: fallback.id,
               metadataOnly: true,
               warning: message,
@@ -134,13 +141,13 @@ class ImportJobService {
           } catch (fallbackErr) {
             const fallbackMessage = `Metadata fallback failed after PDF download failed (${message}): ${(fallbackErr as Error).message}`
             job.failed += 1
-            job.errors.push({ id: paper.id, title: paper.title, message: fallbackMessage })
-            this.emit(job, 'import-job-item-failed', { paper: this.paperSummary(paper), error: fallbackMessage })
+            job.errors.push({ id: importPaper.id, title: importPaper.title, message: fallbackMessage })
+            this.emit(job, 'import-job-item-failed', { paper: this.paperSummary(importPaper), error: fallbackMessage })
           }
         } else {
           job.failed += 1
-          job.errors.push({ id: paper.id, title: paper.title, message })
-          this.emit(job, 'import-job-item-failed', { paper: this.paperSummary(paper), error: message })
+          job.errors.push({ id: importPaper.id, title: importPaper.title, message })
+          this.emit(job, 'import-job-item-failed', { paper: this.paperSummary(importPaper), error: message })
         }
       }
 
@@ -157,6 +164,51 @@ class ImportJobService {
       paperIds: job.results.map((paper: any) => paper.id).filter(Boolean),
       at: job.updatedAt,
     })
+  }
+
+  private async resolveImportPaper(paper: any): Promise<{ paper: any; warning?: string }> {
+    if (paper?.source !== 'ieee') return { paper }
+
+    const articleNumber = this.ieeeArticleNumber(paper)
+    if (!articleNumber) {
+      return { paper, warning: 'IEEE 文章编号不可用，已使用搜索结果中的摘要导入。' }
+    }
+
+    try {
+      const details = await ieeeXploreService.fetchArticleAbstract(articleNumber)
+      const detailedPaper = details.papers[0]
+      if (!detailedPaper?.abstract) {
+        return { paper, warning: 'IEEE 文章详情未提供完整摘要，已使用搜索结果中的摘要导入。' }
+      }
+
+      return {
+        paper: {
+          ...paper,
+          ...detailedPaper,
+          title: detailedPaper.title || paper.title,
+          authors: detailedPaper.authors.length ? detailedPaper.authors : paper.authors,
+          year: detailedPaper.year ?? paper.year,
+          abstract: detailedPaper.abstract,
+          url: detailedPaper.url || paper.url,
+          pdfUrl: detailedPaper.pdfUrl || paper.pdfUrl,
+          doi: detailedPaper.doi || paper.doi,
+          journal: detailedPaper.journal || paper.journal,
+          venue: detailedPaper.venue || paper.venue,
+          articleNumber,
+        },
+      }
+    } catch (err) {
+      return { paper, warning: `无法加载 IEEE 文章详情的完整摘要，已使用搜索结果中的摘要导入：${(err as Error).message}` }
+    }
+  }
+
+  private ieeeArticleNumber(paper: any): string | null {
+    for (const value of [paper?.articleNumber, paper?.id, paper?.url]) {
+      const text = String(value || '').trim()
+      const articleNumber = text.match(/(?:arnumber=|\/document\/)(\d{4,20})/i)?.[1] || (/^\d{4,20}$/.test(text) ? text : null)
+      if (articleNumber) return articleNumber
+    }
+    return null
   }
 
   private async resolvePdfBuffer(paper: any): Promise<Buffer | null> {
