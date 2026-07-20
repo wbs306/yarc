@@ -4686,8 +4686,9 @@ const showSearchPaperPopup = (paper: any) => {
 .paper-abstract {
   margin: 0;
   color: var(--color-text-secondary);
-  font-size: 13px;
-  line-height: 1.5;
+  /* Keep library abstracts visually consistent with IEEE journal cards. */
+  font-size: 15px;
+  line-height: normal;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
