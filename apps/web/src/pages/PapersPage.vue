@@ -9,7 +9,7 @@ import { useApi, useTemporaryPdfUrl } from '@/composables/useApi'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
-import type { IeeeJournalBrowserPreferences } from '@yarc/shared'
+import type { IeeeJournalBrowserPreferences, ReparseAction, ReparsePaperInfo } from '@yarc/shared'
 
 import PdfViewer from '@/components/pdf/PdfViewer.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
@@ -1175,6 +1175,12 @@ const loadingSearchPapers = ref(initialLibraryView?.kind === 'search_category')
 const showSearchPaperDetail = ref(false)
 const selectedSearchPaper = ref<any>(null)
 const showPaperDetailsModal = ref(false)
+const showReparseDialog = ref(false)
+const reparseInfo = ref<ReparsePaperInfo | null>(null)
+const reparseInfoLoading = ref(false)
+const reparseSubmitting = ref(false)
+const reparseError = ref('')
+const selectedReparseActions = ref<Set<ReparseAction>>(new Set(['mineru', 'embedding', 'metadata', 'abstract']))
 const pendingSearchPage = ref<number | null>(null)
 const expandedAbstracts = ref<Set<string>>(new Set())
 const isSearchCategoryView = computed(() => !!selectedSearchCategory.value)
@@ -1978,18 +1984,89 @@ const paperCmiAiSummary = async (paper?: any) => {
   }
 }
 
-const paperCmiReparse = async () => {
+const reparseActionOptions: Array<{ value: ReparseAction; label: string; description: string }> = [
+  { value: 'mineru', label: '重新 MinerU 解析', description: '重新解析 PDF，并替换已有 MinerU 结果。' },
+  { value: 'embedding', label: '重新向量化', description: '根据现有或本次 MinerU 结果重建向量索引。' },
+  { value: 'metadata', label: '刷新元数据', description: '根据 MinerU 提取的标识重新查询标题、作者、年份、期刊等。' },
+  { value: 'abstract', label: '重新提取摘要', description: '从 MinerU 解析结果中重新提取并替换摘要。' },
+]
+
+const reparseActionValues: ReparseAction[] = reparseActionOptions.map(option => option.value)
+const selectedReparseActionList = computed(() => reparseActionValues.filter(action => selectedReparseActions.value.has(action)))
+const reparseCanUseMineruOutput = computed(() => !!reparseInfo.value?.mineruAvailable || selectedReparseActions.value.has('mineru'))
+const isReparseActionDisabled = (action: ReparseAction) => action !== 'mineru' && !reparseCanUseMineruOutput.value
+
+const toggleReparseAction = (action: ReparseAction, checked?: boolean) => {
+  if (isReparseActionDisabled(action)) return
+  const next = new Set(selectedReparseActions.value)
+  const shouldSelect = checked ?? !next.has(action)
+  if (shouldSelect) next.add(action)
+  else next.delete(action)
+  // Without an existing MinerU result, dependent actions cannot outlive the
+  // MinerU selection that makes them valid.
+  if (action === 'mineru' && !reparseInfo.value?.mineruAvailable && !shouldSelect) {
+    next.delete('embedding')
+    next.delete('metadata')
+    next.delete('abstract')
+  }
+  selectedReparseActions.value = next
+}
+
+const selectAllReparseActions = () => {
+  selectedReparseActions.value = new Set(reparseActionValues)
+}
+
+const invertReparseActions = () => {
+  const next = new Set(reparseActionValues.filter(action => !selectedReparseActions.value.has(action)))
+  if (!reparseInfo.value?.mineruAvailable && !next.has('mineru') && Array.from(next).some(action => action !== 'mineru')) {
+    next.add('mineru')
+  }
+  selectedReparseActions.value = next
+}
+
+const clearReparseActions = () => {
+  selectedReparseActions.value = new Set()
+}
+
+const openReparseDialog = async () => {
   const id = paperContextMenu.value.paperId
   closePaperContextMenu()
   if (!id) return
-  if (!await showConfirm('重新解析会清空现有解析结果并重新生成向量，确认继续？')) return
+  showReparseDialog.value = true
+  reparseInfoLoading.value = true
+  reparseError.value = ''
+  reparseInfo.value = null
+  selectedReparseActions.value = new Set(reparseActionValues)
   try {
-    await api.reparsePaper(id)
-    await refreshLibrary()
-    if (route.params.id === id) await paperStore.fetchPaper(id)
+    const response = await api.getReparseInfo(id)
+    reparseInfo.value = response.info
   } catch (err) {
-    alert((err as Error).message)
+    reparseError.value = (err as Error).message || '无法加载论文状态'
+  } finally {
+    reparseInfoLoading.value = false
   }
+}
+
+const submitReparseActions = async () => {
+  const info = reparseInfo.value
+  const actions = selectedReparseActionList.value
+  if (!info || !actions.length || reparseSubmitting.value) return
+  reparseSubmitting.value = true
+  reparseError.value = ''
+  try {
+    await api.reparsePaper(info.id, actions)
+    showReparseDialog.value = false
+    await refreshLibrary()
+    if (route.params.id === info.id) await paperStore.fetchPaper(info.id)
+  } catch (err) {
+    reparseError.value = (err as Error).message || '无法创建重新解析任务'
+  } finally {
+    reparseSubmitting.value = false
+  }
+}
+
+const paperCmiReparse = () => {
+  void openReparseDialog()
 }
 
 const paperCmiDelete = async () => {
@@ -3364,6 +3441,65 @@ const showSearchPaperPopup = (paper: any) => {
       :papers="papersToImport"
       @started="handleImportStarted"
     />
+
+    <Modal v-model="showReparseDialog" title="选择重新解析操作" maxWidth="680px">
+      <div class="reparse-dialog">
+        <p class="reparse-dialog-hint">可组合执行多项操作；不选择 MinerU 时，其余操作只能使用已完成的 MinerU 结果。</p>
+        <div v-if="reparseInfoLoading" class="reparse-loading">正在加载论文状态…</div>
+        <template v-else-if="reparseInfo">
+          <section class="reparse-paper-summary">
+            <h4>{{ reparseInfo.title }}</h4>
+            <p>{{ reparseInfo.authors.join(', ') || '未知作者' }}<template v-if="reparseInfo.year"> · {{ reparseInfo.year }}</template></p>
+            <p v-if="reparseInfo.doi">DOI: {{ reparseInfo.doi }}</p>
+            <p v-if="reparseInfo.journal || reparseInfo.venue">{{ reparseInfo.journal || reparseInfo.venue }}</p>
+          </section>
+
+          <section class="reparse-status-grid" aria-label="当前论文状态">
+            <div><span>MinerU</span><strong :class="{ ready: reparseInfo.mineruAvailable }">{{ reparseInfo.mineruAvailable ? '可用' : '不可用' }}</strong></div>
+            <div><span>解析状态</span><strong>{{ statusMap[reparseInfo.parseStatus] || reparseInfo.parseStatus }}</strong></div>
+            <div><span>向量状态</span><strong>{{ statusMap[reparseInfo.embeddingStatus] || reparseInfo.embeddingStatus }}</strong></div>
+            <div><span>现有摘要</span><strong>{{ reparseInfo.abstractLength ? `${reparseInfo.abstractLength.toLocaleString()} 字符` : '无' }}</strong></div>
+            <div><span>上次解析</span><strong>{{ reparseInfo.parsedAt ? new Date(reparseInfo.parsedAt).toLocaleString() : '—' }}</strong></div>
+            <div><span>上次向量化</span><strong>{{ reparseInfo.embeddedAt ? new Date(reparseInfo.embeddedAt).toLocaleString() : '—' }}</strong></div>
+          </section>
+
+          <div class="reparse-selection-toolbar" aria-label="批量选择操作">
+            <button type="button" @click="selectAllReparseActions">全选</button>
+            <button type="button" @click="invertReparseActions">反选</button>
+            <button type="button" @click="clearReparseActions">清空</button>
+            <span>已选 {{ selectedReparseActionList.length }} 项</span>
+          </div>
+
+          <div class="reparse-action-list">
+            <label
+              v-for="option in reparseActionOptions"
+              :key="option.value"
+              class="reparse-action-option"
+              :class="{ disabled: isReparseActionDisabled(option.value), selected: selectedReparseActions.has(option.value) }"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedReparseActions.has(option.value)"
+                :disabled="isReparseActionDisabled(option.value)"
+                @change="toggleReparseAction(option.value, ($event.target as HTMLInputElement).checked)"
+              />
+              <span>
+                <strong>{{ option.label }}</strong>
+                <small>{{ option.description }}</small>
+              </span>
+            </label>
+          </div>
+          <p v-if="!reparseInfo.mineruAvailable && !selectedReparseActions.has('mineru')" class="reparse-dependency-hint">请先选择“重新 MinerU 解析”，才能执行向量化、元数据或摘要操作。</p>
+        </template>
+        <p v-if="reparseError" class="reparse-error">{{ reparseError }}</p>
+      </div>
+      <template #footer>
+        <button class="btn btn-ghost" :disabled="reparseSubmitting" @click="showReparseDialog = false">取消</button>
+        <button class="btn btn-primary" :disabled="!reparseInfo || !selectedReparseActionList.length || reparseSubmitting" @click="submitReparseActions">
+          {{ reparseSubmitting ? '创建任务中…' : `执行 ${selectedReparseActionList.length} 项操作` }}
+        </button>
+      </template>
+    </Modal>
     
     <!-- Search Paper Detail Popup -->
     <Modal
@@ -4008,6 +4144,33 @@ const showSearchPaperPopup = (paper: any) => {
 .detail-abstract .detail-label { display: block; width: auto; margin-bottom: 4px; }
 .detail-abstract p { color: var(--color-text-secondary); line-height: 1.6; margin: 0; }
 .detail-actions { margin-top: 20px; display: flex; justify-content: flex-end; }
+
+.reparse-dialog { display: flex; flex-direction: column; gap: 16px; }
+.reparse-dialog-hint { margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.55; }
+.reparse-loading { padding: 28px 0; color: var(--color-text-muted); text-align: center; font-size: 14px; }
+.reparse-paper-summary { padding: 13px 14px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-muted); }
+.reparse-paper-summary h4 { margin: 0; color: var(--color-text); font-size: 14px; line-height: 1.45; }
+.reparse-paper-summary p { margin: 5px 0 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.reparse-status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.reparse-status-grid > div { display: flex; flex-direction: column; gap: 3px; padding: 9px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); min-width: 0; }
+.reparse-status-grid span { color: var(--color-text-muted); font-size: 11px; }
+.reparse-status-grid strong { overflow: hidden; color: var(--color-text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.reparse-status-grid strong.ready { color: var(--color-success, #16a34a); }
+.reparse-selection-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.reparse-selection-toolbar button { padding: 5px 9px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg); color: var(--color-text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
+.reparse-selection-toolbar button:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.reparse-selection-toolbar span { margin-left: auto; color: var(--color-text-muted); font-size: 12px; }
+.reparse-action-list { display: flex; flex-direction: column; gap: 8px; }
+.reparse-action-option { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); cursor: pointer; transition: border-color var(--transition), background var(--transition); }
+.reparse-action-option.selected { border-color: var(--color-primary); background: var(--color-primary-soft); }
+.reparse-action-option.disabled { opacity: .58; cursor: not-allowed; }
+.reparse-action-option input { width: 16px; height: 16px; margin: 1px 0 0; flex: 0 0 auto; cursor: inherit; }
+.reparse-action-option span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.reparse-action-option strong { color: var(--color-text); font-size: 13px; }
+.reparse-action-option small { color: var(--color-text-secondary); font-size: 12px; line-height: 1.45; }
+.reparse-dependency-hint, .reparse-error { margin: 0; font-size: 12px; line-height: 1.5; }
+.reparse-dependency-hint { color: var(--color-text-muted); }
+.reparse-error { color: var(--color-danger); }
 
 .side-bottom {
   margin-top: auto;

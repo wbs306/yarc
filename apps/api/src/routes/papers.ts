@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { prisma } from '@yarc/db'
+import type { ReparseAction } from '@yarc/shared'
 import { config } from '../lib/config.js'
 import { paperService } from '../services/paper.service.js'
 import { importJobService } from '../services/import-job.service.js'
@@ -272,11 +273,27 @@ papers.post('/:id/enrich', async (c) => {
   return c.json({ message: 'Enrich task enqueued' })
 })
 
-// POST /api/papers/:id/reparse — 重新解析 + embedding
+// GET /api/papers/:id/reparse-info — lightweight status and metadata for the reparse action dialog
+papers.get('/:id/reparse-info', async (c) => {
+  const info = await paperService.getReparseInfo(c.req.param('id'))
+  return c.json({ info })
+})
+
+// POST /api/papers/:id/reparse — enqueue selected independent reparse actions
 papers.post('/:id/reparse', async (c) => {
   const id = c.req.param('id')
-  await paperService.reparse(id)
-  return c.json({ message: 'Reparse task enqueued' })
+  const body = await c.req.json().catch(() => ({})) as { actions?: unknown }
+  if (body.actions !== undefined && !Array.isArray(body.actions)) {
+    return c.json({ error: { code: 'INVALID_REPARSE_ACTIONS', message: 'actions must be an array' } }, 400)
+  }
+  const actions = Array.isArray(body.actions)
+    ? body.actions.filter((action): action is ReparseAction => action === 'mineru' || action === 'embedding' || action === 'metadata' || action === 'abstract')
+    : undefined
+  if (actions && actions.length !== body.actions!.length) {
+    return c.json({ error: { code: 'INVALID_REPARSE_ACTIONS', message: 'actions may only contain mineru, embedding, metadata, or abstract' } }, 400)
+  }
+  await paperService.reparse(id, actions)
+  return c.json({ message: 'Selected reparse actions enqueued', actions: actions || ['mineru', 'embedding', 'metadata', 'abstract'] })
 })
 
 export default papers

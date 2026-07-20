@@ -139,10 +139,28 @@ export interface Citation {
 
 // ── Task ─────────────────────────────────────────────────────────────────────
 
+export type ReparseAction = 'mineru' | 'embedding' | 'metadata' | 'abstract'
+
+export interface ReparsePaperInfo {
+  id: string
+  title: string
+  authors: string[]
+  year: number | null
+  doi: string | null
+  journal: string | null
+  venue: string | null
+  abstractLength: number
+  parseStatus: string
+  embeddingStatus: string
+  parsedAt: string | null
+  embeddedAt: string | null
+  mineruAvailable: boolean
+}
+
 export interface Task {
   id: string
   paperId: string
-  type: 'parse_pdf' | 'generate_embedding' | 'summarize' | 'enrich_metadata'
+  type: 'parse_pdf' | 'generate_embedding' | 'summarize' | 'enrich_metadata' | 'refresh_metadata' | 'extract_abstract'
   status: 'pending' | 'active' | 'completed' | 'failed'
   progress: number
   result: Record<string, unknown> | null

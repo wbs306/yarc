@@ -1,4 +1,5 @@
 import { prisma, type Prisma } from '@yarc/db'
+import type { ReparseAction, ReparsePaperInfo } from '@yarc/shared'
 import { cache } from '../lib/cache.js'
 import { AppError } from '../lib/errors.js'
 import { config } from '../lib/config.js'
@@ -404,19 +405,88 @@ export class PaperService {
     jobQueue.add('enrich_metadata', id)
   }
 
-  async reparse(id: string) {
+  async getReparseInfo(id: string): Promise<ReparsePaperInfo> {
+    const paper = await prisma.paper.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        title: true,
+        authors: true,
+        year: true,
+        doi: true,
+        abstract: true,
+        parseStatus: true,
+        parseResult: true,
+        embeddingStatus: true,
+        parsedAt: true,
+        embeddedAt: true,
+        metadata: true,
+      },
+    })
+    if (!paper) throw new AppError('NOT_FOUND', 'Paper not found', 404)
+
+    const metadata = (paper.metadata || {}) as Record<string, unknown>
+    return {
+      id: paper.id,
+      title: paper.title,
+      authors: paper.authors,
+      year: paper.year,
+      doi: paper.doi,
+      journal: typeof metadata.journal === 'string' ? metadata.journal : null,
+      venue: typeof metadata.venue === 'string' ? metadata.venue : null,
+      abstractLength: paper.abstract?.length || 0,
+      parseStatus: paper.parseStatus,
+      embeddingStatus: paper.embeddingStatus,
+      parsedAt: paper.parsedAt?.toISOString() || null,
+      embeddedAt: paper.embeddedAt?.toISOString() || null,
+      mineruAvailable: paper.parseStatus === 'completed' && paper.parseResult !== null,
+    }
+  }
+
+  async reparse(id: string, requestedActions: ReparseAction[] = ['mineru', 'embedding', 'metadata', 'abstract']) {
+    const validActions = new Set<ReparseAction>(['mineru', 'embedding', 'metadata', 'abstract'])
+    const actions = Array.from(new Set(requestedActions.filter((action): action is ReparseAction => validActions.has(action))))
+    if (!actions.length) throw new AppError('INVALID_INPUT', 'Select at least one reparse action', 400)
+
     const paper = await prisma.paper.findUnique({ where: { id } })
     if (!paper) throw new AppError('NOT_FOUND', 'Paper not found', 404)
 
-    await prisma.paper.update({
-      where: { id },
-      data: {
-        parseStatus: 'pending',
-        embeddingStatus: 'pending',
-        summaryStatus: 'pending',
-      },
-    })
-    jobQueue.add('parse_pdf', id)
+    const needsMineruOutput = actions.some(action => action !== 'mineru')
+    const hasMineruOutput = paper.parseStatus === 'completed' && paper.parseResult !== null
+    if (needsMineruOutput && !actions.includes('mineru') && !hasMineruOutput) {
+      throw new AppError('MINERU_RESULT_REQUIRED', 'Metadata, abstract, and embedding actions require a completed MinerU parse', 400)
+    }
+
+    const metadata = (paper.metadata || {}) as Record<string, any>
+    if (actions.includes('mineru')) {
+      await prisma.paper.update({
+        where: { id },
+        data: {
+          parseStatus: 'pending',
+          ...(actions.includes('embedding') ? { embeddingStatus: 'pending', embeddingProgress: 0 } : {}),
+          metadata: {
+            ...metadata,
+            processing: {
+              ...(metadata.processing || {}),
+              // Reparse is an explicit refresh request, so it must not retain
+              // the import-time opt-out that preserves supplied metadata.
+              skipMetadataEnrichment: false,
+              reparseActions: actions,
+            },
+            reparse: { requestedAt: new Date().toISOString(), actions },
+          } as any,
+        },
+      })
+      jobQueue.add('parse_pdf', id)
+    } else {
+      if (actions.includes('embedding')) {
+        await this.updateStatus(id, 'embeddingStatus', { embeddingStatus: 'pending', embeddingProgress: 0 })
+        jobQueue.add('generate_embedding', id)
+      }
+      if (actions.includes('metadata')) jobQueue.add('refresh_metadata', id)
+      if (actions.includes('abstract')) jobQueue.add('extract_abstract', id)
+    }
+
     cache.invalidatePrefix('papers:list')
     cache.delete(`paper:${id}`)
   }

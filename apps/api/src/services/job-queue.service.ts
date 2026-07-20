@@ -20,7 +20,7 @@ import {
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-export type JobType = 'parse_pdf' | 'generate_embedding' | 'summarize' | 'enrich_metadata'
+export type JobType = 'parse_pdf' | 'generate_embedding' | 'summarize' | 'enrich_metadata' | 'refresh_metadata' | 'extract_abstract'
 
 export interface JobQueueConcurrency {
   maxConcurrent: number
@@ -225,6 +225,10 @@ class JobQueue {
         return this.handleSummarize(job.paperId)
       case 'enrich_metadata':
         return this.handleEnrichMetadata(job.paperId)
+      case 'refresh_metadata':
+        return this.handleEnrichMetadata(job.paperId, true)
+      case 'extract_abstract':
+        return this.handleExtractAbstract(job.paperId)
     }
   }
 
@@ -277,6 +281,37 @@ class JobQueue {
     const paperMetadata = (paper.metadata as any) || {}
     const skipMetadataEnrichment = paperMetadata.processing?.skipMetadataEnrichment === true
     const parsedMetadata = metadataService.extractFromParsedContent(result)
+    const hasSelectiveReparse = Array.isArray(paperMetadata.processing?.reparseActions)
+    const reparseActions = hasSelectiveReparse
+      ? paperMetadata.processing.reparseActions.filter((action: unknown): action is 'embedding' | 'metadata' | 'abstract' =>
+          action === 'embedding' || action === 'metadata' || action === 'abstract')
+      : []
+
+    // A selectively requested MinerU reparse persists only the new MinerU
+    // result. Its selected follow-up actions are queued independently below.
+    if (hasSelectiveReparse) {
+      await paperService.updateStatus(paperId, 'parseStatus', {
+        parseStatus: 'completed',
+        parseResult: result as any,
+        metadata: {
+          ...paperMetadata,
+          processing: {
+            ...(paperMetadata.processing || {}),
+            reparseActions: null,
+          },
+          mineru: mineruMetadata.mineru || mineruMetadata,
+          parsedMetadata: {
+            source: parsedMetadata.source,
+            extracted: parsedMetadata.raw || {},
+          },
+        },
+        parsedAt: new Date(),
+      })
+      if (reparseActions.includes('embedding')) this.add('generate_embedding', paperId)
+      if (reparseActions.includes('metadata')) this.add('refresh_metadata', paperId)
+      if (reparseActions.includes('abstract')) this.add('extract_abstract', paperId)
+      return
+    }
 
     if (skipMetadataEnrichment) {
       const fieldUpdates: Record<string, unknown> = {}
@@ -595,17 +630,15 @@ class JobQueue {
     })
   }
 
-  private async handleEnrichMetadata(paperId: string) {
+  private async handleEnrichMetadata(paperId: string, refresh = false) {
     const paper = await prisma.paper.findUnique({ where: { id: paperId } })
-    if (!paper) throw new Error('Paper not found')
+    if (!paper?.parseResult) throw new Error('A completed MinerU parse is required to refresh metadata')
 
     // 元数据补全链: DOI → Crossref → arXiv → 标题搜索 (只看第一页)
-    const parseResult = paper.parseResult as any
-    const parsed = metadataService.extractFromParsedContent(parseResult)
-
+    const parsed = metadataService.extractFromParsedContent(paper.parseResult as any)
     const updates: Record<string, unknown> = {}
-    if (parsed.doi && !paper.doi) updates.doi = parsed.doi
-    if (parsed.arxivId && !paper.arxivId) updates.arxivId = parsed.arxivId
+    if (parsed.doi && (refresh || !paper.doi)) updates.doi = parsed.doi
+    if (parsed.arxivId && (refresh || !paper.arxivId)) updates.arxivId = parsed.arxivId
 
     const paperMetadata = (paper.metadata as any) || {}
     const originalFileTitle = typeof paperMetadata.upload?.originalFileName === 'string'
@@ -613,29 +646,28 @@ class JobQueue {
       : undefined
     const storedFileTitle = paper.filePath?.split('/').pop()?.replace(/\.pdf$/i, '')
     const isFallbackTitle = !paper.title || paper.title === 'Untitled' || paper.title === originalFileTitle || paper.title === storedFileTitle
-
-    // 跳过已有完整元数据的论文
-    const needsEnrichment = isFallbackTitle || paper.authors.length === 0 || !paper.year || !paper.abstract || !paperMetadata.journal
+    const needsEnrichment = refresh || isFallbackTitle || paper.authors.length === 0 || !paper.year || !paperMetadata.journal
 
     let enriched: any = null
     if (needsEnrichment) {
-      const doi = paper.doi || parsed.doi
+      const doi = parsed.doi || paper.doi
+      const arxivId = parsed.arxivId || paper.arxivId
+      const title = parsed.title || paper.title
+      const authors = parsed.authors?.length ? parsed.authors : paper.authors
       if (doi) enriched = await metadataService.lookupByDoi(doi)
-      if (!enriched && (paper.arxivId || parsed.arxivId)) {
-        enriched = await metadataService.lookupByArxivId(paper.arxivId || parsed.arxivId)
-      }
-      if (!enriched && parsed.title) {
-        enriched = await metadataService.lookupByTitle(parsed.title, parsed.authors)
-      }
+      if (!enriched && arxivId) enriched = await metadataService.lookupByArxivId(arxivId)
+      if (!enriched && title) enriched = await metadataService.lookupByTitle(title, authors)
     }
 
     if (enriched) {
-      if (enriched.title && (isFallbackTitle || paper.title.length < enriched.title.length * 0.6)) updates.title = enriched.title
-      if (enriched.authors?.length && paper.authors.length === 0) updates.authors = enriched.authors
-      if (enriched.year && !paper.year) updates.year = enriched.year
-      if (enriched.abstract && !paper.abstract) updates.abstract = enriched.abstract
-      if (enriched.url && !paper.url) updates.url = enriched.url
-      if (enriched.doi && !paper.doi) updates.doi = enriched.doi
+      if (enriched.title && (refresh || isFallbackTitle || paper.title.length < enriched.title.length * 0.6)) updates.title = enriched.title
+      if (enriched.authors?.length && (refresh || paper.authors.length === 0)) updates.authors = enriched.authors
+      if (enriched.year && (refresh || !paper.year)) updates.year = enriched.year
+      // The explicit "摘要" action owns abstract replacement. Keep the legacy
+      // enrichment behavior for ordinary background jobs only.
+      if (!refresh && enriched.abstract && !paper.abstract) updates.abstract = enriched.abstract
+      if (enriched.url && (refresh || !paper.url)) updates.url = enriched.url
+      if (enriched.doi && (refresh || !paper.doi)) updates.doi = enriched.doi
       const journal = enriched.journal || enriched.venue
       updates.metadata = {
         ...paperMetadata,
@@ -654,6 +686,36 @@ class JobQueue {
       cache.delete(`paper:${paperId}`)
       cache.invalidatePrefix('papers:list')
     }
+  }
+
+  private async handleExtractAbstract(paperId: string) {
+    const paper = await prisma.paper.findUnique({ where: { id: paperId } })
+    if (!paper?.parseResult) throw new Error('A completed MinerU parse is required to extract the abstract')
+
+    const parsed = metadataService.extractFromParsedContent(paper.parseResult as any)
+    if (!parsed.abstract) throw new Error('No abstract was found in the MinerU parse result')
+
+    const metadata = (paper.metadata as any) || {}
+    await prisma.paper.update({
+      where: { id: paperId },
+      data: {
+        abstract: parsed.abstract,
+        metadata: {
+          ...metadata,
+          parsedMetadata: {
+            ...(metadata.parsedMetadata || {}),
+            source: parsed.source,
+            extracted: {
+              ...((metadata.parsedMetadata as any)?.extracted || {}),
+              abstract: parsed.abstract,
+            },
+            abstractRefreshedAt: new Date().toISOString(),
+          },
+        } as any,
+      },
+    })
+    cache.delete(`paper:${paperId}`)
+    cache.invalidatePrefix('papers:list')
   }
 
   getStats() {

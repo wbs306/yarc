@@ -6,6 +6,8 @@ import type {
   NoteFileSyncResult,
   PaperReferenceInput,
   PaperReferenceResolution,
+  ReparseAction,
+  ReparsePaperInfo,
 } from '@yarc/shared'
 
 const API_BASE = '/api'
@@ -156,8 +158,14 @@ export function useApi() {
     enrichPaper: (id: string) =>
       request(`/papers/${id}/enrich`, { method: 'POST' }),
 
-    reparsePaper: (id: string) =>
-      request(`/papers/${id}/reparse`, { method: 'POST' }),
+    getReparseInfo: (id: string) =>
+      request<{ info: ReparsePaperInfo }>(`/papers/${id}/reparse-info`),
+
+    reparsePaper: (id: string, actions?: ReparseAction[]) =>
+      request<{ message: string; actions: ReparseAction[] }>(`/papers/${id}/reparse`, {
+        method: 'POST',
+        body: JSON.stringify(actions ? { actions } : {}),
+      }),
 
     searchLocal: (q: string, limit?: number, threshold?: number) =>
       request<{ results: any[] }>('/papers/search', {

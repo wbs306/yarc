@@ -1040,6 +1040,8 @@ const taskTypeLabel = (type: string) => ({
   generate_embedding: '向量化',
   summarize: '论文总结',
   enrich_metadata: '元数据补全',
+  refresh_metadata: '刷新元数据',
+  extract_abstract: '提取摘要',
 }[type] || type)
 const shortId = (id: string) => id ? id.slice(0, 8) : '—'
 const togglePendingTaskSelection = (id: string, checked?: boolean) => {
