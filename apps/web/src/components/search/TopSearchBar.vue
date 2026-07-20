@@ -26,6 +26,7 @@ const emit = defineEmits<{
   (e: 'select', paper: SearchResult): void
   (e: 'save', papers: SearchResult[]): void
   (e: 'importPdf', papers: SearchResult[]): void
+  (e: 'readPdf', paper: SearchResult): void
 }>()
 
 const isExpanded = ref(false)
@@ -235,25 +236,10 @@ const importSinglePdf = (paper: SearchResult) => {
   emit('importPdf', [paper])
 }
 
-const downloadPdf = async (paper: SearchResult) => {
-  const pdfUrl = paper.pdfUrl || paper.url
-  if (!pdfUrl) return
-  try {
-    const response = await fetch(`/api/search/download-pdf?url=${encodeURIComponent(pdfUrl)}`)
-    if (!response.ok) throw new Error('下载失败')
-    const blob = await response.blob()
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${paper.title?.replace(/[^a-zA-Z0-9]/g, '_') || 'paper'}.pdf`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    window.URL.revokeObjectURL(url)
-  } catch (err) {
-    console.error('Download failed:', err)
-    alert('PDF下载失败: ' + (err as Error).message)
-  }
+const temporaryPdfSource = (paper: SearchResult) => paper.pdfUrl || paper.openAccessPdf?.url || null
+
+const readPdf = (paper: SearchResult) => {
+  if (temporaryPdfSource(paper)) emit('readPdf', paper)
 }
 
 const handleKeydown = (e: KeyboardEvent) => {
@@ -723,9 +709,9 @@ onUnmounted(() => {
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg>
                   入库PDF
                 </button>
-                <button v-if="paper.source === 'ieee'" class="action-chip pdf" @mousedown.prevent="downloadPdf(paper)">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                  PDF
+                <button v-if="temporaryPdfSource(paper)" class="action-chip pdf" @mousedown.prevent="readPdf(paper)">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4v14a4 4 0 0 0-4-4H2"/><path d="M21 18a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-5a4 4 0 0 0-4 4v14a4 4 0 0 1 4-4h5"/></svg>
+                  阅读 PDF
                 </button>
               </div>
             </div>

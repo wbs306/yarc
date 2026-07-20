@@ -12,6 +12,8 @@ interface ChatContext {
   paperId?: string
   pageNumber?: number
   selectedText?: string
+  temporaryPdf?: boolean
+  documentTitle?: string
 }
 
 interface StoredContext {
@@ -123,10 +125,25 @@ export class ChatService {
     const lines: string[] = []
     const stored: StoredContext = {}
 
-    // Resolve paperId: prefer explicit context, fall back to conversation's bound paperId.
-    const paperId = context?.paperId || (conversationId
-      ? (await prisma.conversation.findUnique({ where: { id: conversationId }, select: { paperId: true } }))?.paperId || undefined
-      : undefined)
+    // A temporary reader must never inherit a paper bound to the selected
+    // conversation: it has no local paper record, only selected PDF text.
+    const paperId = context?.temporaryPdf
+      ? undefined
+      : context?.paperId || (conversationId
+        ? (await prisma.conversation.findUnique({ where: { id: conversationId }, select: { paperId: true } }))?.paperId || undefined
+        : undefined)
+
+    if (context?.temporaryPdf) {
+      lines.push(`temporary_pdf: ${context.documentTitle || '未入库的临时 PDF'}`)
+      if (context.pageNumber) {
+        stored.page = context.pageNumber
+        lines.push(`page: ${context.pageNumber}`)
+      }
+      if (context.selectedText) {
+        stored.selected = context.selectedText
+        lines.push(`selected: "${context.selectedText}"`)
+      }
+    }
 
     if (paperId) {
       const contextToolId = randomUUID()

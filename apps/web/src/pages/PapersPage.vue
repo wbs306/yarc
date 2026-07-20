@@ -5,7 +5,7 @@ import { usePaperStore, type Paper } from '@/stores/paper'
 import { useChatStore } from '@/stores/chat'
 import { useNoteStore, type Note } from '@/stores/note'
 import { useThemeStore } from '@/stores/theme'
-import { useApi } from '@/composables/useApi'
+import { useApi, useTemporaryPdfUrl } from '@/composables/useApi'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
@@ -1181,8 +1181,16 @@ const isSearchCategoryView = computed(() => !!selectedSearchCategory.value)
 
 const activePaperId = computed(() => (typeof route.params.id === 'string' ? route.params.id : ''))
 const hasPaper = computed(() => !!activePaperId.value)
-const readerTabs = ref<Array<{ paper: Paper; lastAccessedAt: number }>>([])
+type ReaderTab = {
+  paper: Paper
+  lastAccessedAt: number
+  temporaryPdfUrl?: string
+}
+
+const readerTabs = ref<ReaderTab[]>([])
 const readerTabLimit = computed(() => (isMobile.value ? 4 : 6))
+const activeReaderTab = computed(() => readerTabs.value.find((tab) => tab.paper.id === activePaperId.value) || null)
+const isTemporaryReader = computed(() => !!activeReaderTab.value?.temporaryPdfUrl)
 const activePaper = computed(() => {
   const id = activePaperId.value
   if (!id) return null
@@ -1587,6 +1595,14 @@ const stopResize = () => {
 
 watch(() => route.params.id, async (id) => {
   if (id && typeof id === 'string') {
+    if (readerTabs.value.find((tab) => tab.paper.id === id)?.temporaryPdfUrl) {
+      paperStore.currentPaper = null
+      noteStore.notes = []
+      notesDraft.value = ''
+      editingNoteId.value = null
+      if (isMobile.value) mobileSidebar.value = false
+      return
+    }
     await paperStore.fetchPaper(id)
     if (paperStore.currentPaper) touchReaderTab(paperStore.currentPaper)
     await noteStore.fetchNotes(id)
@@ -2214,6 +2230,52 @@ const handleSearchImportPdf = (papers: any[]) => {
   showImportToLibrary.value = true
 }
 
+const getTemporaryPdfSource = (paper: any): string | null => {
+  const source = paper?.pdfUrl || paper?.openAccessPdf?.url
+  return typeof source === 'string' && source.trim() ? source.trim() : null
+}
+
+const openTemporaryPdf = async (paper: any) => {
+  const source = getTemporaryPdfSource(paper)
+  if (!source) return
+  if (!hasPaper.value && sidebarMode.value === 'files' && selectedWorkspaceFile.value && !(await prepareWorkspaceSwitch())) return
+
+  const temporaryPdfUrl = useTemporaryPdfUrl(source)
+  let tab = readerTabs.value.find((item) => item.temporaryPdfUrl === temporaryPdfUrl)
+  if (!tab) {
+    const now = new Date().toISOString()
+    const id = `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const temporaryPaper: Paper = {
+      id,
+      title: typeof paper?.title === 'string' && paper.title.trim() ? paper.title.trim() : '临时 PDF',
+      abstract: typeof paper?.abstract === 'string' ? paper.abstract : null,
+      authors: Array.isArray(paper?.authors) ? paper.authors.filter((author: unknown): author is string => typeof author === 'string') : [],
+      year: typeof paper?.year === 'number' ? paper.year : null,
+      doi: typeof paper?.doi === 'string' ? paper.doi : null,
+      arxivId: typeof paper?.arxivId === 'string' ? paper.arxivId : null,
+      url: typeof paper?.url === 'string' ? paper.url : null,
+      filePath: null,
+      fileSize: null,
+      categoryId: null,
+      parseStatus: 'temporary',
+      embeddingStatus: 'temporary',
+      embeddingProgress: 0,
+      summaryStatus: 'temporary',
+      summary: null,
+      tags: [],
+      journal: typeof paper?.journal === 'string' ? paper.journal : undefined,
+      venue: typeof paper?.venue === 'string' ? paper.venue : undefined,
+      createdAt: now,
+      updatedAt: now,
+    }
+    touchReaderTab(temporaryPaper)
+    tab = readerTabs.value.find((item) => item.paper.id === id)
+    if (tab) tab.temporaryPdfUrl = temporaryPdfUrl
+  }
+
+  if (tab && route.params.id !== tab.paper.id) await router.push(`/paper/${tab.paper.id}`)
+}
+
 const handleImportStarted = (job: any) => {
   showImportToLibrary.value = false
   papersToImport.value = []
@@ -2456,6 +2518,7 @@ const showSearchPaperPopup = (paper: any) => {
           @select="handleSearchSelect"
           @save="handleSearchSave"
           @importPdf="handleSearchImportPdf"
+          @readPdf="openTemporaryPdf"
         />
       </div>
 
@@ -2487,7 +2550,7 @@ const showSearchPaperPopup = (paper: any) => {
         :class="{ 'mobile-drawer': isMobile, closed: !isMobile && !sidebarOpen }"
         :style="!isMobile ? { width: sidebarPanelWidth + 'px', minWidth: sidebarPanelWidth + 'px' } : {}"
       >
-        <section v-if="!hasPaper" class="side-panel category-panel">
+        <section v-if="!hasPaper || isTemporaryReader" class="side-panel category-panel">
           <div class="side-header">
             <h2>{{ sidebarMode === 'files' ? '文件' : sidebarMode === 'settings' ? '设置' : '文献库' }}</h2>
             <button v-if="sidebarMode === 'files'" class="side-mini-btn" :disabled="filesLoading" @click="loadWorkspaceFiles()">刷新</button>
@@ -2965,6 +3028,7 @@ const showSearchPaperPopup = (paper: any) => {
           :ref="(viewer) => setPdfViewer(tab.paper.id, viewer)"
           v-show="hasPaper && tab.paper.id === activePaperId"
           :paper="tab.paper"
+          :source-url="tab.temporaryPdfUrl"
           @back="backToLibrary"
           @show-details="showPaperDetails"
         />
@@ -3234,6 +3298,7 @@ const showSearchPaperPopup = (paper: any) => {
             @select-journal="openIeeeJournal"
             @importPdf="handleSearchImportPdf"
             @save="handleSearchSave"
+            @readPdf="openTemporaryPdf"
           />
         </section>
 

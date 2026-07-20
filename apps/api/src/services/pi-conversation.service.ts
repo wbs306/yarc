@@ -41,6 +41,8 @@ export interface ConversationMessage {
     paperId?: string
     pageNumber?: number
     selectedText?: string
+    temporaryPdf?: boolean
+    documentTitle?: string
     injected?: Array<{ type: 'paper' | 'file' | 'category' | 'search' | 'other'; label: string; detail?: string }>
     raw?: string
   }

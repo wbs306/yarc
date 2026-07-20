@@ -26,7 +26,10 @@ import { ThumbnailPluginPackage } from '@embedpdf/plugin-thumbnail/vue'
 import { SpreadPluginPackage, SpreadMode } from '@embedpdf/plugin-spread/vue'
 
 const props = defineProps<{
-  paper: Paper
+  paper?: Paper
+  sourceUrl?: string
+  documentId?: string
+  title?: string
 }>()
 
 defineEmits<{
@@ -282,8 +285,12 @@ const highlightColors = [
   { name: '粉', value: 'pink', background: 'rgba(236, 72, 153, 0.16)', border: 'rgba(236, 72, 153, 0.45)' },
 ] as const
 
-const pdfUrl = computed(() => props.paper?.id ? usePdfUrl(props.paper.id) : '')
-const currentDocumentId = computed(() => props.paper?.id ? `paper-${props.paper.id}` : '')
+const isTemporaryDocument = computed(() => !!props.sourceUrl)
+const canAnnotate = computed(() => !!props.paper?.id && !isTemporaryDocument.value)
+const canAskAI = computed(() => !!props.paper?.id || isTemporaryDocument.value)
+const documentTitle = computed(() => props.title || props.paper?.title || '临时 PDF')
+const pdfUrl = computed(() => props.sourceUrl || (props.paper?.id ? usePdfUrl(props.paper.id) : ''))
+const currentDocumentId = computed(() => props.documentId || (props.paper?.id ? `paper-${props.paper.id}` : ''))
 
 const isTouchDevice = typeof window !== 'undefined'
   && (window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 768)
@@ -301,7 +308,10 @@ const { engine, isLoading, error: engineError } = usePdfiumEngine({
 
 type Unsubscribe = () => void
 
-const documentLoadMode = computed(() => isTouchDevice ? 'full-fetch' as const : 'auto' as const)
+// PDFium's direct engine needs a complete byte source for temporary remote
+// documents. The proxy still supports ranges for future consumers, while the
+// preview deliberately uses one full in-memory fetch and never persists it.
+const documentLoadMode = computed(() => (isTouchDevice || isTemporaryDocument.value) ? 'full-fetch' as const : 'auto' as const)
 const embedPdfKey = computed(() => currentDocumentId.value || 'no-document')
 
 const plugins = computed(() => {
@@ -953,20 +963,27 @@ const normalizePdfCopiedText = (info: EmbedPdfSelectionInfo) => {
 
 const askAI = async () => {
   const info = await getSelectedInfo()
-  if (!info || !props.paper?.id) return
+  if (!info || !canAskAI.value) return
   const normalizedText = normalizePdfCopiedText(info)
-  chatStore.pdfContext = {
-    paperId: props.paper.id,
-    pageNumber: info.pageNumber,
-    selectedText: normalizedText,
-  }
+  chatStore.pdfContext = isTemporaryDocument.value
+    ? {
+        temporaryPdf: true,
+        documentTitle: documentTitle.value,
+        pageNumber: info.pageNumber,
+        selectedText: normalizedText,
+      }
+    : {
+        paperId: props.paper!.id,
+        pageNumber: info.pageNumber,
+        selectedText: normalizedText,
+      }
   window.dispatchEvent(new CustomEvent('yarc-open-chat'))
   clearSelection()
 }
 
 const addNote = async () => {
   const info = await getSelectedInfo()
-  if (!info || !props.paper?.id) return
+  if (!info || !canAnnotate.value || !props.paper?.id) return
   const normalizedText = normalizePdfCopiedText(info)
   await noteStore.createNote({
     paperId: props.paper.id,
@@ -981,7 +998,7 @@ const addNote = async () => {
 
 const addHighlight = async () => {
   const info = await getSelectedInfo()
-  if (!info || !props.paper?.id) return
+  if (!info || !canAnnotate.value || !props.paper?.id) return
   await noteStore.createNote({
     paperId: props.paper.id,
     content: '',
@@ -1132,7 +1149,9 @@ const getNoteRectsForPage = (note: Note, pageIndex: number): EmbedPdfSelectionRe
   return [{ origin: { x, y }, size: { width, height } }]
 }
 
-const pageNotes = (pageIndex: number) => noteStore.notes.filter((note) => getNoteRectsForPage(note, pageIndex).length > 0)
+const pageNotes = (pageIndex: number) => canAnnotate.value
+  ? noteStore.notes.filter((note) => getNoteRectsForPage(note, pageIndex).length > 0)
+  : []
 
 const getHighlightColor = (note: Note) => {
   const storedColor = (note.highlightRect as any)?.color
@@ -1173,7 +1192,7 @@ const openHighlightMenu = (note: Note, pageIndex: number, event: MouseEvent | Po
 
 const askFromHighlight = () => {
   const note = activeHighlight.value?.note
-  if (!note || !props.paper?.id || !note.highlightText) return
+  if (!note || !canAnnotate.value || !props.paper?.id || !note.highlightText) return
   chatStore.pdfContext = {
     paperId: props.paper.id,
     pageNumber: note.pageNumber || activeHighlight.value!.pageIndex + 1,
@@ -1265,10 +1284,10 @@ defineExpose({ scrollToNote, goToPage })
             <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
           </svg>
         </button>
-        <span class="pdf-title">{{ paper.title }}</span>
+        <span class="pdf-title">{{ documentTitle }}<small v-if="isTemporaryDocument">临时阅读</small></span>
       </div>
       <div class="pdf-toolbar-right">
-        <button class="tb-btn info-btn" @click="$emit('showDetails')" title="论文详情">
+        <button v-if="canAnnotate" class="tb-btn info-btn" @click="$emit('showDetails')" title="论文详情">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>
           </svg>
@@ -1359,7 +1378,7 @@ defineExpose({ scrollToNote, goToPage })
                               <SearchLayer :documentId="activeDocumentId" :page-index="page.pageIndex" />
                               <MarqueeZoom :documentId="activeDocumentId" :page-index="page.pageIndex" />
 
-                              <div class="note-highlight-layer">
+                              <div v-if="canAnnotate" class="note-highlight-layer">
                                 <template v-for="note in pageNotes(page.pageIndex)" :key="note.id">
                                   <div
                                     v-for="(rect, idx) in getNoteRectsForPage(note, page.pageIndex)"
@@ -1412,6 +1431,7 @@ defineExpose({ scrollToNote, goToPage })
                                       @click.stop.prevent
                                     >
                                       <button
+                                        v-if="canAskAI"
                                         type="button"
                                         @pointerdown.capture="swallowMenuEvent"
                                         @mousedown.capture="swallowMenuEvent"
@@ -1421,6 +1441,7 @@ defineExpose({ scrollToNote, goToPage })
                                         @click.capture="runSelectionMenuAction('ask', $event)"
                                       >🤖 提问</button>
                                       <button
+                                        v-if="canAnnotate"
                                         type="button"
                                         @pointerdown.capture="swallowMenuEvent"
                                         @mousedown.capture="swallowMenuEvent"
@@ -1430,6 +1451,7 @@ defineExpose({ scrollToNote, goToPage })
                                         @click.capture="runSelectionMenuAction('note', $event)"
                                       >📝 笔记</button>
                                       <button
+                                        v-if="canAnnotate"
                                         type="button"
                                         @pointerdown.capture="swallowMenuEvent"
                                         @mousedown.capture="swallowMenuEvent"
@@ -1485,6 +1507,7 @@ defineExpose({ scrollToNote, goToPage })
 .pdf-toolbar-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .pdf-toolbar-right { display: flex; align-items: center; gap: 4px; }
 .pdf-title { font-size: 13px; color: var(--color-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.pdf-title small { margin-left: 7px; color: var(--color-text-muted); font-size: 11px; font-weight: 500; }
 
 .page-nav { display: flex; align-items: center; gap: 2px; }
 .tb-btn {

@@ -80,7 +80,13 @@ export const useChatStore = defineStore('chat', () => {
   const streamReconnectTimers = new Map<string, number>()
 
   // PDF context
-  const pdfContext = ref<{ paperId: string; pageNumber: number; selectedText: string } | null>(null)
+  const pdfContext = ref<{
+    paperId?: string
+    pageNumber: number
+    selectedText: string
+    temporaryPdf?: boolean
+    documentTitle?: string
+  } | null>(null)
 
   // Agent web-native interactions (ask_user_question, future confirm/select/input)
   const interactions = ref<Record<string, AgentInteractionRequest>>({})

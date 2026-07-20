@@ -13,6 +13,7 @@ const emit = defineEmits<{
   (e: 'select-journal', id: string): void
   (e: 'importPdf', papers: SearchPaper[]): void
   (e: 'save', papers: SearchPaper[]): void
+  (e: 'readPdf', paper: SearchPaper): void
 }>()
 
 const api = useApi()
@@ -228,6 +229,9 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
         </div>
         <div class="paper-row-side">
           <div class="paper-actions">
+            <button v-if="paper.pdfUrl" type="button" class="paper-action-button" title="在内置阅读器打开 PDF" aria-label="在内置阅读器打开 PDF" @click="emit('readPdf', paper)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4v14a4 4 0 0 0-4-4H2"/><path d="M21 18a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-5a4 4 0 0 0-4 4v14a4 4 0 0 1 4-4h5"/></svg>
+            </button>
             <button v-if="paper.pdfUrl" type="button" class="paper-action-button" title="导入文献库" aria-label="导入文献库" @click="emit('importPdf', [paper])">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
             </button>

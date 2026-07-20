@@ -195,9 +195,11 @@ export interface ChatRequest {
   branchId?: string
   editMessageId?: string
   context?: {
-    paperId: string
+    paperId?: string
     pageNumber: number
     selectedText: string
+    temporaryPdf?: boolean
+    documentTitle?: string
   }
 }
 

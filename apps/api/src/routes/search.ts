@@ -160,6 +160,47 @@ search.post('/resolve', async (c) => {
   return c.json({ results })
 })
 
+// GET/HEAD /api/search/pdf — stream a remote PDF for the temporary reader.
+// The URL is validated by SearchService before every upstream request, and the
+// response is deliberately not buffered or persisted in the library.
+search.on(['GET', 'HEAD'], '/pdf', async (c) => {
+  const url = c.req.query('url')
+  if (!url) {
+    return c.json({ error: { code: 'MISSING_URL', message: 'URL is required' } }, 400)
+  }
+
+  const range = c.req.header('Range')
+  if (range && !/^bytes=\d*-\d*$/.test(range)) {
+    return c.json({ error: { code: 'INVALID_RANGE', message: 'Range must use the bytes unit' } }, 416)
+  }
+
+  try {
+    const method = c.req.method === 'HEAD' ? 'HEAD' : 'GET'
+    const upstream = await searchService.fetchPdfStream(url, range, method)
+    const headers = new Headers({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': 'inline; filename="paper.pdf"',
+      // A temporary reader must not turn a preview into a durable HTTP cache.
+      'Cache-Control': 'private, no-store',
+    })
+    for (const name of ['accept-ranges', 'content-length', 'content-range', 'etag', 'last-modified']) {
+      const value = upstream.headers.get(name)
+      if (value) headers.set(name, value)
+    }
+
+    if (c.req.method === 'HEAD') {
+      try { await upstream.body?.cancel() } catch {}
+      return new Response(null, { status: upstream.status, headers })
+    }
+    return new Response(upstream.body, { status: upstream.status, headers })
+  } catch (err) {
+    return c.json(
+      { error: { code: 'PDF_STREAM_FAILED', message: (err as Error).message || 'Failed to stream PDF' } },
+      502
+    )
+  }
+})
+
 // GET /api/search/download-pdf
 search.get('/download-pdf', async (c) => {
   const url = c.req.query('url')

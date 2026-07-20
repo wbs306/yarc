@@ -635,3 +635,7 @@ export function useApi() {
 export function usePdfUrl(paperId: string): string {
   return `${API_BASE}/papers/${paperId}/pdf`
 }
+
+export function useTemporaryPdfUrl(sourceUrl: string): string {
+  return `${API_BASE}/search/pdf?url=${encodeURIComponent(sourceUrl)}`
+}

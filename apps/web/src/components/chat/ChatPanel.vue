@@ -85,7 +85,7 @@ const contextSummary = (msg: any) => {
   }
   const ctx = msg.metadata?.context
   if (!ctx) return ''
-  const parts = ['论文上下文']
+  const parts = [ctx.temporaryPdf ? '临时 PDF 上下文' : '论文上下文']
   if (ctx.pageNumber) parts.push(`第${ctx.pageNumber}页`)
   if (ctx.selectedText) parts.push('已选中文本')
   return parts.join(' · ')
@@ -1136,7 +1136,7 @@ const sessionState = computed(() => {
         </div>
       </template>
       <div v-if="chatStore.pdfContext" class="context-badge">
-        <span>📄 {{ currentPaperTitle || '论文' }} · 第{{ chatStore.pdfContext.pageNumber }}页</span>
+        <span>📄 {{ chatStore.pdfContext.documentTitle || currentPaperTitle || (chatStore.pdfContext.temporaryPdf ? '临时 PDF' : '论文') }} · 第{{ chatStore.pdfContext.pageNumber }}页</span>
         <button @click="chatStore.pdfContext = null">✕</button>
       </div>
       <div v-if="chatStore.chatError" class="chat-error">

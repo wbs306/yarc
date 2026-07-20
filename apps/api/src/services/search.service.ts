@@ -1,5 +1,7 @@
 import { lookup } from 'node:dns/promises'
+import { request as httpsRequest } from 'node:https'
 import { isIP } from 'node:net'
+import { Readable } from 'node:stream'
 import { prisma, type Prisma } from '@yarc/db'
 import { config } from '../lib/config.js'
 import {
@@ -225,6 +227,40 @@ async function assertSafePdfDownloadUrl(rawUrl: string): Promise<void> {
   }
 }
 
+function fetchOverHttp1(url: string, init: RequestInit): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const headers = new Headers(init.headers)
+    let settled = false
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      init.signal?.removeEventListener('abort', abort)
+      callback()
+    }
+    const abort = () => request.destroy(init.signal?.reason instanceof Error ? init.signal.reason : new Error('PDF request aborted'))
+    const request = httpsRequest(url, {
+      method: init.method || 'GET',
+      headers: Object.fromEntries(headers),
+      // Node 26 fetch may negotiate HTTP/2 with IEEE Xplore, which can reset
+      // otherwise valid PDF streams. https.request uses HTTP/1.1 instead.
+    }, (incoming) => {
+      const responseHeaders = new Headers()
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (Array.isArray(value)) value.forEach(item => responseHeaders.append(name, item))
+        else if (value !== undefined) responseHeaders.set(name, value)
+      }
+      const status = incoming.statusCode || 502
+      const body = init.method === 'HEAD'
+        ? null
+        : Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>
+      finish(() => resolve(new Response(body, { status, headers: responseHeaders })))
+    })
+    request.once('error', error => finish(() => reject(error)))
+    init.signal?.addEventListener('abort', abort, { once: true })
+    request.end()
+  })
+}
+
 async function fetchWithCookieJar(
   url: string,
   init: RequestInit = {},
@@ -238,20 +274,17 @@ async function fetchWithCookieJar(
     await assertSafePdfDownloadUrl(currentUrl)
     const headers = new Headers(init.headers)
     if (jar.size) headers.set('Cookie', cookieHeader(jar))
-    response = await fetch(currentUrl, {
-      ...init,
-      headers,
-      redirect: 'manual',
-    })
+    response = await fetchOverHttp1(currentUrl, { ...init, headers })
     addResponseCookies(response.headers, jar)
 
     if (![301, 302, 303, 307, 308].includes(response.status)) return response
     const location = response.headers.get('location')
     if (!location) return response
+    try { await response.body?.cancel() } catch {}
     currentUrl = new URL(location, currentUrl).toString()
   }
 
-  return response || fetch(url, init)
+  return response || fetchOverHttp1(url, init)
 }
 
 export class SearchService {
@@ -947,30 +980,40 @@ export class SearchService {
     }
   }
 
-  // ── PDF Download ───────────────────────────────────────────────────────
+  // ── PDF download / streaming ───────────────────────────────────────────
+
+  async fetchPdfStream(url: string, range?: string, method: 'GET' | 'HEAD' = 'GET'): Promise<Response> {
+    const downloadUrl = ieeePdfUrlForArticle(url) || url
+    const response = await fetchWithCookieJar(downloadUrl, {
+      method,
+      headers: {
+        Accept: 'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8',
+        Referer: IEEE_BASE_URL,
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        ...(range ? { Range: range } : {}),
+      },
+      signal: AbortSignal.timeout(60000),
+    })
+
+    if (!response.ok) throw new Error(`Failed to fetch PDF: ${response.status}`)
+
+    const contentType = response.headers.get('content-type') || ''
+    if (!contentType.toLowerCase().includes('pdf')) {
+      try { await response.body?.cancel() } catch {}
+      throw new Error('URL did not return a PDF file')
+    }
+
+    return response
+  }
 
   async downloadPdf(url: string): Promise<Buffer | null> {
     try {
-      const downloadUrl = ieeePdfUrlForArticle(url) || url
-      const response = await fetchWithCookieJar(downloadUrl, {
-        headers: {
-          Accept: 'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8',
-          Referer: IEEE_BASE_URL,
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-        signal: AbortSignal.timeout(60000),
-      })
-
-      if (!response.ok) throw new Error(`Failed to download: ${response.status}`)
-
-      const contentType = response.headers.get('content-type') || ''
+      const response = await this.fetchPdfStream(url)
       const buffer = Buffer.from(await response.arrayBuffer())
-      const isPdf = buffer.subarray(0, 5).toString('utf-8') === '%PDF-'
-      if (!isPdf && !contentType.toLowerCase().includes('pdf')) {
+      if (buffer.subarray(0, 5).toString('utf-8') !== '%PDF-') {
         throw new Error('URL did not return a PDF file')
       }
-
       return buffer
     } catch (err) {
       console.error('PDF download failed:', err)
