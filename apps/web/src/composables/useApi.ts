@@ -538,6 +538,12 @@ export function useApi() {
 
     getBackgroundImages: () => request<{ images: Array<{ src: string; thumb: string }> }>('/settings/background-images'),
 
+    deleteBackgroundImage: (src: string) =>
+      request<{ deleted: string }>('/settings/background-images', {
+        method: 'DELETE',
+        body: JSON.stringify({ src }),
+      }),
+
     uploadBackgroundImage: (file: File) => {
       const formData = new FormData()
       formData.append('file', file)

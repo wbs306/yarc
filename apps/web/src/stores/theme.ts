@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useApi } from '@/composables/useApi'
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
+export type BackgroundRotationMode = 'sequential' | 'random'
 
 export interface EditorSettings {
   fontSize: number
@@ -24,6 +25,7 @@ export interface ThemeSettings {
   maskBlur: number
   backgroundRotation: string[]
   backgroundInterval: number
+  backgroundRotationMode: BackgroundRotationMode
   editor: EditorSettings
 }
 
@@ -46,6 +48,7 @@ const DEFAULT_THEME: ThemeSettings = {
   maskBlur: 12,
   backgroundRotation: [],
   backgroundInterval: 60,
+  backgroundRotationMode: 'sequential',
   editor: { ...DEFAULT_EDITOR },
 }
 
@@ -106,6 +109,7 @@ export const useThemeStore = defineStore('theme', () => {
   const maskBlur = ref(DEFAULT_THEME.maskBlur)
   const backgroundRotation = ref<string[]>(DEFAULT_THEME.backgroundRotation)
   const backgroundInterval = ref(DEFAULT_THEME.backgroundInterval)
+  const backgroundRotationMode = ref<BackgroundRotationMode>(DEFAULT_THEME.backgroundRotationMode)
   const editor = ref<EditorSettings>({ ...DEFAULT_EDITOR })
   const syncError = ref('')
   const syncing = ref(false)
@@ -127,6 +131,7 @@ export const useThemeStore = defineStore('theme', () => {
     maskBlur: maskBlur.value,
     backgroundRotation: backgroundRotation.value,
     backgroundInterval: backgroundInterval.value,
+    backgroundRotationMode: backgroundRotationMode.value,
     editor: { ...editor.value },
   })
 
@@ -139,6 +144,9 @@ export const useThemeStore = defineStore('theme', () => {
     if (typeof theme.maskBlur === 'number') maskBlur.value = clamp(theme.maskBlur, 0, 40)
     if (Array.isArray(theme.backgroundRotation)) backgroundRotation.value = theme.backgroundRotation
     if (typeof theme.backgroundInterval === 'number') backgroundInterval.value = Math.max(10, theme.backgroundInterval)
+    if (theme.backgroundRotationMode === 'sequential' || theme.backgroundRotationMode === 'random') {
+      backgroundRotationMode.value = theme.backgroundRotationMode
+    }
     if (theme.editor && typeof theme.editor === 'object') {
       const e = theme.editor
       editor.value = {
@@ -252,6 +260,7 @@ export const useThemeStore = defineStore('theme', () => {
         applyThemeObject(res.theme)
         applyTheme()
         persistLocal()
+        startRotation()
       }
     } catch {
       // 未登录或后端不可用时保留本地主题。
@@ -276,6 +285,21 @@ export const useThemeStore = defineStore('theme', () => {
     backgroundImage.value = value
     commit()
   }
+
+  const removeBackgroundImages = (values: string[]) => {
+    const removed = new Set(values)
+    const wasActive = removed.has(backgroundImage.value)
+    const nextRotation = backgroundRotation.value.filter((image) => !removed.has(image))
+    const rotationChanged = nextRotation.length !== backgroundRotation.value.length
+
+    if (!wasActive && !rotationChanged) return
+    if (wasActive) backgroundImage.value = ''
+    backgroundRotation.value = nextRotation
+    commit()
+    if (rotationChanged) startRotation()
+  }
+
+  const removeBackgroundImage = (value: string) => removeBackgroundImages([value])
 
   const setMaskColor = (value: string) => {
     maskColor.value = value
@@ -304,6 +328,12 @@ export const useThemeStore = defineStore('theme', () => {
     startRotation()
   }
 
+  const setBackgroundRotationMode = (value: string) => {
+    if (value !== 'sequential' && value !== 'random') return
+    backgroundRotationMode.value = value
+    commit()
+  }
+
   const setEditorSetting = <K extends keyof EditorSettings>(key: K, value: EditorSettings[K]) => {
     editor.value = { ...editor.value, [key]: value }
     commit()
@@ -330,8 +360,13 @@ export const useThemeStore = defineStore('theme', () => {
       const imgs = backgroundRotation.value
       if (!imgs.length) return
       const cur = imgs.indexOf(backgroundImage.value)
-      const next = (cur + 1) % imgs.length
-      backgroundImage.value = imgs[next]
+      const next = backgroundRotationMode.value === 'random'
+        ? (() => {
+            const candidates = cur >= 0 ? imgs.filter((image) => image !== backgroundImage.value) : imgs
+            return candidates[Math.floor(Math.random() * candidates.length)]
+          })()
+        : imgs[(cur + 1) % imgs.length]
+      backgroundImage.value = next
       applyTheme()
       persistLocal()
     }, backgroundInterval.value * 1000)
@@ -349,6 +384,7 @@ export const useThemeStore = defineStore('theme', () => {
     maskBlur,
     backgroundRotation,
     backgroundInterval,
+    backgroundRotationMode,
     editor,
     syncError,
     syncing,
@@ -357,11 +393,14 @@ export const useThemeStore = defineStore('theme', () => {
     setMode,
     setPrimaryColor,
     setBackgroundImage,
+    removeBackgroundImage,
+    removeBackgroundImages,
     setMaskColor,
     setMaskOpacity,
     setMaskBlur,
     setBackgroundRotation,
     setBackgroundInterval,
+    setBackgroundRotationMode,
     setEditorSetting,
     resetAll,
     toggleRotationImage,

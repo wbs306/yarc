@@ -19,7 +19,7 @@ import {
   writeAgentSystemPrompt,
 } from '../lib/agent-workspace.js'
 import { spawn } from 'node:child_process'
-import { access, mkdir, readFile, writeFile, readdir, stat } from 'node:fs/promises'
+import { access, mkdir, readFile, writeFile, readdir, stat, unlink } from 'node:fs/promises'
 import { dirname, extname, join, parse, resolve } from 'node:path'
 import { readModelCatalog, fetchAndCacheModelCatalog } from '../lib/model-catalog.js'
 import { randomUUID } from 'node:crypto'
@@ -39,6 +39,9 @@ const DEFAULT_THEME = {
   maskColor: '',
   maskOpacity: 70,
   maskBlur: 12,
+  backgroundRotation: [],
+  backgroundInterval: 60,
+  backgroundRotationMode: 'sequential',
 }
 
 const BACKGROUND_MAX_SIZE = 20 * 1024 * 1024
@@ -613,6 +616,12 @@ const buildBackgroundImageEntry = async (fileName: string) => {
   }
 }
 
+const backgroundFileNameFromSrc = (src: unknown) => {
+  if (typeof src !== 'string' || !src.startsWith('/bg/')) return null
+  const fileName = src.slice('/bg/'.length)
+  return /^[\w.-]+\.(jpg|jpeg|png|webp|gif)$/i.test(fileName) ? fileName : null
+}
+
 // GET /api/settings/pi-enabled-models
 settings.get('/pi-enabled-models', async (c) => {
   const pi = await readPiSettings()
@@ -631,6 +640,32 @@ settings.get('/background-images', async (c) => {
   } catch {
     return c.json({ images: [] })
   }
+})
+
+// DELETE /api/settings/background-images
+// Only files exposed by the background-image endpoint may be removed. The
+// filename validation prevents requests from escaping the backgrounds directory.
+settings.delete('/background-images', async (c) => {
+  const { src } = await c.req.json().catch(() => ({})) as { src?: unknown }
+  const fileName = backgroundFileNameFromSrc(src)
+  if (!fileName) {
+    return c.json({ error: { code: 'INVALID_BACKGROUND_IMAGE', message: 'Invalid background image' } }, 400)
+  }
+
+  const bgDir = backgroundDir()
+  const filePath = join(bgDir, fileName)
+  const fileInfo = await zeroIfMissing(filePath)
+  if (!fileInfo?.isFile()) {
+    return c.json({ error: { code: 'BACKGROUND_IMAGE_NOT_FOUND', message: 'Background image not found' } }, 404)
+  }
+
+  await unlink(filePath)
+  const thumbPath = join(bgDir, 'thumbs', `${parse(fileName).name}.jpg`)
+  await unlink(thumbPath).catch((err: NodeJS.ErrnoException) => {
+    if (err.code !== 'ENOENT') throw err
+  })
+
+  return c.json({ deleted: `/bg/${fileName}` })
 })
 
 // POST /api/settings/background-images

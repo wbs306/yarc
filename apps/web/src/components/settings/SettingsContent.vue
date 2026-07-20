@@ -32,8 +32,10 @@ const summaryPromptError = ref('')
 const customBgUrl = ref('')
 const newPattern = ref('')
 const bgImages = ref<Array<{ src: string; thumb: string }>>([])
+const selectedBgImages = ref<string[]>([])
 const bgUploadInput = ref<HTMLInputElement | null>(null)
 const bgUploading = ref(false)
+const bgDeleting = ref(false)
 const bgUploadError = ref('')
 
 // Agent settings
@@ -841,6 +843,10 @@ const modeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: 'dark', label: '暗色' },
   { value: 'auto', label: '跟随系统' },
 ]
+const backgroundRotationModeOptions = [
+  { value: 'sequential', label: '顺序轮换' },
+  { value: 'random', label: '随机轮换' },
+]
 
 const loadModels = async (refresh = false) => {
   modelsError.value = ''
@@ -1329,16 +1335,63 @@ const syncLinkedNoteFiles = async () => {
 
 const applyCustomBg = () => {
   const url = customBgUrl.value.trim()
+  selectedBgImages.value = []
+  theme.setBackgroundRotation([])
   theme.setBackgroundImage(url || '')
 }
 
-const isRotationEnabled = (img: string) => theme.backgroundRotation.includes(img)
+const hasBackgroundRotation = computed(() => selectedBgImages.value.length >= 2)
 
-const selectAllRotation = () => theme.setBackgroundRotation(bgImages.value.map(i => i.src))
-const invertRotation = () => theme.setBackgroundRotation(
-  bgImages.value.map(i => i.src).filter(src => !theme.backgroundRotation.includes(src))
-)
-const clearRotation = () => theme.setBackgroundRotation([])
+const syncSelectedBackgrounds = () => {
+  const available = new Set(bgImages.value.map((image) => image.src))
+  const rotation = theme.backgroundRotation.filter((src) => available.has(src))
+  selectedBgImages.value = rotation.length >= 2 ? rotation : []
+}
+
+const selectBackground = (src: string) => {
+  // Once checkbox selection has started, thumbnail clicks toggle that image
+  // without unexpectedly collapsing the rest back to a single background.
+  if (src && selectedBgImages.value.length) {
+    toggleBackgroundSelection(src)
+    return
+  }
+
+  selectedBgImages.value = []
+  theme.setBackgroundRotation([])
+  theme.setBackgroundImage(src)
+}
+
+const toggleBackgroundSelection = (src: string) => {
+  const next = selectedBgImages.value.includes(src)
+    ? selectedBgImages.value.filter((image) => image !== src)
+    : [...selectedBgImages.value, src]
+  selectedBgImages.value = next
+
+  if (next.length < 2) {
+    theme.setBackgroundRotation([])
+    if (next.length === 1) theme.setBackgroundImage(next[0])
+    return
+  }
+
+  theme.setBackgroundRotation(next)
+  if (!next.includes(theme.backgroundImage)) theme.setBackgroundImage(next[0])
+}
+
+const selectAllBackgrounds = () => {
+  const next = bgImages.value.map((image) => image.src)
+  selectedBgImages.value = next
+  if (next.length < 2) {
+    theme.setBackgroundRotation([])
+    return
+  }
+  theme.setBackgroundRotation(next)
+  if (!next.includes(theme.backgroundImage)) theme.setBackgroundImage(next[0])
+}
+
+const clearBackgroundSelection = () => {
+  selectedBgImages.value = []
+  theme.setBackgroundRotation([])
+}
 
 const loadBgImages = async () => {
   try {
@@ -1347,6 +1400,7 @@ const loadBgImages = async () => {
       if (typeof img === 'string') return { src: img, thumb: img }
       return { src: img.src, thumb: img.thumb || img.src }
     })
+    syncSelectedBackgrounds()
   } catch { /* ignore */ }
 }
 
@@ -1360,12 +1414,45 @@ const uploadBackground = async (event: Event) => {
   try {
     const res = await api.uploadBackgroundImage(file)
     bgImages.value = [res.image, ...bgImages.value.filter(img => img.src !== res.image.src)]
-    theme.setBackgroundImage(res.image.src)
   } catch (err) {
     bgUploadError.value = (err as Error).message || '背景上传失败'
   } finally {
     bgUploading.value = false
     input.value = ''
+  }
+}
+
+const deleteSelectedBackgrounds = async () => {
+  const images = selectedBgImages.value
+  if (!images.length) return
+
+  const confirmed = await confirm({
+    title: '删除背景图片',
+    message: `将永久删除已选择的 ${images.length} 张背景图片及其缩略图，并从当前轮换列表中移除。确定继续？`,
+    confirmText: '删除图片',
+    danger: true,
+    icon: 'alert',
+  })
+  if (!confirmed) return
+
+  bgDeleting.value = true
+  bgUploadError.value = ''
+  try {
+    const results = await Promise.allSettled(images.map((src) => api.deleteBackgroundImage(src)))
+    const deleted = images.filter((_, index) => results[index].status === 'fulfilled')
+    const failed = results.length - deleted.length
+
+    if (deleted.length) {
+      bgImages.value = bgImages.value.filter((image) => !deleted.includes(image.src))
+      theme.removeBackgroundImages(deleted)
+      if (deleted.includes(customBgUrl.value)) customBgUrl.value = ''
+      syncSelectedBackgrounds()
+    }
+    if (failed) bgUploadError.value = `已删除 ${deleted.length} 张背景图片，${failed} 张删除失败`
+  } catch (err) {
+    bgUploadError.value = (err as Error).message || '背景删除失败'
+  } finally {
+    bgDeleting.value = false
   }
 }
 
@@ -2159,19 +2246,69 @@ onBeforeUnmount(() => {
         <div class="card-body">
           <div class="setting-group">
             <div class="group-label">
-              <span>选择背景</span>
+              <span>选择背景 <span class="group-hint">(单选显示，多选自动开启轮换)</span></span>
               <button class="btn-ghost-sm" :disabled="bgUploading" @click="bgUploadInput?.click()">{{ bgUploading ? '上传中…' : '上传图片' }}</button>
               <input ref="bgUploadInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif" class="hidden" @change="uploadBackground" />
             </div>
             <p v-if="bgUploadError" class="error-text">{{ bgUploadError }}</p>
-            <div class="bg-grid">
-              <button class="bg-thumb" :class="{ active: !theme.backgroundImage }" @click="theme.setBackgroundImage('')">
+            <div class="bg-grid" :class="{ 'selection-active': selectedBgImages.length > 0 }">
+              <button
+                class="bg-thumb"
+                :class="{ active: !theme.backgroundImage }"
+                :aria-pressed="!theme.backgroundImage"
+                @click="selectBackground('')"
+              >
                 <div class="bg-thumb-empty">无</div>
               </button>
-              <button v-for="img in bgImages" :key="img.src" class="bg-thumb" :class="{ active: theme.backgroundImage === img.src }" @click="theme.setBackgroundImage(img.src)">
-                <img :src="img.thumb" loading="lazy" />
-                <span v-if="theme.backgroundImage === img.src" class="bg-check">✓</span>
-              </button>
+              <div v-for="img in bgImages" :key="img.src" class="bg-thumb-wrap">
+                <button
+                  class="bg-thumb"
+                  :class="{ active: theme.backgroundImage === img.src, 'multi-selected': selectedBgImages.includes(img.src) }"
+                  :aria-pressed="theme.backgroundImage === img.src"
+                  @click="selectBackground(img.src)"
+                >
+                  <img :src="img.thumb" loading="lazy" />
+                </button>
+                <label class="bg-select-checkbox" :class="{ checked: selectedBgImages.includes(img.src) }" :title="selectedBgImages.includes(img.src) ? '取消勾选' : '勾选图片'" @click.stop>
+                  <input
+                    type="checkbox"
+                    :checked="selectedBgImages.includes(img.src)"
+                    :aria-label="selectedBgImages.includes(img.src) ? '取消勾选背景图片' : '勾选背景图片'"
+                    @change="toggleBackgroundSelection(img.src)"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div class="bg-selection-toolbar">
+              <span class="bg-selection-summary">已勾选 {{ selectedBgImages.length }} 张背景图片</span>
+              <div v-if="bgImages.length" class="inline-btns">
+                <button class="btn-ghost-xs" :disabled="selectedBgImages.length === bgImages.length" @click="selectAllBackgrounds">全选</button>
+                <button class="btn-ghost-xs" :disabled="!selectedBgImages.length" @click="clearBackgroundSelection">清空</button>
+                <button
+                  v-if="selectedBgImages.length"
+                  class="btn-ghost-xs danger"
+                  :disabled="bgDeleting"
+                  @click="deleteSelectedBackgrounds"
+                >{{ bgDeleting ? '删除中…' : `删除已选 (${selectedBgImages.length})` }}</button>
+              </div>
+            </div>
+
+            <div v-if="hasBackgroundRotation" class="rotation-controls">
+              <div class="rotation-mode-row">
+                <label>轮换方式</label>
+                <Select
+                  :model-value="theme.backgroundRotationMode"
+                  :options="backgroundRotationModeOptions"
+                  min-width="140px"
+                  @update:model-value="theme.setBackgroundRotationMode"
+                />
+              </div>
+              <label>切换间隔: {{ theme.backgroundInterval < 60 ? theme.backgroundInterval + ' 秒' : Math.round(theme.backgroundInterval / 60) + ' 分钟' }}</label>
+              <div class="range-row">
+                <input type="range" :value="theme.backgroundInterval" min="10" max="3600" step="10" class="range" @input="theme.setBackgroundInterval(Number(($event.target as HTMLInputElement).value))" />
+                <span class="range-value">{{ theme.backgroundInterval < 60 ? theme.backgroundInterval + 's' : Math.round(theme.backgroundInterval / 60) + 'min' }}</span>
+              </div>
             </div>
           </div>
 
@@ -2183,30 +2320,6 @@ onBeforeUnmount(() => {
               <div class="input-row" style="flex: 1;">
                 <input v-model="customBgUrl" placeholder="输入图片 URL 或路径…" class="text-input" @keydown.enter="applyCustomBg" />
                 <button class="btn-primary-sm" @click="applyCustomBg">应用</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="setting-group">
-            <div class="group-label">
-              <span>背景轮换 <span class="group-hint">(已选 {{ theme.backgroundRotation.length }} 张)</span></span>
-              <div v-if="bgImages.length" class="inline-btns">
-                <button class="btn-ghost-xs" @click="selectAllRotation">全选</button>
-                <button class="btn-ghost-xs" @click="invertRotation">反选</button>
-                <button class="btn-ghost-xs" @click="clearRotation">清空</button>
-              </div>
-            </div>
-            <div class="rotation-grid">
-              <button v-for="img in bgImages" :key="img.src" class="rotation-thumb" :class="{ selected: isRotationEnabled(img.src) }" @click="theme.toggleRotationImage(img.src)">
-                <img :src="img.thumb" loading="lazy" />
-                <span v-if="isRotationEnabled(img.src)" class="rotation-check">✓</span>
-              </button>
-            </div>
-            <div v-if="theme.backgroundRotation.length >= 2" class="rotation-controls">
-              <label>切换间隔: {{ theme.backgroundInterval < 60 ? theme.backgroundInterval + ' 秒' : Math.round(theme.backgroundInterval / 60) + ' 分钟' }}</label>
-              <div class="range-row">
-                <input type="range" :value="theme.backgroundInterval" min="10" max="3600" step="10" class="range" @input="theme.setBackgroundInterval(Number(($event.target as HTMLInputElement).value))" />
-                <span class="range-value">{{ theme.backgroundInterval < 60 ? theme.backgroundInterval + 's' : Math.round(theme.backgroundInterval / 60) + 'min' }}</span>
               </div>
             </div>
           </div>
@@ -4121,9 +4234,13 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
   gap: 8px;
 }
+.bg-thumb-wrap { position: relative; }
 .bg-thumb {
   position: relative;
+  display: block;
+  width: 100%;
   aspect-ratio: 16/10;
+  padding: 0;
   border-radius: 8px;
   overflow: hidden;
   border: 2px solid transparent;
@@ -4138,6 +4255,7 @@ onBeforeUnmount(() => {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-soft);
 }
+.bg-thumb.multi-selected:not(.active) { border-color: color-mix(in srgb, var(--color-primary) 58%, var(--color-border)); }
 .bg-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .bg-thumb-empty {
   width: 100%;
@@ -4149,56 +4267,79 @@ onBeforeUnmount(() => {
   color: var(--color-text-muted);
   font-size: 12px;
 }
-.bg-check {
+.bg-select-checkbox {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--color-primary);
-  color: #fff;
+  top: 5px;
+  right: 5px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-}
-.rotation-grid {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 6px;
-}
-.rotation-thumb {
-  position: relative;
-  width: 56px;
-  height: 38px;
-  border-radius: 6px;
-  overflow: hidden;
-  border: 2px solid transparent;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: rgba(15, 23, 42, 0.58);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.24);
   cursor: pointer;
-  transition: border-color 0.15s ease, opacity 0.15s ease;
-  opacity: 0.35;
+  opacity: 0;
+  transform: scale(0.84);
+  transition: opacity 0.15s ease, transform 0.15s ease;
 }
-.rotation-thumb.selected { border-color: var(--color-primary); opacity: 1; }
-.rotation-thumb img { width: 100%; height: 100%; object-fit: cover; }
-.rotation-check {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
+.bg-thumb-wrap:hover .bg-select-checkbox,
+.bg-thumb-wrap:focus-within .bg-select-checkbox,
+.bg-grid.selection-active .bg-select-checkbox.checked {
+  opacity: 1;
+  transform: scale(1);
+}
+.bg-select-checkbox input {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  cursor: pointer;
+}
+.bg-select-checkbox input:checked {
+  border-color: var(--color-primary);
   background: var(--color-primary);
+}
+.bg-select-checkbox input:checked::after {
+  content: '✓';
+  display: block;
   color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 12px;
+  text-align: center;
+}
+.bg-select-checkbox input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.bg-selection-toolbar {
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 9px;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  margin-top: 12px;
 }
-.rotation-controls { margin-top: 12px; }
+.bg-selection-summary { font-size: 12px; color: var(--color-text-secondary); }
+.btn-ghost-xs.danger { color: var(--color-error); border-color: color-mix(in srgb, var(--color-error) 45%, var(--color-border)); }
+.btn-ghost-xs.danger:hover { color: #fff; border-color: var(--color-error); background: var(--color-error); }
+.rotation-controls {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-muted);
+}
 .rotation-controls label { font-size: 13px; color: var(--color-text-secondary); }
+.rotation-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
 
 /* ── Rankings ────────────────────────────────────────────────────────── */
 .add-rank-row {
