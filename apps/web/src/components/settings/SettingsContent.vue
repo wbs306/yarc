@@ -2368,9 +2368,9 @@ onBeforeUnmount(() => {
           <h3>第三方集成</h3>
           <p>连接外部服务和插件</p>
         </div>
-        <div class="card-body">
+        <div class="card-body integration-card-body">
           <ExtensionsSettings />
-          <div style="margin-top: 16px">
+          <div class="integration-secondary">
             <WechatSettings />
           </div>
         </div>
@@ -2387,7 +2387,7 @@ onBeforeUnmount(() => {
           <h3>期刊 / 会议排名</h3>
           <p>CCF（A/B/C）与 SCI 分区（Q1–Q4）映射</p>
         </div>
-        <div class="card-body">
+        <div class="card-body ranking-card-body">
           <div class="input-row">
             <input v-model="rankingSearch" class="text-input" placeholder="搜索期刊 / 会议名称…" />
           </div>
@@ -2975,53 +2975,62 @@ onBeforeUnmount(() => {
 .settings-content {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 24px 28px 28px;
-  max-width: 1200px;
-  margin: 0 auto;
   width: 100%;
+  margin: 0 auto;
+  container-name: settings;
+  container-type: inline-size;
+}
+.settings-content > section {
+  display: grid;
+  gap: 24px;
 }
 
 /* ── Cards ───────────────────────────────────────────────────────────── */
 .settings-card {
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-card) 96%, var(--color-bg));
+  border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
+  border-radius: 16px;
   overflow: hidden;
-  margin-bottom: 20px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03), 0 10px 30px rgba(15, 23, 42, 0.035);
 }
 .settings-card-danger {
   border-color: color-mix(in srgb, var(--color-error) 30%, transparent);
 }
 .card-header {
-  padding: 18px 22px 0;
+  padding: 24px 28px 20px;
 }
 .card-header h3 {
-  font-size: 15px;
-  font-weight: 650;
+  font-size: 17px;
+  font-weight: 680;
   color: var(--color-text);
-  margin: 0 0 4px;
-  letter-spacing: -0.01em;
+  margin: 0 0 6px;
+  letter-spacing: -0.02em;
 }
 .card-header p {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--color-text-muted);
   margin: 0;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 .card-header-row {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 20px;
 }
 .card-body {
-  padding: 8px 0 0;
+  padding: 0;
 }
 .card-body > .empty-text,
 .card-body > .error-text {
-  padding: 8px 22px;
+  padding: 14px 28px 22px;
 }
+.integration-card-body,
+.ranking-card-body {
+  padding: 0 28px 28px;
+}
+.integration-secondary { margin-top: 18px; }
+.ranking-card-body > .input-row { margin-bottom: 12px; }
 
 /* ── Backend status ─────────────────────────────────────────────────── */
 .status-meta {
@@ -3314,38 +3323,49 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 13px 22px;
-  border-top: 1px solid var(--color-border);
+  gap: 28px;
+  min-height: 70px;
+  padding: 16px 28px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
 }
-.setting-row:first-child { border-top: none; }
 .row-info {
-  flex: 1;
+  flex: 1 1 46%;
   min-width: 0;
 }
 .row-label {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 14.5px;
+  font-weight: 560;
   color: var(--color-text);
+  line-height: 1.35;
 }
 .row-desc {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--color-text-muted);
-  margin-top: 2px;
+  margin-top: 4px;
+  line-height: 1.45;
 }
 .row-control {
-  flex-shrink: 0;
+  flex: 0 1 52%;
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.row-control :deep(.modern-select) {
+  min-width: 132px;
+  max-width: 240px;
+}
+.row-control :deep(.select-display) {
+  min-height: 38px;
+  padding: 8px 12px;
 }
 
 /* ── Setting Groups (with border-top separator) ──────────────────────── */
 .setting-group {
-  padding: 16px 22px;
-  border-top: 1px solid var(--color-border);
+  padding: 20px 28px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
 }
-.setting-group:first-child { border-top: none; }
 .group-label {
   display: flex;
   align-items: center;
@@ -3397,7 +3417,8 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 .pill {
-  padding: 6px 14px;
+  min-height: 36px;
+  padding: 7px 15px;
   border: 1px solid var(--color-border);
   border-radius: 20px;
   background: transparent;
@@ -3420,9 +3441,9 @@ onBeforeUnmount(() => {
 }
 
 .toggle-track {
-  width: 40px;
-  height: 22px;
-  border-radius: 11px;
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
   background: var(--color-bg-muted);
   position: relative;
   cursor: pointer;
@@ -3435,8 +3456,8 @@ onBeforeUnmount(() => {
   border-color: var(--color-primary);
 }
 .toggle-thumb {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: #fff;
   position: absolute;
@@ -3445,7 +3466,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 4px rgba(0,0,0,0.2);
   transition: left 0.2s ease, transform 0.15s ease;
 }
-.toggle-track.on .toggle-thumb { left: 20px; }
+.toggle-track.on .toggle-thumb { left: 22px; }
 .toggle-track:hover .toggle-thumb { transform: scale(1.1); }
 
 .color-swatches {
@@ -3529,7 +3550,8 @@ onBeforeUnmount(() => {
 }
 .text-input {
   flex: 1;
-  padding: 8px 12px;
+  min-height: 38px;
+  padding: 9px 12px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-bg-card);
@@ -3693,7 +3715,8 @@ onBeforeUnmount(() => {
 
 /* ── Buttons ─────────────────────────────────────────────────────────── */
 .btn-primary {
-  padding: 8px 16px;
+  min-height: 38px;
+  padding: 8px 17px;
   border: none;
   border-radius: 8px;
   background: var(--color-primary);
@@ -3707,7 +3730,8 @@ onBeforeUnmount(() => {
 .btn-primary:hover { filter: brightness(1.1); }
 .btn-primary:disabled { opacity: 0.5; cursor: default; filter: none; }
 .btn-primary-sm {
-  padding: 6px 14px;
+  min-height: 34px;
+  padding: 7px 14px;
   border: none;
   border-radius: 8px;
   background: var(--color-primary);
@@ -3721,6 +3745,7 @@ onBeforeUnmount(() => {
 .btn-primary-sm:hover { filter: brightness(1.1); }
 .btn-primary-sm:disabled { opacity: 0.5; cursor: default; filter: none; }
 .btn-ghost {
+  min-height: 38px;
   padding: 8px 16px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
@@ -3738,7 +3763,8 @@ onBeforeUnmount(() => {
   color: var(--color-text);
 }
 .btn-ghost-sm {
-  padding: 5px 12px;
+  min-height: 32px;
+  padding: 6px 12px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: transparent;
@@ -3824,7 +3850,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  width: calc(100% - 56px);
   padding: 10px 16px;
   border: 1px dashed var(--color-border);
   border-radius: 8px;
@@ -3834,7 +3860,7 @@ onBeforeUnmount(() => {
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s ease;
-  margin-top: 8px;
+  margin: 12px 28px 24px;
 }
 .btn-add:hover {
   border-color: var(--color-primary);
@@ -3939,15 +3965,18 @@ onBeforeUnmount(() => {
 
 /* ── Model Grid ──────────────────────────────────────────────────────── */
 .model-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 16px 28px 20px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
 }
 .model-item {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 12px 16px;
+  min-height: 86px;
+  padding: 14px 16px;
   background: var(--color-bg-muted);
   border: 1px solid var(--color-border);
   border-radius: 10px;
@@ -3982,9 +4011,9 @@ onBeforeUnmount(() => {
 /* ── Providers ───────────────────────────────────────────────────────── */
 .provider-item {
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: hidden;
-  margin-top: 10px;
+  margin: 12px 28px 0;
   transition: border-color 0.15s ease;
 }
 .provider-item:hover { border-color: var(--color-border-hover); }
@@ -4150,9 +4179,9 @@ onBeforeUnmount(() => {
 .add-provider-form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 16px;
+  gap: 10px;
+  margin: 12px 28px 24px;
+  padding: 18px;
   background: var(--color-bg-muted);
   border: 1px solid var(--color-border);
   border-radius: 10px;
@@ -4164,11 +4193,11 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 11px 16px;
+  padding: 13px 16px;
   background: var(--color-bg-muted);
   border: 1px solid var(--color-border);
   border-radius: 10px;
-  margin-top: 8px;
+  margin: 10px 28px 0;
   transition: all 0.15s ease;
 }
 .auth-item:hover {
@@ -4195,8 +4224,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 14px;
-  padding: 16px;
+  margin: 16px 28px 24px;
+  padding: 18px;
   background: var(--color-bg-muted);
   border: 1px solid var(--color-border);
   border-radius: 10px;
@@ -4378,15 +4407,63 @@ onBeforeUnmount(() => {
 }
 
 /* ── Responsive ──────────────────────────────────────────────────────── */
-@media (max-width: 768px) {
+@container settings (max-width: 760px) {
+  .card-header { padding: 22px 22px 18px; }
+  .integration-card-body,
+  .ranking-card-body { padding: 0 22px 22px; }
+  .provider-item { margin-inline: 22px; }
+  .btn-add { width: calc(100% - 44px); margin-inline: 22px; }
+  .add-provider-form,
+  .auth-form { margin-inline: 22px; }
+  .auth-item { margin-inline: 22px; }
+  .setting-row {
+    gap: 20px;
+    padding: 15px 22px;
+  }
+  .setting-group { padding: 18px 22px; }
+  .model-grid {
+    grid-template-columns: 1fr;
+    padding: 14px 22px 18px;
+  }
+}
+
+@container settings (max-width: 560px) {
+  .settings-content > section { gap: 16px; }
+  .settings-card { border-radius: 14px; }
+  .card-header-row,
   .setting-row {
     flex-direction: column;
     align-items: flex-start;
-    gap: 8px;
   }
-  .row-control { width: 100%; }
-  .model-edit-grid {
-    grid-template-columns: 1fr;
+  .card-header-row { gap: 12px; }
+  .setting-row { gap: 12px; }
+  .row-info,
+  .row-control {
+    width: 100%;
+    max-width: none !important;
   }
+  .row-control {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .row-control :deep(.modern-select) {
+    max-width: none;
+  }
+  .input-row { flex-wrap: wrap; width: 100%; }
+  .model-edit-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 768px) {
+  .card-header { padding: 20px 18px 16px; }
+  .integration-card-body,
+  .ranking-card-body { padding: 0 18px 18px; }
+  .setting-row { padding: 15px 18px; }
+  .setting-group { padding: 18px; }
+  .model-grid { padding: 14px 18px 18px; }
+  .provider-item,
+  .auth-item { margin-inline: 18px; }
+  .btn-add { width: calc(100% - 36px); margin-inline: 18px; }
+  .add-provider-form,
+  .auth-form { margin-inline: 18px; }
 }
 </style>

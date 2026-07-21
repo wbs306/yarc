@@ -218,18 +218,24 @@ onMounted(fetchExtensions)
 
 <style scoped>
 .extensions-settings {
-  padding: 16px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-bg-card);
+  padding: 22px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--color-bg-muted) 34%, var(--color-bg-card));
 }
 .extensions-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
+  gap: 16px;
+  margin-bottom: 20px;
 }
-.extensions-header h4 { margin: 0; font-size: 15px; }
+.extensions-header h4 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
 .header-actions { display: flex; gap: 8px; }
 
 .ext-error {
@@ -247,8 +253,8 @@ onMounted(fetchExtensions)
 .ext-empty { color: var(--color-text-muted); font-size: 13px; padding: 16px 0; }
 
 .install-form {
-  padding: 12px;
-  margin-bottom: 16px;
+  padding: 16px;
+  margin-bottom: 18px;
   background: var(--color-bg-muted);
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
@@ -256,10 +262,11 @@ onMounted(fetchExtensions)
   flex-direction: column;
   gap: 10px;
 }
-.install-field { display: flex; flex-direction: column; gap: 4px; }
+.install-field { display: flex; flex-direction: column; gap: 7px; }
 .install-field label { font-size: 12px; color: var(--color-text-muted); font-weight: 600; }
 .install-field input {
-  padding: 7px 10px;
+  min-height: 38px;
+  padding: 9px 11px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-bg);
@@ -272,22 +279,28 @@ onMounted(fetchExtensions)
 .install-hint code { padding: 1px 4px; background: var(--color-bg); border-radius: 3px; font-size: 10px; }
 .install-actions { display: flex; justify-content: flex-end; }
 
-.ext-list { display: flex; flex-direction: column; gap: 8px; }
+.ext-list { display: flex; flex-direction: column; gap: 10px; }
 .ext-item {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
+  gap: 18px;
+  min-height: 72px;
+  padding: 14px 16px;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg);
+  border-radius: 11px;
+  background: var(--color-bg-card);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.ext-item:hover {
+  border-color: var(--color-border-hover);
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.05);
 }
 .ext-item.disabled { opacity: 0.6; }
 .ext-info { flex: 1; min-width: 0; }
 .ext-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ext-type-badge { font-size: 11px; color: var(--color-text-muted); }
-.ext-name { font-weight: 600; font-size: 13px; color: var(--color-text); }
+.ext-name { font-weight: 620; font-size: 14px; color: var(--color-text); }
 .ext-version { font-size: 11px; color: var(--color-text-muted); font-family: ui-monospace, monospace; }
 .ext-status { padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 600; }
 .ext-status.enabled { background: rgba(34,197,94,0.12); color: #16a34a; }
@@ -298,7 +311,8 @@ onMounted(fetchExtensions)
 
 .ext-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .ext-btn {
-  padding: 5px 12px;
+  min-height: 34px;
+  padding: 6px 13px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-bg);
@@ -311,4 +325,16 @@ onMounted(fetchExtensions)
 .ext-btn:disabled { opacity: 0.5; cursor: default; }
 .ext-btn.primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
 .ext-btn.primary:hover { opacity: 0.9; }
+
+@media (max-width: 640px) {
+  .extensions-settings { padding: 18px; }
+  .extensions-header,
+  .ext-item { align-items: flex-start; }
+  .extensions-header,
+  .ext-item { flex-direction: column; }
+  .header-actions,
+  .ext-actions { width: 100%; }
+  .header-actions .ext-btn,
+  .ext-actions .ext-btn { flex: 1; }
+}
 </style>

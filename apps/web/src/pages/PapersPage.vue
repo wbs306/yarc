@@ -2861,8 +2861,11 @@ const showSearchPaperPopup = (paper: any) => {
               :class="{ active: settingsSection === section.id }"
               @click="settingsSection = section.id"
             >
-              <span class="cat-spacer" />
+              <span class="settings-item-icon" aria-hidden="true">{{ section.icon }}</span>
               <span class="cat-name">{{ section.label }}</span>
+              <svg class="settings-item-arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m9 18 6-6-6-6" />
+              </svg>
             </button>
           </div>
 
@@ -4359,9 +4362,68 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-preview-panel { flex: 1; min-height: 0; overflow: auto; padding: 24px; display: flex; justify-content: center; align-items: flex-start; }
 .workspace-preview-panel img { max-width: 100%; height: auto; border-radius: var(--radius); box-shadow: var(--shadow-lg); background: var(--color-bg-card); }
 .workspace-office-preview-wrap { flex: 1; min-height: 0; padding: 16px; background: var(--color-bg-card); }
-.paper-library.settings-workspace-panel { overflow-y: auto; }
+.paper-library.settings-workspace-panel {
+  overflow-y: auto;
+  background:
+    radial-gradient(circle at 50% -160px, color-mix(in srgb, var(--color-primary) 8%, transparent), transparent 420px),
+    var(--color-bg);
+}
 .paper-library.ieee-workspace-panel { overflow: hidden; }
-.settings-workspace-panel :deep(.settings-content) { width: min(760px, calc(100% - 48px)); padding: 0 24px 24px; }
+.settings-workspace-panel > .library-header {
+  width: min(1080px, calc(100% - 64px));
+  margin: 0 auto;
+  padding: 38px 0 22px;
+}
+.settings-workspace-panel > .library-header h1 {
+  font-size: 30px;
+  font-weight: 740;
+  letter-spacing: -0.04em;
+}
+.settings-workspace-panel > .library-header p {
+  margin-top: 7px;
+  font-size: 14px;
+}
+.settings-workspace-panel :deep(.settings-content) {
+  width: min(1080px, calc(100% - 64px));
+  max-width: none;
+  padding: 0 0 52px;
+}
+.settings-inline-list {
+  padding: 12px 10px calc(12px + var(--list-scroll-bottom-gap, 84px));
+}
+.settings-inline-list .category-item {
+  min-height: 44px;
+  gap: 11px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+}
+.settings-inline-list .category-item + .category-item { margin-top: 3px; }
+.settings-inline-list .category-item.active {
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+.settings-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  font-size: 15px;
+  filter: saturate(0.82);
+}
+.settings-item-arrow {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  opacity: 0;
+  transform: translateX(-3px);
+  transition: opacity var(--transition), transform var(--transition);
+}
+.settings-inline-list .category-item:hover .settings-item-arrow,
+.settings-inline-list .category-item.active .settings-item-arrow {
+  opacity: 1;
+  transform: translateX(0);
+}
 
 /* ── Notes side ───────────────────────────────────────────────────────────── */
 
@@ -5176,6 +5238,15 @@ const showSearchPaperPopup = (paper: any) => {
     min-width: 0;
   }
   .library-header h1 { font-size: 20px; }
+  .settings-workspace-panel > .library-header {
+    width: calc(100% - 32px);
+    padding: 24px 0 16px;
+  }
+  .settings-workspace-panel > .library-header h1 { font-size: 24px; }
+  .settings-workspace-panel :deep(.settings-content) {
+    width: calc(100% - 32px);
+    padding-bottom: 32px;
+  }
   .library-search { margin: 0 16px 12px; }
   .paper-table { padding: 0 16px 16px; }
   .paper-row {
