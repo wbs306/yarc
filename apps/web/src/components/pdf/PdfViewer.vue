@@ -22,7 +22,7 @@ import { ZoomPluginPackage, ZoomMode, ZoomGestureWrapper, MarqueeZoom } from '@e
 import { PanPluginPackage } from '@embedpdf/plugin-pan/vue'
 import { SearchPluginPackage, SearchLayer } from '@embedpdf/plugin-search/vue'
 import { FullscreenPluginPackage } from '@embedpdf/plugin-fullscreen/vue'
-import { ThumbnailPluginPackage } from '@embedpdf/plugin-thumbnail/vue'
+import { ThumbnailPluginPackage, ThumbnailsPane, ThumbImg } from '@embedpdf/plugin-thumbnail/vue'
 import { SpreadPluginPackage, SpreadMode } from '@embedpdf/plugin-spread/vue'
 
 const props = defineProps<{
@@ -58,6 +58,7 @@ const activeHighlight = ref<{
 } | null>(null)
 
 const zoomLevel = ref(1)
+const showPreviewStrip = ref(true)
 const viewerRootRef = ref<HTMLElement | null>(null)
 const viewportWrapRef = ref<HTMLElement | null>(null)
 
@@ -348,7 +349,12 @@ const plugins = computed(() => {
     createPluginRegistration(SelectionPluginPackage, { toleranceFactor: 0.8, minSelectionDragDistance: 2 }),
     createPluginRegistration(SearchPluginPackage),
     createPluginRegistration(FullscreenPluginPackage),
-    createPluginRegistration(ThumbnailPluginPackage),
+    createPluginRegistration(ThumbnailPluginPackage, {
+      width: 112,
+      gap: 10,
+      labelHeight: 18,
+      imagePadding: 3,
+    }),
   ]
 })
 
@@ -1305,6 +1311,13 @@ defineExpose({ scrollToNote, goToPage })
         <button class="tb-btn" @click="zoomIn" title="放大">+</button>
         <button class="tb-btn fit-btn" @click="fitWidth" title="适合宽度">宽</button>
         <button class="tb-btn fit-btn" @click="fitPage" title="适合整页">页</button>
+        <button
+          class="tb-btn preview-toggle-btn"
+          :class="{ active: showPreviewStrip }"
+          :aria-pressed="showPreviewStrip"
+          title="显示或隐藏页面预览条"
+          @click="showPreviewStrip = !showPreviewStrip"
+        >缩</button>
         <div class="tb-sep" />
         <button class="tb-btn" :class="{ active: selectionMode }" @click="toggleSelectionMode" title="划词模式">选</button>
       </div>
@@ -1352,6 +1365,30 @@ defineExpose({ scrollToNote, goToPage })
               </div>
 
               <div v-else-if="isLoaded" ref="viewportWrapRef" class="pdf-viewport-wrap">
+                <aside v-if="showPreviewStrip" class="pdf-preview-strip" aria-label="PDF 页面预览">
+                  <ThumbnailsPane :documentId="activeDocumentId" class="pdf-thumbnail-list">
+                    <template #default="{ meta }">
+                      <button
+                        type="button"
+                        class="pdf-thumbnail"
+                        :class="{ active: currentPage === meta.pageIndex + 1 }"
+                        :style="{ top: `${meta.top}px`, height: `${meta.wrapperHeight}px` }"
+                        :aria-label="`跳转到第 ${meta.pageIndex + 1} 页`"
+                        :aria-current="currentPage === meta.pageIndex + 1 ? 'page' : undefined"
+                        @click="goToPage(meta.pageIndex + 1)"
+                      >
+                        <ThumbImg
+                          :documentId="activeDocumentId"
+                          :meta="meta"
+                          :style="{ width: `${meta.width}px`, height: `${meta.height}px` }"
+                          :alt="`第 ${meta.pageIndex + 1} 页缩略图`"
+                        />
+                        <span>{{ meta.pageIndex + 1 }}</span>
+                      </button>
+                    </template>
+                  </ThumbnailsPane>
+                </aside>
+
                 <GlobalPointerProvider :documentId="activeDocumentId">
                   <Viewport :documentId="activeDocumentId" class="pdf-viewport">
                     <ZoomGestureWrapper :documentId="activeDocumentId" :enableWheel="false" class="zoom-gesture">
@@ -1547,8 +1584,36 @@ defineExpose({ scrollToNote, goToPage })
 }
 
 .pdf-content { flex: 1; overflow: hidden; background: var(--color-bg-muted); position: relative; }
-.pdf-viewport-wrap { height: 100%; display: flex; flex-direction: column; }
-.pdf-viewport { flex: 1; background-color: var(--color-bg-muted); overscroll-behavior: contain; }
+.pdf-viewport-wrap { height: 100%; display: flex; min-width: 0; }
+.pdf-viewport { flex: 1; min-width: 0; background-color: var(--color-bg-muted); overscroll-behavior: contain; }
+.pdf-preview-strip {
+  width: 136px;
+  flex: 0 0 136px;
+  padding: 8px 6px;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+}
+.pdf-thumbnail-list { height: 100%; scrollbar-width: thin; scrollbar-color: var(--color-border-hover) transparent; }
+.pdf-thumbnail {
+  position: absolute;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 122px;
+  padding: 3px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 15px;
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+.pdf-thumbnail:hover { background: var(--color-bg-muted); color: var(--color-text); }
+.pdf-thumbnail.active { border-color: var(--color-primary); background: var(--color-primary-soft); color: var(--color-primary); }
+.pdf-thumbnail img { display: block; max-width: 112px; object-fit: contain; border: 1px solid var(--color-border); background: white; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
 .selection-mode .pdf-viewport,
 .selection-mode .pdf-pointer-layer {
   touch-action: none;
@@ -1656,7 +1721,8 @@ defineExpose({ scrollToNote, goToPage })
 @media (max-width: 768px) {
   .pdf-toolbar { padding: 0 8px; }
   .pdf-title { display: none; }
-  .page-nav { display: none; }
+  .page-nav, .preview-toggle-btn { display: none; }
+  .pdf-preview-strip { display: none; }
   .selection-mode-hint { top: 8px; font-size: 11px; }
 }
 </style>

@@ -238,6 +238,59 @@ const workspaceIsLegacyOffice = computed(() => isLegacyOfficeFile(selectedWorksp
 const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension === '.pdf')
 const workspaceIsMarkdown = computed(() => workspaceLanguage.value === 'markdown')
 const markdownPreview = ref(false)
+const markdownPreviewRef = ref<HTMLElement | null>(null)
+const markdownScrollPercent = ref(0)
+const markdownViewportPercent = ref(100)
+
+const markdownPreviewHeadings = computed(() => {
+  const lines = workspaceContent.value.split(/\r?\n/)
+  const lastLine = Math.max(1, lines.length - 1)
+
+  return lines.flatMap((line, index) => {
+    const match = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line)
+    if (!match) return []
+    return [{
+      title: match[2].replace(/[`*_]/g, '').trim(),
+      level: match[1].length,
+      percent: (index / lastLine) * 100,
+    }]
+  })
+})
+
+const updateMarkdownPreviewScroll = () => {
+  const el = markdownPreviewRef.value
+  if (!el) return
+  const maxScroll = el.scrollHeight - el.clientHeight
+  markdownScrollPercent.value = maxScroll > 0 ? (el.scrollTop / maxScroll) * 100 : 0
+  markdownViewportPercent.value = el.scrollHeight > 0
+    ? Math.min(100, Math.max(8, (el.clientHeight / el.scrollHeight) * 100))
+    : 100
+}
+
+const scrollMarkdownPreviewTo = (percent: number, behavior: ScrollBehavior = 'smooth') => {
+  const el = markdownPreviewRef.value
+  if (!el) return
+  const target = Math.min(100, Math.max(0, percent))
+  el.scrollTo({ top: (el.scrollHeight - el.clientHeight) * target / 100, behavior })
+}
+
+const onMarkdownPreviewRailPointerDown = (event: PointerEvent) => {
+  const rail = event.currentTarget as HTMLElement
+  rail.setPointerCapture(event.pointerId)
+  const rect = rail.getBoundingClientRect()
+  scrollMarkdownPreviewTo(((event.clientY - rect.top) / rect.height) * 100)
+}
+
+const onMarkdownPreviewRailPointerMove = (event: PointerEvent) => {
+  const rail = event.currentTarget as HTMLElement
+  if (!rail.hasPointerCapture(event.pointerId)) return
+  const rect = rail.getBoundingClientRect()
+  scrollMarkdownPreviewTo(((event.clientY - rect.top) / rect.height) * 100, 'auto')
+}
+
+watch([markdownPreview, workspaceContent], () => {
+  void nextTick(updateMarkdownPreviewScroll)
+})
 
 watch(() => currentLiveClient.value?.content.value, (content) => {
   if (currentLiveClient.value && content !== undefined) workspaceContent.value = content
@@ -3319,12 +3372,48 @@ const showSearchPaperPopup = (paper: any) => {
             <div v-else-if="workspaceContentLoading" class="workspace-empty compact">正在读取文件…</div>
 
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
-              <MarkdownContent
-                v-show="workspaceIsMarkdown && markdownPreview"
-                class="workspace-md-preview"
-                :style="{ fontSize: `${theme.editor.markdownFontSize}px` }"
-                :content="workspaceContent"
-              />
+              <div v-show="workspaceIsMarkdown && markdownPreview" class="workspace-md-preview-shell">
+                <div ref="markdownPreviewRef" class="workspace-md-preview" @scroll="updateMarkdownPreviewScroll">
+                  <MarkdownContent
+                    :style="{ fontSize: `${theme.editor.markdownFontSize}px` }"
+                    :content="workspaceContent"
+                  />
+                </div>
+                <aside class="markdown-preview-strip" aria-label="Markdown 文档预览条">
+                  <div
+                    class="markdown-preview-rail"
+                    role="slider"
+                    tabindex="0"
+                    aria-label="拖动以快速浏览 Markdown 文档"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    :aria-valuenow="Math.round(markdownScrollPercent)"
+                    @pointerdown="onMarkdownPreviewRailPointerDown"
+                    @pointermove="onMarkdownPreviewRailPointerMove"
+                    @keydown.up.prevent="scrollMarkdownPreviewTo(markdownScrollPercent - 5)"
+                    @keydown.down.prevent="scrollMarkdownPreviewTo(markdownScrollPercent + 5)"
+                    @keydown.home.prevent="scrollMarkdownPreviewTo(0)"
+                    @keydown.end.prevent="scrollMarkdownPreviewTo(100)"
+                  >
+                    <span
+                      class="markdown-preview-viewport"
+                      :style="{ top: `${markdownScrollPercent}%`, height: `${markdownViewportPercent}%` }"
+                    />
+                    <button
+                      v-for="heading in markdownPreviewHeadings"
+                      :key="`${heading.percent}-${heading.title}`"
+                      type="button"
+                      class="markdown-preview-heading"
+                      :class="`level-${heading.level}`"
+                      :style="{ top: `${heading.percent}%` }"
+                      :title="heading.title"
+                      :aria-label="`跳转到标题：${heading.title}`"
+                      @pointerdown.stop
+                      @click.stop="scrollMarkdownPreviewTo(heading.percent)"
+                    />
+                  </div>
+                </aside>
+              </div>
               <div v-if="currentLiveClient?.conflict.value" class="workspace-live-conflict">
                 文件在磁盘被外部程序修改，无法安全自动合并。
                 <button @click="resolveCurrentLiveConflict('use-live')">保留编辑器版本</button>
@@ -4340,8 +4429,10 @@ const showSearchPaperPopup = (paper: any) => {
   cursor: pointer;
 }
 .md-view-toggle button.active { background: var(--color-bg-card); color: var(--color-text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+.workspace-md-preview-shell { flex: 1; min-height: 0; display: flex; overflow: hidden; }
 .workspace-md-preview {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
   padding: 24px 28px 32px;
@@ -4359,6 +4450,51 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-md-preview :deep(table) { border-collapse: collapse; margin-bottom: 12px; }
 .workspace-md-preview :deep(th), .workspace-md-preview :deep(td) { border: 1px solid var(--color-border); padding: 6px 12px; }
 .workspace-md-preview :deep(th) { background: var(--color-bg-muted); }
+.markdown-preview-strip {
+  width: 34px;
+  flex: 0 0 34px;
+  padding: 12px 9px;
+  border-left: 1px solid var(--color-border);
+  background: var(--color-bg-muted);
+}
+.markdown-preview-rail {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 80px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-border) 76%, transparent);
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+}
+.markdown-preview-rail:focus-visible { box-shadow: 0 0 0 2px var(--color-primary); }
+.markdown-preview-viewport {
+  position: absolute;
+  right: 0;
+  left: 0;
+  min-height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-primary) 48%, transparent);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+.markdown-preview-heading {
+  position: absolute;
+  z-index: 1;
+  left: -3px;
+  width: calc(100% + 6px);
+  height: 3px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-text-muted);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+.markdown-preview-heading.level-1 { height: 4px; background: var(--color-primary); }
+.markdown-preview-heading.level-2 { background: var(--color-text-secondary); }
+.markdown-preview-heading:hover, .markdown-preview-heading:focus-visible { background: var(--color-primary); outline: none; }
 .workspace-preview-panel { flex: 1; min-height: 0; overflow: auto; padding: 24px; display: flex; justify-content: center; align-items: flex-start; }
 .workspace-preview-panel img { max-width: 100%; height: auto; border-radius: var(--radius); box-shadow: var(--shadow-lg); background: var(--color-bg-card); }
 .workspace-office-preview-wrap { flex: 1; min-height: 0; padding: 16px; background: var(--color-bg-card); }
