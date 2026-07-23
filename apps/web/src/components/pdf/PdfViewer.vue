@@ -136,51 +136,32 @@ const cleanupWheelZoomPreview = () => {
   resetWheelZoomPreview()
 }
 
-const handleHorizontalWheel = (e: WheelEvent) => {
-  if (!e.shiftKey || e.ctrlKey || e.metaKey) return false
+const getWheelDeltaPx = (event: WheelEvent, delta: number) => {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return delta * 16
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) return delta * window.innerHeight
+  return delta
+}
 
-  e.preventDefault()
+const handleHorizontalWheel = (event: WheelEvent) => {
+  if (!event.shiftKey || event.ctrlKey || event.metaKey) return false
 
-  // Find the scrollable viewport element
-  const target = e.target as HTMLElement
+  // Viewport is rendered by EmbedPDF and receives its own wheel listeners. Use
+  // the known root class instead of inferring overflow styles from its children.
+  const target = event.target
+  const viewport = target instanceof Element
+    ? target.closest<HTMLElement>('.pdf-viewport')
+    : null
+  if (!viewport || viewport.scrollWidth <= viewport.clientWidth) return false
 
-  // Try multiple strategies to find scrollable element
-  let scrollableElement: Element | null = null
+  // Shift + a vertical wheel normally arrives as deltaY. Some browsers
+  // pre-convert it to deltaX, so use deltaX only when deltaY is absent.
+  // Preferring deltaY prevents tiny incidental trackpad deltaX values from
+  // making horizontal scrolling appear unable to reach the right edge.
+  const delta = event.deltaY || event.deltaX
+  if (!delta) return false
 
-  // Strategy 1: Look for embedpdf viewport attribute
-  scrollableElement = target.closest('[data-embedpdf-viewport]')
-
-  // Strategy 2: Look for overflow style in ancestors
-  if (!scrollableElement) {
-    let el: HTMLElement | null = target
-    while (el && el !== viewportWrapRef.value) {
-      const overflow = window.getComputedStyle(el).overflow
-      if (overflow === 'auto' || overflow === 'scroll') {
-        scrollableElement = el
-        break
-      }
-      el = el.parentElement
-    }
-  }
-
-  // Strategy 3: Query for overflow elements in viewport wrap
-  if (!scrollableElement && viewportWrapRef.value) {
-    const candidates = viewportWrapRef.value.querySelectorAll('*')
-    for (const candidate of candidates) {
-      const computed = window.getComputedStyle(candidate)
-      if ((computed.overflowX === 'auto' || computed.overflowX === 'scroll') &&
-          (candidate as HTMLElement).scrollWidth > (candidate as HTMLElement).clientWidth) {
-        scrollableElement = candidate
-        break
-      }
-    }
-  }
-
-  if (scrollableElement) {
-    // Convert vertical scroll to horizontal
-    scrollableElement.scrollLeft += e.deltaY
-  }
-
+  event.preventDefault()
+  viewport.scrollLeft += getWheelDeltaPx(event, delta)
   return true
 }
 
@@ -265,16 +246,18 @@ const cleanupWheelListener = () => {
 watch(viewportWrapRef, (viewportWrap, oldViewportWrap) => {
   // Remove old listener
   if (oldViewportWrap) {
-    oldViewportWrap.removeEventListener('wheel', handleWheelZoom)
+    oldViewportWrap.removeEventListener('wheel', handleWheelZoom, true)
   }
   
   cleanupWheelListener()
   
   if (viewportWrap) {
-    viewportWrap.addEventListener('wheel', handleWheelZoom, { passive: false })
-    
+    // Capture before EmbedPDF's internal wheel handlers so Shift + wheel can
+    // always be converted to horizontal viewport scrolling.
+    viewportWrap.addEventListener('wheel', handleWheelZoom, { capture: true, passive: false })
+
     wheelListenerCleanup = () => {
-      viewportWrap.removeEventListener('wheel', handleWheelZoom)
+      viewportWrap.removeEventListener('wheel', handleWheelZoom, true)
     }
   }
 })
@@ -771,7 +754,10 @@ const applySelectionMode = () => {
     getInteractionScope()?.activateDefaultMode?.()
   } else {
     clearSelection()
-    if (isTouchDevice) getDocPan()?.enablePan?.()
+    // Panning gives mouse users a second, direct way to reach either edge of a
+    // zoomed page. Text selection remains available through the explicit
+    // selection mode above, which switches back to the default pointer mode.
+    getDocPan()?.enablePan?.()
   }
 }
 
@@ -1585,7 +1571,16 @@ defineExpose({ scrollToNote, goToPage })
 
 .pdf-content { flex: 1; overflow: hidden; background: var(--color-bg-muted); position: relative; }
 .pdf-viewport-wrap { height: 100%; display: flex; min-width: 0; }
-.pdf-viewport { flex: 1; min-width: 0; background-color: var(--color-bg-muted); overscroll-behavior: contain; }
+.pdf-viewport {
+  flex: 1;
+  min-width: 0;
+  background-color: var(--color-bg-muted);
+  overscroll-behavior: contain;
+  /* EmbedPDF sets overflow inline. Keep the horizontal scrollbar's space so
+     a zoomed page can also be dragged all the way to either edge. */
+  overflow-x: auto !important;
+  scrollbar-gutter: stable;
+}
 .pdf-preview-strip {
   width: 136px;
   flex: 0 0 136px;
