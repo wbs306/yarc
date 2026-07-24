@@ -1647,14 +1647,16 @@ defineExpose({ scrollToNote, goToPage })
  * zoom levels the rendered right edge can extend slightly beyond that measured
  * scroll range, leaving part of the PDF's right margin unreachable. A positioned
  * end buffer expands only the scrollable overflow area: it does not change the
- * page size, zoom calculations, layout, or text-selection coordinates.
+ * page size, layout, or text-selection coordinates. Keep it proportional to the
+ * rendered PDF width so EmbedPDF's zoom anchor and the effective scroll range
+ * scale together instead of producing a horizontal jump after zooming out.
  */
 .pdf-scroller::after {
   content: '';
   position: absolute;
   top: 0;
   left: 100%;
-  width: clamp(48px, 12vw, 160px);
+  width: 8%;
   height: 1px;
   pointer-events: none;
 }
