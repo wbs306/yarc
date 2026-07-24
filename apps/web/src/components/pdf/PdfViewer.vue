@@ -153,15 +153,24 @@ const handleHorizontalWheel = (event: WheelEvent) => {
     : null
   if (!viewport || viewport.scrollWidth <= viewport.clientWidth) return false
 
-  // Shift + a vertical wheel normally arrives as deltaY. Some browsers
-  // pre-convert it to deltaX, so use deltaX only when deltaY is absent.
-  // Preferring deltaY prevents tiny incidental trackpad deltaX values from
-  // making horizontal scrolling appear unable to reach the right edge.
-  const delta = event.deltaY || event.deltaX
+  // Browsers disagree on whether Shift + wheel is reported through deltaX or
+  // deltaY. Trackpads can report both, with one being only a tiny incidental
+  // movement. Use the dominant axis so those small values do not make the page
+  // appear to stop before its right edge.
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+    ? event.deltaX
+    : event.deltaY
   if (!delta) return false
 
+  const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
+  const nextScrollLeft = Math.max(
+    0,
+    Math.min(maxScrollLeft, viewport.scrollLeft + getWheelDeltaPx(event, delta)),
+  )
+
   event.preventDefault()
-  viewport.scrollLeft += getWheelDeltaPx(event, delta)
+  event.stopPropagation()
+  viewport.scrollLeft = nextScrollLeft
   return true
 }
 
@@ -754,10 +763,11 @@ const applySelectionMode = () => {
     getInteractionScope()?.activateDefaultMode?.()
   } else {
     clearSelection()
-    // Panning gives mouse users a second, direct way to reach either edge of a
-    // zoomed page. Text selection remains available through the explicit
-    // selection mode above, which switches back to the default pointer mode.
-    getDocPan()?.enablePan?.()
+    // Keep desktop in the default pointer mode so normal mouse text selection
+    // works without first toggling a tool. Touch devices still use pan mode for
+    // reliable one-finger document scrolling.
+    if (isTouchDevice) getDocPan()?.enablePan?.()
+    else getDocPan()?.disablePan?.()
   }
 }
 
@@ -1378,7 +1388,7 @@ defineExpose({ scrollToNote, goToPage })
                 <GlobalPointerProvider :documentId="activeDocumentId">
                   <Viewport :documentId="activeDocumentId" class="pdf-viewport">
                     <ZoomGestureWrapper :documentId="activeDocumentId" :enableWheel="false" class="zoom-gesture">
-                      <Scroller :documentId="activeDocumentId">
+                      <Scroller :documentId="activeDocumentId" class="pdf-scroller">
                         <template #default="{ page }">
                           <div class="pdf-page" :style="{ width: page.width + 'px', height: page.height + 'px' }">
                             <PagePointerProvider
@@ -1576,10 +1586,9 @@ defineExpose({ scrollToNote, goToPage })
   min-width: 0;
   background-color: var(--color-bg-muted);
   overscroll-behavior: contain;
-  /* EmbedPDF sets overflow inline. Keep the horizontal scrollbar's space so
-     a zoomed page can also be dragged all the way to either edge. */
+  /* EmbedPDF sets overflow inline; explicitly retain native horizontal
+     scrolling without reserving extra gutter space from the document area. */
   overflow-x: auto !important;
-  scrollbar-gutter: stable;
 }
 .pdf-preview-strip {
   width: 136px;
@@ -1633,6 +1642,22 @@ defineExpose({ scrollToNote, goToPage })
   pointer-events: none;
 }
 .zoom-gesture { min-width: 100%; }
+/*
+ * EmbedPDF sizes the vertical scroller to its calculated page width. At higher
+ * zoom levels the rendered right edge can extend slightly beyond that measured
+ * scroll range, leaving part of the PDF's right margin unreachable. A positioned
+ * end buffer expands only the scrollable overflow area: it does not change the
+ * page size, zoom calculations, layout, or text-selection coordinates.
+ */
+.pdf-scroller::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 100%;
+  width: clamp(48px, 12vw, 160px);
+  height: 1px;
+  pointer-events: none;
+}
 .pdf-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--color-text-muted); padding: 24px; text-align: center; }
 .pdf-empty-stack { display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 420px; line-height: 1.5; }
 .pdf-error { color: var(--color-error); }
