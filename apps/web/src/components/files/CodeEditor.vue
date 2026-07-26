@@ -47,6 +47,7 @@ const emit = defineEmits<{
 const cursorLine = ref(1)
 const cursorColumn = ref(1)
 const selectedChars = ref(0)
+const selectedWords = ref(0)
 
 const host = ref<HTMLDivElement>()
 const minimap = ref<HTMLDivElement>()
@@ -249,12 +250,29 @@ function buildExtensions() {
   ]
 }
 
+// Same CJK-aware counting as the parent's document stats: CJK per codepoint,
+// latin runs per word.
+const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/g
+function countWords(text: string) {
+  const cjk = text.match(CJK_RE)?.length || 0
+  const latin = text.replace(CJK_RE, ' ').match(/[A-Za-z0-9_'\u2019-]+/g)?.length || 0
+  return cjk + latin
+}
+
 function updateCursorStats(state: EditorState) {
   const main = state.selection.main
   const line = state.doc.lineAt(main.head)
   cursorLine.value = line.number
   cursorColumn.value = main.head - line.from + 1
-  selectedChars.value = state.selection.ranges.reduce((sum, r) => sum + (r.to - r.from), 0)
+  let chars = 0
+  let words = 0
+  for (const range of state.selection.ranges) {
+    if (range.empty) continue
+    chars += range.to - range.from
+    words += countWords(state.sliceDoc(range.from, range.to))
+  }
+  selectedChars.value = chars
+  selectedWords.value = words
 }
 
 const cssVar = (name: string, fallback: string) => {
@@ -489,7 +507,7 @@ onBeforeUnmount(() => {
         <div class="code-minimap-thumb" :style="minimapViewportStyle" />
       </div>
     </div>
-    <slot name="statusbar" :line="cursorLine" :column="cursorColumn" :selected="selectedChars" />
+    <slot name="statusbar" :line="cursorLine" :column="cursorColumn" :selected="selectedChars" :selected-words="selectedWords" />
   </div>
 </template>
 
@@ -569,14 +587,21 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--color-text);
 }
-.code-editor :deep(.cm-panels-top) { border-bottom: 1px solid var(--color-border); }
+.code-editor :deep(.cm-panels-top) { border-bottom: none; }
 .code-editor :deep(.cm-panel.cm-search) {
+  position: relative;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 10px;
-  background: var(--color-bg-card);
+  margin: 8px 10px;
+  padding: 7px 34px 7px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
+  border-radius: 14px;
+  background: rgba(var(--color-bg-card-rgb), 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.14), 0 1px 3px rgba(15, 23, 42, 0.08);
   font-family: inherit;
   font-size: 12px;
 }
@@ -593,10 +618,10 @@ onBeforeUnmount(() => {
 .code-editor :deep(.cm-panel.cm-search input[type='checkbox']) { margin: 0; accent-color: var(--color-primary); }
 .code-editor :deep(.cm-panel.cm-search input[type='text']) {
   min-width: 150px;
-  padding: 5px 9px;
+  padding: 5px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 7px;
-  background: var(--color-bg);
+  border-radius: 999px;
+  background: rgba(var(--color-bg-rgb), 0.6);
   color: var(--color-text);
   font-family: inherit;
   font-size: 12px;
@@ -608,35 +633,44 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.16);
 }
 .code-editor :deep(.cm-panel.cm-search button:not([name='close'])) {
-  padding: 5px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 7px;
-  background: var(--color-bg);
+  padding: 4px 11px;
+  border: none;
+  border-radius: 999px;
+  background: var(--color-bg-muted);
   background-image: none;
   color: var(--color-text-secondary);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  transition: color 0.15s ease, background 0.15s ease;
 }
 .code-editor :deep(.cm-panel.cm-search button:not([name='close']):hover) {
-  border-color: var(--color-primary);
-  background: rgba(var(--color-primary-rgb), 0.08);
+  background: rgba(var(--color-primary-rgb), 0.12);
   color: var(--color-primary);
 }
 .code-editor :deep(.cm-panel.cm-search [name='close']) {
   position: absolute;
-  top: 6px;
-  right: 8px;
-  padding: 0 4px;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   border: none;
+  border-radius: 999px;
   background: transparent;
   color: var(--color-text-muted);
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1;
   cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
 }
-.code-editor :deep(.cm-panel.cm-search [name='close']:hover) { color: var(--color-error); }
+.code-editor :deep(.cm-panel.cm-search [name='close']:hover) {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--color-error);
+}
 .code-editor :deep(.cm-searchMatch) {
   background: rgba(var(--color-primary-rgb), 0.22);
   border-radius: 3px;

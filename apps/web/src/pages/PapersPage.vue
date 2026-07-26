@@ -3503,6 +3503,12 @@ const showSearchPaperPopup = (paper: any) => {
 
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
               <div v-if="mdSearchOpen && workspaceIsMarkdown && markdownPreview" class="md-find-bar">
+                <span class="md-find-icon" aria-hidden="true">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="7" />
+                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  </svg>
+                </span>
                 <input
                   ref="mdSearchInput"
                   v-model="mdSearchQuery"
@@ -3513,7 +3519,8 @@ const showSearchPaperPopup = (paper: any) => {
                   @keydown.enter.prevent="stepMarkdownSearch(($event as KeyboardEvent).shiftKey ? -1 : 1)"
                   @keydown.esc.prevent="closeMarkdownSearch"
                 />
-                <span class="md-find-count">{{ mdSearchTotal ? `${mdSearchIndex + 1}/${mdSearchTotal}` : (mdSearchQuery ? '无结果' : '') }}</span>
+                <span class="md-find-count" :class="{ 'has-results': mdSearchTotal }">{{ mdSearchTotal ? `${mdSearchIndex + 1}/${mdSearchTotal}` : (mdSearchQuery ? '无结果' : '') }}</span>
+                <span class="md-find-divider" aria-hidden="true" />
                 <button class="md-find-btn" title="上一个 (Shift+Enter)" :disabled="!mdSearchTotal" @click="stepMarkdownSearch(-1)">↑</button>
                 <button class="md-find-btn" title="下一个 (Enter)" :disabled="!mdSearchTotal" @click="stepMarkdownSearch(1)">↓</button>
                 <button class="md-find-btn close" title="关闭 (Esc)" @click="closeMarkdownSearch">×</button>
@@ -3580,13 +3587,13 @@ const showSearchPaperPopup = (paper: any) => {
                 class="workspace-code-editor"
                 @save="saveWorkspaceFile"
               >
-                <template #statusbar="{ line, column, selected }">
+                <template #statusbar="{ line, column, selected, selectedWords }">
                   <footer class="workspace-status-bar">
                     <span>{{ workspaceDocStats.words }} 词</span>
                     <span>{{ workspaceDocStats.chars }} 字符</span>
                     <span>{{ workspaceDocStats.lines }} 行</span>
                     <span class="status-spacer" />
-                    <span v-if="selected">已选 {{ selected }}</span>
+                    <span v-if="selected" class="status-selection">已选 {{ selectedWords }} 词 · {{ selected }} 字符</span>
                     <span>行 {{ line }}，列 {{ column }}</span>
                     <span class="status-hint">Ctrl+F 查找</span>
                   </footer>
@@ -4540,75 +4547,117 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-file-summary p { margin-top: 2px; color: var(--color-text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-file-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; color: var(--color-text-muted); font-size: 12px; }
 .readonly-pill { color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 999px; padding: 2px 8px; }
-.workspace-text-editor-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
+.workspace-text-editor-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
 .workspace-status-bar {
   display: flex;
   align-items: center;
   gap: 14px;
   flex-shrink: 0;
-  padding: 5px 14px;
-  border-top: 1px solid var(--color-border);
-  background: var(--color-bg-card);
-  color: var(--color-text-muted);
+  padding: 4px 14px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
+  background: rgba(var(--color-bg-card-rgb), 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: color-mix(in srgb, var(--color-text-muted) 82%, transparent);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.workspace-status-bar:hover {
+  background: rgba(var(--color-bg-card-rgb), 0.8);
+  color: var(--color-text-muted);
 }
 .workspace-status-bar .status-spacer { flex: 1; }
-.workspace-status-bar .status-hint { opacity: 0.7; }
+.workspace-status-bar .status-hint { opacity: 0.65; }
+.workspace-status-bar .status-selection {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(var(--color-primary-rgb), 0.12);
+  color: var(--color-primary);
+}
 .md-find-bar {
+  position: absolute;
+  top: 10px;
+  right: 46px;
+  z-index: 8;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
+  border-radius: 999px;
+  background: rgba(var(--color-bg-card-rgb), 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.14), 0 1px 3px rgba(15, 23, 42, 0.08);
+  animation: md-find-in 0.16s ease;
+}
+@keyframes md-find-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.md-find-icon {
+  display: inline-flex;
+  color: var(--color-text-muted);
   flex-shrink: 0;
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-card);
 }
 .md-find-input {
   min-width: 0;
-  flex: 1;
-  max-width: 280px;
-  padding: 5px 9px;
-  border: 1px solid var(--color-border);
-  border-radius: 7px;
-  background: var(--color-bg);
+  width: 200px;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
   color: var(--color-text);
-  font-size: 12px;
+  font-size: 12.5px;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.md-find-input:focus {
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.16);
-}
+.md-find-input::placeholder { color: var(--color-text-muted); }
 .md-find-count {
-  min-width: 54px;
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-bg-muted);
   color: var(--color-text-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.md-find-count:empty { display: none; }
+.md-find-count.has-results {
+  background: rgba(var(--color-primary-rgb), 0.12);
+  color: var(--color-primary);
+}
+.md-find-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--color-border);
+  flex-shrink: 0;
 }
 .md-find-btn {
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--color-border);
-  border-radius: 7px;
-  background: var(--color-bg);
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
   color: var(--color-text-secondary);
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  flex-shrink: 0;
+  transition: color 0.15s ease, background 0.15s ease;
 }
 .md-find-btn:hover:not(:disabled) {
-  border-color: var(--color-primary);
-  background: rgba(var(--color-primary-rgb), 0.08);
+  background: rgba(var(--color-primary-rgb), 0.1);
   color: var(--color-primary);
 }
-.md-find-btn:disabled { opacity: 0.45; cursor: default; }
-.md-find-btn.close { margin-left: auto; font-size: 16px; }
-.md-find-btn.close:hover { border-color: var(--color-error); background: rgba(239, 68, 68, 0.08); color: var(--color-error); }
+.md-find-btn:disabled { opacity: 0.4; cursor: default; }
+.md-find-btn.close { font-size: 15px; }
+.md-find-btn.close:hover { background: rgba(239, 68, 68, 0.1); color: var(--color-error); }
 .dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-border-hover); flex-shrink: 0; }
 .dirty-dot.active { background: var(--color-warning); }
 .dirty-dot.conflict { background: var(--color-error); }
