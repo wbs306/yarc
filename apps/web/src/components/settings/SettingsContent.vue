@@ -89,12 +89,26 @@ const catalogLoaded = ref(false)
 const catalogSource = ref('')
 const catalogRefreshing = ref(false)
 
+// Saving any Pi config makes the server reload Pi and broadcast
+// `pi-config-changed`. Without this guard the echo of our own save would
+// re-fetch and replace the form state mid-edit, which re-creates the inputs
+// (flicker, lost focus, broken Tab navigation).
+let selfSaveUntil = 0
+const markSelfSave = () => { selfSaveUntil = Date.now() + 3000 }
+const isSelfSaveEcho = () => Date.now() < selfSaveUntil
+
 const loadCustomModels = async () => {
-  customModelsLoading.value = true
+  const initial = !Object.keys(customProviders.value).length
+  if (initial) customModelsLoading.value = true
   customModelsError.value = ''
   try {
     const res = await api.getPiModels()
-    customProviders.value = res.providers || {}
+    const next = res.providers || {}
+    // Only swap the object when it actually differs, so editing inputs keep
+    // their DOM nodes (and focus) across background refreshes.
+    if (JSON.stringify(next) !== JSON.stringify(customProviders.value)) {
+      customProviders.value = next
+    }
   } catch (err) {
     customModelsError.value = (err as Error).message || '加载失败'
   } finally {
@@ -103,6 +117,7 @@ const loadCustomModels = async () => {
 }
 
 const saveCustomModels = async () => {
+  markSelfSave()
   customModelsSaving.value = true
   customModelsError.value = ''
   try {
@@ -110,6 +125,7 @@ const saveCustomModels = async () => {
   } catch (err) {
     customModelsError.value = (err as Error).message || '保存失败'
   } finally {
+    markSelfSave()
     customModelsSaving.value = false
   }
 }
@@ -575,6 +591,7 @@ const loadPiSettings = async () => {
 }
 
 const savePiSettings = async () => {
+  markSelfSave()
   piSettingsSaving.value = true
   piSettingsError.value = ''
   try {
@@ -592,6 +609,7 @@ const savePiSettings = async () => {
   } catch (err) {
     piSettingsError.value = (err as Error).message || '保存失败'
   } finally {
+    markSelfSave()
     piSettingsSaving.value = false
   }
 }
@@ -647,6 +665,7 @@ const loadAuth = async () => {
 }
 
 const saveAuth = async (entries: Record<string, any>) => {
+  markSelfSave()
   authSaving.value = true
   authError.value = ''
   try {
@@ -662,6 +681,7 @@ const saveAuth = async (entries: Record<string, any>) => {
   } catch (err) {
     authError.value = (err as Error).message || '保存失败'
   } finally {
+    markSelfSave()
     authSaving.value = false
   }
 }
@@ -867,11 +887,12 @@ const loadEnabledModels = async () => {
 }
 
 const saveEnabledModels = async () => {
+  markSelfSave()
   enabledModelsLoading.value = true
   try {
     await api.updatePiEnabledModels(enabledModels.value)
   } catch { /* ignore */ }
-  finally { enabledModelsLoading.value = false }
+  finally { markSelfSave(); enabledModelsLoading.value = false }
 }
 
 const isModelEnabled = (m: any): boolean => {
@@ -1182,6 +1203,7 @@ const loadAllSettings = async () => {
 }
 
 const saveSummaryPrompt = async () => {
+  markSelfSave()
   summaryPromptLoading.value = true
   summaryPromptError.value = ''
   try {
@@ -1192,6 +1214,7 @@ const saveSummaryPrompt = async () => {
   } catch (err) {
     summaryPromptError.value = (err as Error).message || '保存失败'
   } finally {
+    markSelfSave()
     summaryPromptLoading.value = false
   }
 }
@@ -1458,6 +1481,7 @@ const deleteSelectedBackgrounds = async () => {
 
 // Agent settings functions
 const saveAgentMd = async () => {
+  markSelfSave()
   agentMdLoading.value = true
   agentMdError.value = ''
   try {
@@ -1467,11 +1491,13 @@ const saveAgentMd = async () => {
   } catch (err) {
     agentMdError.value = (err as Error).message || '保存失败'
   } finally {
+    markSelfSave()
     agentMdLoading.value = false
   }
 }
 
 const saveSystemPrompt = async () => {
+  markSelfSave()
   systemPromptLoading.value = true
   systemPromptError.value = ''
   try {
@@ -1481,11 +1507,14 @@ const saveSystemPrompt = async () => {
   } catch (err) {
     systemPromptError.value = (err as Error).message || '保存失败'
   } finally {
+    markSelfSave()
     systemPromptLoading.value = false
   }
 }
 
 const onPiConfigChanged = () => {
+  // Ignore the echo of our own save; it would clobber the form being edited.
+  if (isSelfSaveEcho()) return
   void loadModels()
   void loadEnabledModels()
   void loadAllSettings()
@@ -1695,33 +1724,40 @@ onBeforeUnmount(() => {
 
           <div v-else>
             <div v-for="(prov, provId) in customProviders" :key="provId" class="provider-item">
-              <div class="provider-head" @click="editingProvider = editingProvider === provId ? '' : String(provId)">
+              <div class="provider-head" :class="{ open: editingProvider === provId }" @click="editingProvider = editingProvider === provId ? '' : String(provId)">
+                <span class="provider-avatar">{{ String(provId).slice(0, 1).toUpperCase() }}</span>
                 <div class="provider-head-info">
                   <strong>{{ provId }}</strong>
-                  <span class="provider-meta">{{ prov.api }} · {{ prov.models.length }} 个模型</span>
+                  <span class="provider-meta">
+                    <span class="meta-chip">{{ prov.api }}</span>
+                    <span class="meta-chip">{{ prov.models.length }} 个模型</span>
+                    <span v-if="prov.baseUrl" class="meta-url">{{ prov.baseUrl }}</span>
+                  </span>
                 </div>
                 <div class="provider-head-actions">
-                  <span class="expand-icon">{{ editingProvider === provId ? '▾' : '▸' }}</span>
                   <button class="btn-icon danger" title="删除" @click.stop="removeProvider(provId)">🗑</button>
+                  <span class="expand-icon" :class="{ open: editingProvider === provId }">▸</span>
                 </div>
               </div>
 
               <div v-if="editingProvider === provId" class="provider-body">
                 <div class="provider-config">
-                  <div class="input-row">
-                    <label class="input-label">Base URL</label>
-                    <input v-model="customProviders[provId].baseUrl" class="text-input" placeholder="http://localhost:11434/v1" @change="saveCustomModels()" />
-                  </div>
-                  <div class="input-row">
-                    <label class="input-label">API</label>
-                    <Select :model-value="customProviders[provId].api" :options="apiSelectOptions" @update:model-value="customProviders[provId].api = $event; saveCustomModels()" />
-                  </div>
-                  <div class="input-row">
-                    <label class="input-label">API Key</label>
-                    <input v-model="customProviders[provId].apiKey" class="text-input" placeholder="可选" @change="saveCustomModels()" />
+                  <div class="field-grid">
+                    <div class="field">
+                      <label class="field-label">Base URL</label>
+                      <input v-model="customProviders[provId].baseUrl" class="text-input" placeholder="http://localhost:11434/v1" @change="saveCustomModels()" />
+                    </div>
+                    <div class="field">
+                      <label class="field-label">API</label>
+                      <Select :model-value="customProviders[provId].api" :options="apiSelectOptions" @update:model-value="customProviders[provId].api = $event; saveCustomModels()" />
+                    </div>
+                    <div class="field field-wide">
+                      <label class="field-label">API Key</label>
+                      <input v-model="customProviders[provId].apiKey" type="password" class="text-input" placeholder="可选" @change="saveCustomModels()" />
+                    </div>
                   </div>
                   <div class="compat-section">
-                    <label class="input-label">Compat <span class="group-hint">兼容性配置</span></label>
+                    <div class="section-label">Compat <span class="section-hint">兼容性配置</span></div>
                     <div class="compat-groups">
                       <template v-for="group in ['openai', 'anthropic', 'routing']" :key="group">
                         <div v-if="getCompatFieldsForApi(customProviders[provId].api).filter(f => f.group === group).some(f => f.type !== 'json' || getCompatValue(customProviders[provId].compat, f.key))" class="compat-group">
@@ -1765,12 +1801,13 @@ onBeforeUnmount(() => {
 
                 <div class="provider-models">
                   <div class="models-header-row">
-                    <label class="input-label">模型</label>
+                    <div class="section-label">模型 <span class="section-count">{{ prov.models.length }}</span></div>
                     <button class="btn-ghost-sm" @click="fetchModelsForProvider(String(provId))">从 API 获取</button>
                   </div>
                   <div class="model-entries">
-                    <div v-for="(m, mi) in prov.models" :key="m.id" class="model-entry">
+                    <div v-for="(m, mi) in prov.models" :key="mi" class="model-entry" :class="{ open: editingModel?.providerId === provId && editingModel?.modelIndex === mi }">
                       <div class="model-entry-head" @click="toggleEditModel(String(provId), mi)">
+                        <span class="expand-icon sm" :class="{ open: editingModel?.providerId === provId && editingModel?.modelIndex === mi }">▸</span>
                         <span class="model-entry-name">{{ m.name || m.id }}</span>
                         <span class="model-entry-badges">
                           <span v-if="m.contextWindow" class="badge-sm">{{ m.contextWindow >= 1000000 ? (m.contextWindow / 1000000) + 'M' : m.contextWindow >= 1000 ? Math.round(m.contextWindow / 1000) + 'K' : m.contextWindow }}</span>
@@ -1905,12 +1942,27 @@ onBeforeUnmount(() => {
             </button>
 
             <div v-if="showAddProvider" class="add-provider-form">
-              <input v-model="newProvider.id" class="text-input" placeholder="Provider ID (如 ollama)" />
-              <input v-model="newProvider.baseUrl" class="text-input" placeholder="Base URL" />
-              <Select v-model="newProvider.api" :options="apiSelectOptions" />
-              <input v-model="newProvider.apiKey" class="text-input" placeholder="API Key (可选)" />
+              <div class="form-title">新建 Provider</div>
+              <div class="field-grid">
+                <div class="field">
+                  <label class="field-label">Provider ID</label>
+                  <input v-model="newProvider.id" class="text-input" placeholder="如 ollama" />
+                </div>
+                <div class="field">
+                  <label class="field-label">API</label>
+                  <Select v-model="newProvider.api" :options="apiSelectOptions" />
+                </div>
+                <div class="field field-wide">
+                  <label class="field-label">Base URL</label>
+                  <input v-model="newProvider.baseUrl" class="text-input" placeholder="http://localhost:11434/v1" />
+                </div>
+                <div class="field field-wide">
+                  <label class="field-label">API Key</label>
+                  <input v-model="newProvider.apiKey" type="password" class="text-input" placeholder="可选" />
+                </div>
+              </div>
               <div class="compat-section">
-                <label class="input-label">Compat <span class="group-hint">兼容性配置</span></label>
+                <div class="section-label">Compat <span class="section-hint">兼容性配置</span></div>
                 <div class="compat-groups">
                   <template v-for="group in ['openai', 'anthropic', 'routing']" :key="group">
                     <div v-if="getCompatFieldsForApi(newProvider.api).filter(f => f.group === group).some(f => f.type !== 'json' || getCompatValue(newProvider.compat, f.key))" class="compat-group">
@@ -1949,14 +2001,15 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <div class="setting-group">
+              <div class="form-models">
                 <div class="models-header-row">
-                  <label class="input-label">模型</label>
+                  <div class="section-label">模型 <span v-if="newProviderModels.length" class="section-count">{{ newProviderModels.length }}</span></div>
                   <button class="btn-ghost-sm" @click="fetchModelsForNewProvider" :disabled="!newProvider.id.trim()">从 API 获取</button>
                 </div>
                 <div class="model-entries">
-                  <div v-for="(m, mi) in newProviderModels" :key="m.id" class="model-entry">
+                  <div v-for="(m, mi) in newProviderModels" :key="mi" class="model-entry" :class="{ open: editingNewModel === mi }">
                     <div class="model-entry-head" @click="editingNewModel = editingNewModel === mi ? null : mi">
+                      <span class="expand-icon sm" :class="{ open: editingNewModel === mi }">▸</span>
                       <span class="model-entry-name">{{ m.name || m.id }}</span>
                       <span class="model-entry-badges">
                         <span v-if="m.contextWindow" class="badge-sm">{{ m.contextWindow >= 1000000 ? (m.contextWindow / 1000000) + 'M' : m.contextWindow >= 1000 ? Math.round(m.contextWindow / 1000) + 'K' : m.contextWindow }}</span>
@@ -2075,6 +2128,7 @@ onBeforeUnmount(() => {
 
           <div v-else>
             <div v-for="(entry, provId) in authEntries" :key="provId" class="auth-item">
+              <span class="provider-avatar">{{ String(provId).slice(0, 1).toUpperCase() }}</span>
               <div class="auth-info">
                 <strong>{{ builtinProviders.find(bp => bp.id === provId)?.name || provId }}</strong>
                 <code class="auth-id">{{ provId }}</code>
@@ -2090,6 +2144,7 @@ onBeforeUnmount(() => {
             <div v-if="!Object.keys(authEntries).length" class="empty-text">暂未配置任何凭证</div>
 
             <div class="auth-form">
+              <div class="form-title">{{ editingAuth ? `更新 ${editingAuth} 凭证` : '添加凭证' }}</div>
               <Select v-model="newAuth.provider" :groups="authProviderGroups" placeholder="选择 Provider…" />
               <input v-if="newAuth.provider === '__custom__'" v-model="newAuthCustomId" class="text-input" placeholder="Provider ID" />
               <input v-model="newAuth.key" type="password" class="text-input" :placeholder="authEntries[newAuth.provider]?.type === 'oauth' ? '新的 API Key (替换 OAuth)' : 'API Key'" @keydown.enter="addAuth" />
@@ -3542,12 +3597,6 @@ onBeforeUnmount(() => {
   align-items: center;
 }
 .input-row.compact { gap: 6px; }
-.input-label {
-  font-size: 12px;
-  color: var(--color-text-muted);
-  min-width: 60px;
-  flex-shrink: 0;
-}
 .text-input {
   flex: 1;
   min-height: 38px;
@@ -3620,29 +3669,27 @@ onBeforeUnmount(() => {
 .code-textarea-sm:focus {
   border-color: var(--color-primary);
 }
-.input-col {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
 /* ── Compat Editor ── */
 .compat-section {
-  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .compat-groups {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 6px;
+  gap: 10px;
 }
 .compat-group {
   border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: 10px;
+  padding: 11px 13px;
+  background: var(--color-bg-card);
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
+.compat-group :deep(.modern-select) { min-width: 150px; }
 .compat-group-label {
   font-size: 11px;
   font-weight: 600;
@@ -3681,11 +3728,11 @@ onBeforeUnmount(() => {
 .compat-inline {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  background: var(--color-bg-muted);
+  gap: 7px;
+  padding: 10px;
+  background: var(--color-bg-card);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: 9px;
 }
 .compat-row-sm {
   display: flex;
@@ -3881,10 +3928,19 @@ onBeforeUnmount(() => {
   gap: 4px;
 }
 .expand-icon {
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  font-size: 12px;
   color: var(--color-text-muted);
-  transition: transform 0.15s ease;
+  transition: transform 0.2s ease, color 0.15s ease;
 }
+.expand-icon.open {
+  transform: rotate(90deg);
+  color: var(--color-primary);
+}
+.expand-icon.sm { width: 14px; font-size: 10px; }
 
 /* ── Badges ──────────────────────────────────────────────────────────── */
 .badge {
@@ -3977,17 +4033,23 @@ onBeforeUnmount(() => {
   gap: 14px;
   min-height: 86px;
   padding: 14px 16px;
-  background: var(--color-bg-muted);
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
+  background: var(--color-bg-card);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
+  border-radius: 11px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
 }
 .model-item:hover {
-  border-color: var(--color-border-hover);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  border-color: color-mix(in srgb, var(--color-primary) 50%, var(--color-border));
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+  transform: translateY(-1px);
 }
-.model-item.disabled { opacity: 0.45; }
+.model-item.disabled {
+  opacity: 0.6;
+  border-color: var(--color-border);
+  background: color-mix(in srgb, var(--color-bg-muted) 45%, transparent);
+}
+.model-item.disabled:hover { opacity: 0.85; }
 .model-toggle { flex-shrink: 0; }
 .model-info { flex: 1; min-width: 0; }
 .model-name {
@@ -4013,57 +4075,166 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   overflow: hidden;
-  margin: 12px 28px 0;
-  transition: border-color 0.15s ease;
+  margin: 10px 28px 0;
+  background: var(--color-bg-card);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.provider-item:hover { border-color: var(--color-border-hover); }
+.provider-item:hover {
+  border-color: var(--color-border-hover);
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+}
+.provider-item:has(.provider-body) {
+  border-color: color-mix(in srgb, var(--color-primary) 34%, var(--color-border));
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+}
 .provider-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 12px 14px;
   cursor: pointer;
   transition: background 0.15s ease;
 }
-.provider-head:hover { background: var(--color-bg-muted); }
+.provider-head:hover { background: color-mix(in srgb, var(--color-bg-muted) 60%, transparent); }
+.provider-head.open { background: color-mix(in srgb, var(--color-primary) 5%, transparent); }
+.provider-avatar {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: var(--color-primary);
+  font-size: 14px;
+  font-weight: 700;
+}
 .provider-head-info {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
 }
-.provider-head-info strong { font-size: 14px; color: var(--color-text); }
-.provider-meta { font-size: 12px; color: var(--color-text-muted); }
-.provider-head-actions { display: flex; align-items: center; gap: 4px; }
+.provider-head-info strong {
+  font-size: 14px;
+  font-weight: 620;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+}
+.provider-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  min-width: 0;
+}
+.meta-chip {
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--color-bg-muted);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.meta-url {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.provider-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
 .provider-body {
-  padding: 0 16px 16px;
+  padding: 16px;
   border-top: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-bg-muted) 34%, transparent);
 }
 .provider-config {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding-top: 14px;
+  gap: 14px;
 }
-.provider-models { margin-top: 12px; }
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.field-wide { grid-column: 1 / -1; }
+.field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.field :deep(.modern-select) { width: 100%; }
+.field :deep(.select-display) { min-height: 38px; }
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.section-hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--color-text-muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.section-count {
+  padding: 1px 7px;
+  border-radius: 20px;
+  background: var(--color-bg-muted);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.provider-models { margin-top: 16px; }
 .models-header-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  gap: 12px;
+  margin-bottom: 10px;
 }
 .model-entries {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 .model-entry {
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: 9px;
   overflow: hidden;
-  transition: border-color 0.15s ease;
+  background: var(--color-bg-card);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .model-entry:hover { border-color: var(--color-border-hover); }
+.model-entry.open {
+  border-color: color-mix(in srgb, var(--color-primary) 40%, var(--color-border));
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+}
 .model-entry-head {
   display: flex;
   align-items: center;
@@ -4072,7 +4243,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition: background 0.15s ease;
 }
-.model-entry-head:hover { background: var(--color-bg-muted); }
+.model-entry-head:hover { background: color-mix(in srgb, var(--color-bg-muted) 60%, transparent); }
 .model-entry-name {
   flex: 1;
   font-size: 13px;
@@ -4085,19 +4256,21 @@ onBeforeUnmount(() => {
 .model-entry-badges { display: flex; gap: 4px; }
 .model-edit {
   padding: 14px;
-  background: var(--color-bg-muted);
+  background: color-mix(in srgb, var(--color-bg-muted) 55%, transparent);
   border-top: 1px solid var(--color-border);
 }
 .model-edit-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  gap: 12px;
 }
 .edit-field {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 5px;
+  min-width: 0;
 }
+.edit-field :deep(.modern-select) { width: 100%; }
 .edit-field label {
   font-size: 11px;
   color: var(--color-text-muted);
@@ -4128,15 +4301,22 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 12px;
+  padding: 10px;
   align-items: center;
+  border: 1px dashed var(--color-border);
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
 }
+.add-model-row:focus-within { border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-border)); }
+.add-model-row .text-input { min-width: 120px; }
 .fetched-panel {
   margin-top: 12px;
   padding: 14px;
-  background: var(--color-bg-muted);
+  background: var(--color-bg-card);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: 11px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 .fetched-list {
   display: flex;
@@ -4155,7 +4335,7 @@ onBeforeUnmount(() => {
   font-size: 13px;
   transition: background 0.15s ease;
 }
-.fetched-item:hover { background: var(--color-bg-card); }
+.fetched-item:hover { background: color-mix(in srgb, var(--color-bg-muted) 65%, transparent); }
 .fetched-item.added { opacity: 0.5; }
 .fetched-info {
   display: flex;
@@ -4179,37 +4359,50 @@ onBeforeUnmount(() => {
 .add-provider-form {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
   margin: 12px 28px 24px;
   padding: 18px;
-  background: var(--color-bg-muted);
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-bg-muted) 50%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 26%, var(--color-border));
+  border-radius: 12px;
 }
+.form-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+}
+.form-models { padding-top: 2px; }
 
 /* ── Auth ────────────────────────────────────────────────────────────── */
 .auth-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  padding: 13px 16px;
-  background: var(--color-bg-muted);
+  padding: 11px 14px;
+  background: var(--color-bg-card);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: 11px;
   margin: 10px 28px 0;
-  transition: all 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .auth-item:hover {
   border-color: var(--color-border-hover);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
 }
 .auth-info {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
 }
-.auth-info strong { font-size: 14px; color: var(--color-text); }
+.auth-info strong {
+  font-size: 14px;
+  font-weight: 620;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+}
 .auth-id {
   font-size: 11px;
   color: var(--color-text-muted);
@@ -4226,10 +4419,11 @@ onBeforeUnmount(() => {
   gap: 10px;
   margin: 16px 28px 24px;
   padding: 18px;
-  background: var(--color-bg-muted);
+  background: color-mix(in srgb, var(--color-bg-muted) 50%, transparent);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: 12px;
 }
+.auth-form :deep(.modern-select) { width: 100%; }
 
 /* ── Skills ──────────────────────────────────────────────────────────── */
 .skills-grid {
@@ -4450,7 +4644,10 @@ onBeforeUnmount(() => {
     max-width: none;
   }
   .input-row { flex-wrap: wrap; width: 100%; }
-  .model-edit-grid { grid-template-columns: 1fr; }
+  .model-edit-grid,
+  .field-grid { grid-template-columns: 1fr; }
+  .model-edit-grid .edit-field[style*="span 2"] { grid-column: auto !important; }
+  .add-model-row .text-input { width: 100%; flex: 1 1 100%; }
 }
 
 @media (max-width: 768px) {
