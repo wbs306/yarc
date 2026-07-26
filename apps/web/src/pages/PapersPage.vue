@@ -3397,7 +3397,7 @@ const showSearchPaperPopup = (paper: any) => {
                   >
                     <span
                       class="markdown-preview-viewport"
-                      :style="{ top: `${markdownScrollPercent}%`, height: `${markdownViewportPercent}%` }"
+                      :style="{ top: `${markdownScrollPercent}%`, height: `${markdownViewportPercent}%`, transform: `translateY(-${markdownScrollPercent}%)` }"
                     />
                     <button
                       v-for="heading in markdownPreviewHeadings"
@@ -3405,7 +3405,7 @@ const showSearchPaperPopup = (paper: any) => {
                       type="button"
                       class="markdown-preview-heading"
                       :class="`level-${heading.level}`"
-                      :style="{ top: `${heading.percent}%` }"
+                      :style="{ top: `${heading.percent}%`, transform: `translateY(-${heading.percent}%)` }"
                       :title="heading.title"
                       :aria-label="`跳转到标题：${heading.title}`"
                       @pointerdown.stop
@@ -4467,6 +4467,7 @@ const showSearchPaperPopup = (paper: any) => {
   cursor: ns-resize;
   touch-action: none;
   outline: none;
+  overflow: hidden;
 }
 .markdown-preview-rail:focus-visible { box-shadow: 0 0 0 2px var(--color-primary); }
 .markdown-preview-viewport {
@@ -4477,20 +4478,18 @@ const showSearchPaperPopup = (paper: any) => {
   border-radius: 999px;
   background: color-mix(in srgb, var(--color-primary) 48%, transparent);
   pointer-events: none;
-  transform: translateY(-50%);
 }
 .markdown-preview-heading {
   position: absolute;
   z-index: 1;
-  left: -3px;
-  width: calc(100% + 6px);
+  left: 0;
+  width: 100%;
   height: 3px;
   padding: 0;
   border: 0;
   border-radius: 999px;
   background: var(--color-text-muted);
   cursor: pointer;
-  transform: translateY(-50%);
 }
 .markdown-preview-heading.level-1 { height: 4px; background: var(--color-primary); }
 .markdown-preview-heading.level-2 { background: var(--color-text-secondary); }
