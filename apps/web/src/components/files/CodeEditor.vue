@@ -5,6 +5,7 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLi
 import * as Y from 'yjs'
 import { yCollab } from 'y-codemirror.next'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { search, searchKeymap, openSearchPanel } from '@codemirror/search'
 import { bracketMatching, foldGutter, indentOnInput, indentUnit, HighlightStyle, syntaxHighlighting, LanguageDescription } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { javascript } from '@codemirror/lang-javascript'
@@ -40,6 +41,12 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
   save: []
 }>()
+
+// Cursor position and selection size for the status bar. Doc-level counts are
+// derived from modelValue by the parent, so only view-local state lives here.
+const cursorLine = ref(1)
+const cursorColumn = ref(1)
+const selectedChars = ref(0)
 
 const host = ref<HTMLDivElement>()
 const minimap = ref<HTMLDivElement>()
@@ -206,6 +213,7 @@ function buildExtensions() {
     highlightActiveLine(),
     syntaxHighlighting(highlightStyle),
     EditorView.domEventHandlers({ keydown: handleSurroundSelectionKeydown }),
+    search({ top: true }),
     keymap.of([
       {
         key: 'Mod-s',
@@ -215,6 +223,7 @@ function buildExtensions() {
           return true
         },
       },
+      ...searchKeymap,
       ...defaultKeymap,
       ...historyKeymap,
       indentWithTab,
@@ -235,8 +244,17 @@ function buildExtensions() {
         if (value !== props.modelValue) emit('update:modelValue', value)
         scheduleMinimapDraw()
       }
+      if (update.docChanged || update.selectionSet) updateCursorStats(update.state)
     }),
   ]
+}
+
+function updateCursorStats(state: EditorState) {
+  const main = state.selection.main
+  const line = state.doc.lineAt(main.head)
+  cursorLine.value = line.number
+  cursorColumn.value = main.head - line.from + 1
+  selectedChars.value = state.selection.ranges.reduce((sum, r) => sum + (r.to - r.from), 0)
 }
 
 const cssVar = (name: string, fallback: string) => {
@@ -369,6 +387,7 @@ onMounted(() => {
   minimapResizeObserver = new ResizeObserver(scheduleMinimapDraw)
   if (minimap.value) minimapResizeObserver.observe(minimap.value)
   scheduleMinimapDraw()
+  updateCursorStats(view.value.state)
   // CodeMirror's dark flag only affects a few built-in defaults; keep it in sync.
   themeObserver = new MutationObserver(syncDark)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
@@ -441,6 +460,15 @@ watch(() => props.lineNumbers, (on) => {
   view.value?.dispatch({ effects: gutterConf.reconfigure(gutterExtension(on)) })
 })
 
+defineExpose({
+  openSearch: () => {
+    const v = view.value
+    if (!v) return
+    v.focus()
+    openSearchPanel(v)
+  },
+})
+
 onBeforeUnmount(() => {
   themeObserver?.disconnect()
   minimapResizeObserver?.disconnect()
@@ -453,19 +481,28 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="code-editor-shell">
-    <div ref="host" class="code-editor" />
-    <div ref="minimap" class="code-minimap" title="拖动或点击可快速跳转" @pointerdown="handleMinimapPointerDown">
-      <canvas ref="minimapCanvas" class="code-minimap-canvas" />
-      <div class="code-minimap-thumb" :style="minimapViewportStyle" />
+  <div class="code-editor-outer">
+    <div class="code-editor-shell">
+      <div ref="host" class="code-editor" />
+      <div ref="minimap" class="code-minimap" title="拖动或点击可快速跳转" @pointerdown="handleMinimapPointerDown">
+        <canvas ref="minimapCanvas" class="code-minimap-canvas" />
+        <div class="code-minimap-thumb" :style="minimapViewportStyle" />
+      </div>
     </div>
+    <slot name="statusbar" :line="cursorLine" :column="cursorColumn" :selected="selectedChars" />
   </div>
 </template>
 
 <style scoped>
+.code-editor-outer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
 .code-editor-shell {
   display: flex;
-  height: 100%;
+  flex: 1;
   min-height: 0;
   overflow: hidden;
 }
@@ -524,5 +561,88 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 900px) {
   .code-minimap { display: none; }
+}
+
+/* CodeMirror's search panel ships unstyled defaults; match the app shell. */
+.code-editor :deep(.cm-panels) {
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+}
+.code-editor :deep(.cm-panels-top) { border-bottom: 1px solid var(--color-border); }
+.code-editor :deep(.cm-panel.cm-search) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--color-bg-card);
+  font-family: inherit;
+  font-size: 12px;
+}
+.code-editor :deep(.cm-panel.cm-search br) { display: none; }
+.code-editor :deep(.cm-panel.cm-search label) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.code-editor :deep(.cm-panel.cm-search input[type='checkbox']) { margin: 0; accent-color: var(--color-primary); }
+.code-editor :deep(.cm-panel.cm-search input[type='text']) {
+  min-width: 150px;
+  padding: 5px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.code-editor :deep(.cm-panel.cm-search input[type='text']:focus) {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.16);
+}
+.code-editor :deep(.cm-panel.cm-search button:not([name='close'])) {
+  padding: 5px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: var(--color-bg);
+  background-image: none;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.code-editor :deep(.cm-panel.cm-search button:not([name='close']):hover) {
+  border-color: var(--color-primary);
+  background: rgba(var(--color-primary-rgb), 0.08);
+  color: var(--color-primary);
+}
+.code-editor :deep(.cm-panel.cm-search [name='close']) {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.code-editor :deep(.cm-panel.cm-search [name='close']:hover) { color: var(--color-error); }
+.code-editor :deep(.cm-searchMatch) {
+  background: rgba(var(--color-primary-rgb), 0.22);
+  border-radius: 3px;
+}
+.code-editor :deep(.cm-searchMatch-selected) {
+  background: var(--color-warning);
+  color: #18181b;
 }
 </style>

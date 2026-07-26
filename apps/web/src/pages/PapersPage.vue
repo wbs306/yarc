@@ -292,6 +292,122 @@ watch([markdownPreview, workspaceContent], () => {
   void nextTick(updateMarkdownPreviewScroll)
 })
 
+// ── Editor / preview status bar ──
+const workspaceDocStats = computed(() => {
+  const text = workspaceContent.value
+  // CJK has no spaces, so count CJK codepoints individually and latin runs as words.
+  const cjk = text.match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/g)?.length || 0
+  const words = text.replace(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/g, ' ').match(/[A-Za-z0-9_'\u2019-]+/g)?.length || 0
+  return {
+    chars: [...text].length,
+    words: cjk + words,
+    lines: text ? text.split(/\r?\n/).length : 0,
+  }
+})
+
+// ── Markdown preview find (Ctrl/Cmd+F) ──
+const mdSearchOpen = ref(false)
+const mdSearchQuery = ref('')
+const mdSearchInput = ref<HTMLInputElement | null>(null)
+const mdSearchIndex = ref(0)
+const mdSearchTotal = ref(0)
+
+const clearMarkdownSearchMarks = () => {
+  const root = markdownPreviewRef.value
+  if (!root) return
+  for (const mark of Array.from(root.querySelectorAll('mark[data-md-find]'))) {
+    const parent = mark.parentNode
+    if (!parent) continue
+    parent.replaceChild(document.createTextNode(mark.textContent || ''), mark)
+    parent.normalize()
+  }
+}
+
+const applyMarkdownSearchMarks = () => {
+  const root = markdownPreviewRef.value
+  clearMarkdownSearchMarks()
+  mdSearchTotal.value = 0
+  if (!root) return
+
+  const needle = mdSearchQuery.value.toLowerCase()
+  if (!needle) return
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const textNodes: Text[] = []
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) textNodes.push(node as Text)
+
+  let count = 0
+  for (const node of textNodes) {
+    const text = node.nodeValue || ''
+    const lower = text.toLowerCase()
+    if (!lower.includes(needle)) continue
+
+    const frag = document.createDocumentFragment()
+    let cursor = 0
+    for (let at = lower.indexOf(needle); at !== -1; at = lower.indexOf(needle, cursor)) {
+      if (at > cursor) frag.appendChild(document.createTextNode(text.slice(cursor, at)))
+      const mark = document.createElement('mark')
+      mark.dataset.mdFind = String(count++)
+      mark.textContent = text.slice(at, at + needle.length)
+      frag.appendChild(mark)
+      cursor = at + needle.length
+    }
+    if (cursor < text.length) frag.appendChild(document.createTextNode(text.slice(cursor)))
+    node.parentNode?.replaceChild(frag, node)
+  }
+
+  mdSearchTotal.value = count
+  mdSearchIndex.value = count ? Math.min(mdSearchIndex.value, count - 1) : 0
+  focusMarkdownSearchMatch()
+}
+
+const focusMarkdownSearchMatch = () => {
+  const root = markdownPreviewRef.value
+  if (!root) return
+  const marks = root.querySelectorAll<HTMLElement>('mark[data-md-find]')
+  marks.forEach((mark, i) => mark.classList.toggle('current', i === mdSearchIndex.value))
+  marks[mdSearchIndex.value]?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+
+const stepMarkdownSearch = (delta: number) => {
+  if (!mdSearchTotal.value) return
+  mdSearchIndex.value = (mdSearchIndex.value + delta + mdSearchTotal.value) % mdSearchTotal.value
+  focusMarkdownSearchMatch()
+}
+
+const closeMarkdownSearch = () => {
+  mdSearchOpen.value = false
+  mdSearchQuery.value = ''
+  mdSearchIndex.value = 0
+  clearMarkdownSearchMarks()
+  mdSearchTotal.value = 0
+}
+
+const openMarkdownSearch = () => {
+  mdSearchOpen.value = true
+  void nextTick(() => {
+    mdSearchInput.value?.focus()
+    mdSearchInput.value?.select()
+  })
+}
+
+watch(mdSearchQuery, () => {
+  mdSearchIndex.value = 0
+  applyMarkdownSearchMarks()
+})
+
+// Re-mark after the rendered HTML is replaced, otherwise old marks are lost silently.
+watch([workspaceContent, markdownPreview], () => {
+  if (!mdSearchOpen.value || !mdSearchQuery.value) return
+  void nextTick(applyMarkdownSearchMarks)
+})
+
+watch([selectedWorkspacePath, markdownPreview], () => {
+  if (mdSearchOpen.value) closeMarkdownSearch()
+})
+
+const workspaceEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
+
 watch(() => currentLiveClient.value?.content.value, (content) => {
   if (currentLiveClient.value && content !== undefined) workspaceContent.value = content
 })
@@ -1535,7 +1651,21 @@ const onResize = () => {
 const isSaveShortcut = (event: KeyboardEvent) =>
   (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's'
 
+const isFindShortcut = (event: KeyboardEvent) =>
+  (event.key === 'f' || event.key === 'F') && (event.ctrlKey || event.metaKey) && !event.altKey
+
 const onDocumentKeydown = (event: KeyboardEvent) => {
+  if (isFindShortcut(event)) {
+    if (hasPaper.value || sidebarMode.value !== 'files' || !selectedWorkspaceFile.value?.editable) return
+    // Inside CodeMirror the bundled search keymap already owns Ctrl+F.
+    if ((event.target as HTMLElement | null)?.closest('.cm-editor')) return
+
+    event.preventDefault()
+    if (workspaceIsMarkdown.value && markdownPreview.value) openMarkdownSearch()
+    else workspaceEditorRef.value?.openSearch()
+    return
+  }
+
   if (!isSaveShortcut(event)) return
   if (hasPaper.value || sidebarMode.value !== 'files' || !selectedWorkspaceFile.value || !workspaceCanEdit.value) return
 
@@ -3372,6 +3502,22 @@ const showSearchPaperPopup = (paper: any) => {
             <div v-else-if="workspaceContentLoading" class="workspace-empty compact">正在读取文件…</div>
 
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
+              <div v-if="mdSearchOpen && workspaceIsMarkdown && markdownPreview" class="md-find-bar">
+                <input
+                  ref="mdSearchInput"
+                  v-model="mdSearchQuery"
+                  class="md-find-input"
+                  type="text"
+                  placeholder="在预览中查找"
+                  aria-label="在 Markdown 预览中查找"
+                  @keydown.enter.prevent="stepMarkdownSearch(($event as KeyboardEvent).shiftKey ? -1 : 1)"
+                  @keydown.esc.prevent="closeMarkdownSearch"
+                />
+                <span class="md-find-count">{{ mdSearchTotal ? `${mdSearchIndex + 1}/${mdSearchTotal}` : (mdSearchQuery ? '无结果' : '') }}</span>
+                <button class="md-find-btn" title="上一个 (Shift+Enter)" :disabled="!mdSearchTotal" @click="stepMarkdownSearch(-1)">↑</button>
+                <button class="md-find-btn" title="下一个 (Enter)" :disabled="!mdSearchTotal" @click="stepMarkdownSearch(1)">↓</button>
+                <button class="md-find-btn close" title="关闭 (Esc)" @click="closeMarkdownSearch">×</button>
+              </div>
               <div v-show="workspaceIsMarkdown && markdownPreview" class="workspace-md-preview-shell">
                 <div ref="markdownPreviewRef" class="workspace-md-preview" @scroll="updateMarkdownPreviewScroll">
                   <MarkdownContent
@@ -3420,6 +3566,7 @@ const showSearchPaperPopup = (paper: any) => {
                 <button @click="resolveCurrentLiveConflict('use-disk')">使用磁盘版本</button>
               </div>
               <CodeEditor
+                ref="workspaceEditorRef"
                 :key="selectedWorkspacePath"
                 v-show="!(workspaceIsMarkdown && markdownPreview)"
                 v-model="workspaceContent"
@@ -3432,7 +3579,27 @@ const showSearchPaperPopup = (paper: any) => {
                 :collab-y-text="currentLiveClient?.ytext || null"
                 class="workspace-code-editor"
                 @save="saveWorkspaceFile"
-              />
+              >
+                <template #statusbar="{ line, column, selected }">
+                  <footer class="workspace-status-bar">
+                    <span>{{ workspaceDocStats.words }} 词</span>
+                    <span>{{ workspaceDocStats.chars }} 字符</span>
+                    <span>{{ workspaceDocStats.lines }} 行</span>
+                    <span class="status-spacer" />
+                    <span v-if="selected">已选 {{ selected }}</span>
+                    <span>行 {{ line }}，列 {{ column }}</span>
+                    <span class="status-hint">Ctrl+F 查找</span>
+                  </footer>
+                </template>
+              </CodeEditor>
+              <footer v-if="workspaceIsMarkdown && markdownPreview" class="workspace-status-bar">
+                <span>{{ workspaceDocStats.words }} 词</span>
+                <span>{{ workspaceDocStats.chars }} 字符</span>
+                <span>{{ workspaceDocStats.lines }} 行</span>
+                <span class="status-spacer" />
+                <span>{{ markdownPreviewHeadings.length }} 个标题</span>
+                <span class="status-hint">Ctrl+F 查找</span>
+              </footer>
             </div>
 
             <div v-else-if="workspaceIsImage" class="workspace-preview-panel">
@@ -4374,6 +4541,74 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-file-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; color: var(--color-text-muted); font-size: 12px; }
 .readonly-pill { color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 999px; padding: 2px 8px; }
 .workspace-text-editor-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
+.workspace-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+  padding: 5px 14px;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.workspace-status-bar .status-spacer { flex: 1; }
+.workspace-status-bar .status-hint { opacity: 0.7; }
+.md-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+}
+.md-find-input {
+  min-width: 0;
+  flex: 1;
+  max-width: 280px;
+  padding: 5px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.md-find-input:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.16);
+}
+.md-find-count {
+  min-width: 54px;
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.md-find-btn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.md-find-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  background: rgba(var(--color-primary-rgb), 0.08);
+  color: var(--color-primary);
+}
+.md-find-btn:disabled { opacity: 0.45; cursor: default; }
+.md-find-btn.close { margin-left: auto; font-size: 16px; }
+.md-find-btn.close:hover { border-color: var(--color-error); background: rgba(239, 68, 68, 0.08); color: var(--color-error); }
 .dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-border-hover); flex-shrink: 0; }
 .dirty-dot.active { background: var(--color-warning); }
 .dirty-dot.conflict { background: var(--color-error); }
@@ -4450,6 +4685,15 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-md-preview :deep(table) { border-collapse: collapse; margin-bottom: 12px; }
 .workspace-md-preview :deep(th), .workspace-md-preview :deep(td) { border: 1px solid var(--color-border); padding: 6px 12px; }
 .workspace-md-preview :deep(th) { background: var(--color-bg-muted); }
+.workspace-md-preview :deep(mark[data-md-find]) {
+  border-radius: 3px;
+  background: rgba(var(--color-primary-rgb), 0.24);
+  color: inherit;
+}
+.workspace-md-preview :deep(mark[data-md-find].current) {
+  background: var(--color-warning);
+  color: #18181b;
+}
 .markdown-preview-strip {
   width: 34px;
   flex: 0 0 34px;
