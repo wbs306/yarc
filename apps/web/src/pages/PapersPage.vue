@@ -1653,16 +1653,31 @@ const isSaveShortcut = (event: KeyboardEvent) =>
 
 const isFindShortcut = (event: KeyboardEvent) =>
   (event.key === 'f' || event.key === 'F') && (event.ctrlKey || event.metaKey) && !event.altKey
+const isReplaceShortcut = (event: KeyboardEvent) =>
+  (event.key === 'h' || event.key === 'H') && (event.ctrlKey || event.metaKey) && !event.altKey
 
 const onDocumentKeydown = (event: KeyboardEvent) => {
-  if (isFindShortcut(event)) {
+  if (isFindShortcut(event) || isReplaceShortcut(event)) {
     if (hasPaper.value || sidebarMode.value !== 'files' || !selectedWorkspaceFile.value?.editable) return
-    // Inside CodeMirror the bundled search keymap already owns Ctrl+F.
+    // Inside CodeMirror the editor keymap already owns Mod-f / Mod-h.
     if ((event.target as HTMLElement | null)?.closest('.cm-editor')) return
 
+    const wantsReplace = isReplaceShortcut(event)
     event.preventDefault()
-    if (workspaceIsMarkdown.value && markdownPreview.value) openMarkdownSearch()
-    else workspaceEditorRef.value?.openSearch()
+    if (workspaceIsMarkdown.value && markdownPreview.value) {
+      // The rendered preview cannot replace; Ctrl+H switches back to the editor.
+      if (wantsReplace) {
+        closeMarkdownSearch()
+        markdownPreview.value = false
+        void nextTick(() => workspaceEditorRef.value?.openReplace())
+      } else {
+        openMarkdownSearch()
+      }
+    } else if (wantsReplace && workspaceCanEdit.value) {
+      workspaceEditorRef.value?.openReplace()
+    } else {
+      workspaceEditorRef.value?.openSearch()
+    }
     return
   }
 
@@ -3595,7 +3610,7 @@ const showSearchPaperPopup = (paper: any) => {
                     <span class="status-spacer" />
                     <span v-if="selected" class="status-selection">已选 {{ selectedWords }} 词 · {{ selected }} 字符</span>
                     <span>行 {{ line }}，列 {{ column }}</span>
-                    <span class="status-hint">Ctrl+F 查找</span>
+                    <span class="status-hint">Ctrl+F 查找 · Ctrl+H 替换</span>
                   </footer>
                 </template>
               </CodeEditor>
@@ -4605,12 +4620,12 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .md-find-input {
   min-width: 0;
-  width: 200px;
-  padding: 4px 6px;
+  width: 210px;
+  padding: 5px 6px;
   border: none;
   background: transparent;
   color: var(--color-text);
-  font-size: 12.5px;
+  font-size: 13.5px;
   outline: none;
 }
 .md-find-input::placeholder { color: var(--color-text-muted); }

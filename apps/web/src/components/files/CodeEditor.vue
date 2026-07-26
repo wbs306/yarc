@@ -5,7 +5,12 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLi
 import * as Y from 'yjs'
 import { yCollab } from 'y-codemirror.next'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { search, searchKeymap, openSearchPanel } from '@codemirror/search'
+import {
+  search, searchKeymap, openSearchPanel, closeSearchPanel,
+  findNext, findPrevious, replaceNext, replaceAll,
+  getSearchQuery, setSearchQuery, SearchQuery,
+} from '@codemirror/search'
+import type { Panel } from '@codemirror/view'
 import { bracketMatching, foldGutter, indentOnInput, indentUnit, HighlightStyle, syntaxHighlighting, LanguageDescription } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { javascript } from '@codemirror/lang-javascript'
@@ -203,6 +208,197 @@ function collabExtension() {
   return props.collabYText ? yCollab(props.collabYText, null) : []
 }
 
+// ── Custom find/replace panel ──
+// The stock CodeMirror panel crams find+replace+3 checkboxes into one strip.
+// This compact panel shows search only; Mod-h (or the toggle icon) reveals the
+// replace row. Buttons are icon-only with tooltips.
+let panelWantsReplace = false
+
+const svgIcon = (paths: string, size = 15) => {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  el.setAttribute('viewBox', '0 0 24 24')
+  el.setAttribute('width', String(size))
+  el.setAttribute('height', String(size))
+  el.setAttribute('fill', 'none')
+  el.setAttribute('stroke', 'currentColor')
+  el.setAttribute('stroke-width', '2')
+  el.setAttribute('stroke-linecap', 'round')
+  el.setAttribute('stroke-linejoin', 'round')
+  el.innerHTML = paths
+  return el
+}
+
+const ICONS = {
+  search: '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+  prev: '<polyline points="18 15 12 9 6 15"/>',
+  next: '<polyline points="6 9 12 15 18 9"/>',
+  close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  swap: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+  replaceOne: '<path d="M11 4H4v7"/><path d="M4 4l7 7"/><rect x="13" y="13" width="8" height="8" rx="1"/>',
+  replaceAll: '<rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/><path d="M11 11l2 2"/>',
+}
+
+function createFindPanel(view: EditorView): Panel {
+  const query = getSearchQuery(view.state)
+
+  const dom = document.createElement('div')
+  dom.className = 'cmx-find'
+
+  const commit = () => {
+    const next = new SearchQuery({
+      search: searchInput.value,
+      replace: replaceInput.value,
+      caseSensitive: caseBtn.classList.contains('on'),
+      wholeWord: wordBtn.classList.contains('on'),
+    })
+    if (!next.eq(getSearchQuery(view.state))) {
+      view.dispatch({ effects: setSearchQuery.of(next) })
+    }
+  }
+
+  const iconBtn = (icon: keyof typeof ICONS, title: string, onclick: () => void, extraClass = '') => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = `cmx-find-btn ${extraClass}`.trim()
+    btn.title = title
+    btn.setAttribute('aria-label', title)
+    btn.appendChild(svgIcon(ICONS[icon]))
+    btn.onclick = onclick
+    return btn
+  }
+
+  const textToggle = (label: string, title: string, initial: boolean) => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'cmx-find-toggle'
+    btn.textContent = label
+    btn.title = title
+    btn.setAttribute('aria-label', title)
+    btn.classList.toggle('on', initial)
+    btn.onclick = () => {
+      btn.classList.toggle('on')
+      commit()
+    }
+    return btn
+  }
+
+  // ── search row ──
+  const searchRow = document.createElement('div')
+  searchRow.className = 'cmx-find-row'
+
+  const searchWrap = document.createElement('div')
+  searchWrap.className = 'cmx-find-field'
+  searchWrap.appendChild(svgIcon(ICONS.search, 14))
+
+  const searchInput = document.createElement('input')
+  searchInput.type = 'text'
+  searchInput.placeholder = '查找'
+  searchInput.setAttribute('aria-label', '查找')
+  searchInput.setAttribute('main-field', 'true')
+  searchInput.value = query.search
+  searchInput.onkeyup = commit
+  searchInput.onchange = commit
+  searchWrap.appendChild(searchInput)
+
+  const caseBtn = textToggle('Aa', '区分大小写', query.caseSensitive)
+  const wordBtn = textToggle('W', '全词匹配', query.wholeWord)
+  searchWrap.appendChild(caseBtn)
+  searchWrap.appendChild(wordBtn)
+  searchRow.appendChild(searchWrap)
+
+  searchRow.appendChild(iconBtn('prev', '上一个 (Shift+Enter)', () => { findPrevious(view) }))
+  searchRow.appendChild(iconBtn('next', '下一个 (Enter)', () => { findNext(view) }))
+
+  const replaceToggleBtn = iconBtn('swap', '切换替换 (Ctrl+H)', () => setReplaceVisible(!replaceVisible))
+  if (!view.state.readOnly) searchRow.appendChild(replaceToggleBtn)
+
+  searchRow.appendChild(iconBtn('close', '关闭 (Esc)', () => { closeSearchPanel(view) }, 'cmx-find-close'))
+
+  // ── replace row ──
+  const replaceRow = document.createElement('div')
+  replaceRow.className = 'cmx-find-row cmx-find-replace-row'
+
+  const replaceWrap = document.createElement('div')
+  replaceWrap.className = 'cmx-find-field'
+  replaceWrap.appendChild(svgIcon(ICONS.swap, 14))
+
+  const replaceInput = document.createElement('input')
+  replaceInput.type = 'text'
+  replaceInput.placeholder = '替换为'
+  replaceInput.setAttribute('aria-label', '替换为')
+  replaceInput.value = query.replace
+  replaceInput.onkeyup = commit
+  replaceInput.onchange = commit
+  replaceWrap.appendChild(replaceInput)
+  replaceRow.appendChild(replaceWrap)
+
+  replaceRow.appendChild(iconBtn('replaceOne', '替换当前 (Enter)', () => { replaceNext(view) }))
+  replaceRow.appendChild(iconBtn('replaceAll', '全部替换', () => { replaceAll(view) }))
+
+  let replaceVisible = false
+  const setReplaceVisible = (on: boolean) => {
+    replaceVisible = on && !view.state.readOnly
+    panelWantsReplace = replaceVisible
+    replaceRow.style.display = replaceVisible ? '' : 'none'
+    replaceToggleBtn.classList.toggle('on', replaceVisible)
+    if (replaceVisible) replaceInput.focus()
+  }
+  setReplaceVisible(panelWantsReplace)
+
+  dom.appendChild(searchRow)
+  dom.appendChild(replaceRow)
+
+  dom.onkeydown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      closeSearchPanel(view)
+      view.focus()
+    } else if (e.key === 'Enter' && e.target === searchInput) {
+      e.preventDefault()
+      ;(e.shiftKey ? findPrevious : findNext)(view)
+    } else if (e.key === 'Enter' && e.target === replaceInput) {
+      e.preventDefault()
+      replaceNext(view)
+    } else if ((e.key === 'h' || e.key === 'H') && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      setReplaceVisible(!replaceVisible)
+    }
+  }
+
+  return {
+    dom,
+    top: true,
+    mount: () => {
+      searchInput.focus()
+      searchInput.select()
+    },
+    update: (update) => {
+      for (const tr of update.transactions) {
+        for (const effect of tr.effects) {
+          if (effect.is(setSearchQuery)) {
+            const q = effect.value as SearchQuery
+            if (q.search !== searchInput.value) searchInput.value = q.search
+            if (q.replace !== replaceInput.value) replaceInput.value = q.replace
+            caseBtn.classList.toggle('on', q.caseSensitive)
+            wordBtn.classList.toggle('on', q.wholeWord)
+          }
+        }
+      }
+    },
+  }
+}
+
+function openFindPanel(withReplace: boolean) {
+  const v = view.value
+  if (!v) return
+  panelWantsReplace = withReplace && !props.readonly
+  // Re-open to rebuild when toggling modes; openSearchPanel is a no-op refocus
+  // if the panel already exists, so close it first when the mode differs.
+  closeSearchPanel(v)
+  v.focus()
+  openSearchPanel(v)
+}
+
 function buildExtensions() {
   return [
     gutterConf.of(gutterExtension(props.lineNumbers)),
@@ -214,13 +410,21 @@ function buildExtensions() {
     highlightActiveLine(),
     syntaxHighlighting(highlightStyle),
     EditorView.domEventHandlers({ keydown: handleSurroundSelectionKeydown }),
-    search({ top: true }),
+    search({ top: true, createPanel: createFindPanel }),
     keymap.of([
       {
         key: 'Mod-s',
         preventDefault: true,
         run: () => {
           emit('save')
+          return true
+        },
+      },
+      {
+        key: 'Mod-h',
+        preventDefault: true,
+        run: () => {
+          openFindPanel(true)
           return true
         },
       },
@@ -479,12 +683,8 @@ watch(() => props.lineNumbers, (on) => {
 })
 
 defineExpose({
-  openSearch: () => {
-    const v = view.value
-    if (!v) return
-    v.focus()
-    openSearchPanel(v)
-  },
+  openSearch: () => openFindPanel(false),
+  openReplace: () => openFindPanel(true),
 })
 
 onBeforeUnmount(() => {
@@ -581,96 +781,108 @@ onBeforeUnmount(() => {
   .code-minimap { display: none; }
 }
 
-/* CodeMirror's search panel ships unstyled defaults; match the app shell. */
+/* Custom find/replace panel (createFindPanel). */
 .code-editor :deep(.cm-panels) {
   border: none;
   background: transparent;
   color: var(--color-text);
 }
 .code-editor :deep(.cm-panels-top) { border-bottom: none; }
-.code-editor :deep(.cm-panel.cm-search) {
-  position: relative;
+.code-editor :deep(.cmx-find) {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
-  margin: 8px 10px;
-  padding: 7px 34px 7px 12px;
+  width: fit-content;
+  max-width: calc(100% - 20px);
+  margin: 10px 10px 4px auto;
+  padding: 7px 8px;
   border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
-  border-radius: 14px;
-  background: rgba(var(--color-bg-card-rgb), 0.88);
+  border-radius: 12px;
+  background: rgba(var(--color-bg-card-rgb), 0.9);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: 0 6px 24px rgba(15, 23, 42, 0.14), 0 1px 3px rgba(15, 23, 42, 0.08);
-  font-family: inherit;
-  font-size: 12px;
 }
-.code-editor :deep(.cm-panel.cm-search br) { display: none; }
-.code-editor :deep(.cm-panel.cm-search label) {
-  display: inline-flex;
+.code-editor :deep(.cmx-find-row) {
+  display: flex;
   align-items: center;
   gap: 4px;
-  margin: 0;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  white-space: nowrap;
 }
-.code-editor :deep(.cm-panel.cm-search input[type='checkbox']) { margin: 0; accent-color: var(--color-primary); }
-.code-editor :deep(.cm-panel.cm-search input[type='text']) {
-  min-width: 150px;
-  padding: 5px 10px;
+.code-editor :deep(.cmx-find-field) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  padding: 0 8px;
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: 9px;
   background: rgba(var(--color-bg-rgb), 0.6);
-  color: var(--color-text);
-  font-family: inherit;
-  font-size: 12px;
-  outline: none;
+  color: var(--color-text-muted);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.code-editor :deep(.cm-panel.cm-search input[type='text']:focus) {
+.code-editor :deep(.cmx-find-field:focus-within) {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.16);
 }
-.code-editor :deep(.cm-panel.cm-search button:not([name='close'])) {
-  padding: 4px 11px;
+.code-editor :deep(.cmx-find-field svg) { flex-shrink: 0; }
+.code-editor :deep(.cmx-find-field input) {
+  min-width: 0;
+  width: 210px;
+  padding: 7px 0;
   border: none;
-  border-radius: 999px;
-  background: var(--color-bg-muted);
-  background-image: none;
-  color: var(--color-text-secondary);
+  background: transparent;
+  color: var(--color-text);
   font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  transition: color 0.15s ease, background 0.15s ease;
+  font-size: 13.5px;
+  outline: none;
 }
-.code-editor :deep(.cm-panel.cm-search button:not([name='close']):hover) {
-  background: rgba(var(--color-primary-rgb), 0.12);
-  color: var(--color-primary);
-}
-.code-editor :deep(.cm-panel.cm-search [name='close']) {
-  position: absolute;
-  top: 50%;
-  right: 10px;
-  transform: translateY(-50%);
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
+.code-editor :deep(.cmx-find-field input::placeholder) { color: var(--color-text-muted); }
+.code-editor :deep(.cmx-find-toggle) {
+  flex-shrink: 0;
+  padding: 2px 6px;
   border: none;
-  border-radius: 999px;
+  border-radius: 6px;
   background: transparent;
   color: var(--color-text-muted);
-  font-size: 15px;
-  line-height: 1;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
   cursor: pointer;
   transition: color 0.15s ease, background 0.15s ease;
 }
-.code-editor :deep(.cm-panel.cm-search [name='close']:hover) {
+.code-editor :deep(.cmx-find-toggle:hover) { color: var(--color-text); background: var(--color-bg-muted); }
+.code-editor :deep(.cmx-find-toggle.on) {
+  background: rgba(var(--color-primary-rgb), 0.14);
+  color: var(--color-primary);
+}
+.code-editor :deep(.cmx-find-btn) {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.code-editor :deep(.cmx-find-btn:hover) {
+  background: rgba(var(--color-primary-rgb), 0.1);
+  color: var(--color-primary);
+}
+.code-editor :deep(.cmx-find-btn.on) {
+  background: rgba(var(--color-primary-rgb), 0.14);
+  color: var(--color-primary);
+}
+.code-editor :deep(.cmx-find-btn.cmx-find-close:hover) {
   background: rgba(239, 68, 68, 0.1);
   color: var(--color-error);
 }
+.code-editor :deep(.cmx-find-replace-row .cmx-find-field input) { width: 170px; }
 .code-editor :deep(.cm-searchMatch) {
   background: rgba(var(--color-primary-rgb), 0.22);
   border-radius: 3px;
