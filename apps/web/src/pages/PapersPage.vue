@@ -3518,27 +3518,31 @@ const showSearchPaperPopup = (paper: any) => {
 
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
               <div v-if="mdSearchOpen && workspaceIsMarkdown && markdownPreview" class="md-find-bar">
-                <span class="md-find-icon" aria-hidden="true">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <div class="md-find-field">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <circle cx="11" cy="11" r="7" />
                     <line x1="21" y1="21" x2="16.65" y2="16.65" />
                   </svg>
-                </span>
-                <input
-                  ref="mdSearchInput"
-                  v-model="mdSearchQuery"
-                  class="md-find-input"
-                  type="text"
-                  placeholder="在预览中查找"
-                  aria-label="在 Markdown 预览中查找"
-                  @keydown.enter.prevent="stepMarkdownSearch(($event as KeyboardEvent).shiftKey ? -1 : 1)"
-                  @keydown.esc.prevent="closeMarkdownSearch"
-                />
-                <span class="md-find-count" :class="{ 'has-results': mdSearchTotal }">{{ mdSearchTotal ? `${mdSearchIndex + 1}/${mdSearchTotal}` : (mdSearchQuery ? '无结果' : '') }}</span>
-                <span class="md-find-divider" aria-hidden="true" />
-                <button class="md-find-btn" title="上一个 (Shift+Enter)" :disabled="!mdSearchTotal" @click="stepMarkdownSearch(-1)">↑</button>
-                <button class="md-find-btn" title="下一个 (Enter)" :disabled="!mdSearchTotal" @click="stepMarkdownSearch(1)">↓</button>
-                <button class="md-find-btn close" title="关闭 (Esc)" @click="closeMarkdownSearch">×</button>
+                  <input
+                    ref="mdSearchInput"
+                    v-model="mdSearchQuery"
+                    type="text"
+                    placeholder="在预览中查找"
+                    aria-label="在 Markdown 预览中查找"
+                    @keydown.enter.prevent="stepMarkdownSearch(($event as KeyboardEvent).shiftKey ? -1 : 1)"
+                    @keydown.esc.prevent="closeMarkdownSearch"
+                  />
+                  <span class="md-find-count" :class="{ 'has-results': mdSearchTotal }">{{ mdSearchTotal ? `${mdSearchIndex + 1}/${mdSearchTotal}` : (mdSearchQuery ? '无结果' : '') }}</span>
+                </div>
+                <button class="md-find-btn" title="上一个 (Shift+Enter)" :disabled="!mdSearchTotal" @click="stepMarkdownSearch(-1)">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15" /></svg>
+                </button>
+                <button class="md-find-btn" title="下一个 (Enter)" :disabled="!mdSearchTotal" @click="stepMarkdownSearch(1)">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+                </button>
+                <button class="md-find-btn close" title="关闭 (Esc)" @click="closeMarkdownSearch">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                </button>
               </div>
               <div v-show="workspaceIsMarkdown && markdownPreview" class="workspace-md-preview-shell">
                 <div ref="markdownPreviewRef" class="workspace-md-preview" @scroll="updateMarkdownPreviewScroll">
@@ -4594,16 +4598,17 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .md-find-bar {
   position: absolute;
-  top: 10px;
-  right: 46px;
+  top: 0;
+  right: 44px;
   z-index: 8;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 5px 6px 5px 10px;
+  margin: 10px 0 4px;
+  padding: 7px 8px;
   border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
-  border-radius: 999px;
-  background: rgba(var(--color-bg-card-rgb), 0.88);
+  border-radius: 12px;
+  background: rgba(var(--color-bg-card-rgb), 0.9);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: 0 6px 24px rgba(15, 23, 42, 0.14), 0 1px 3px rgba(15, 23, 42, 0.08);
@@ -4613,22 +4618,36 @@ const showSearchPaperPopup = (paper: any) => {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.md-find-icon {
-  display: inline-flex;
+.md-find-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  background: rgba(var(--color-bg-rgb), 0.6);
   color: var(--color-text-muted);
-  flex-shrink: 0;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.md-find-input {
+.md-find-field:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.16);
+}
+.md-find-field svg { flex-shrink: 0; }
+.md-find-field input {
   min-width: 0;
   width: 210px;
-  padding: 5px 6px;
+  padding: 7px 0;
   border: none;
   background: transparent;
   color: var(--color-text);
+  font-family: inherit;
   font-size: 13.5px;
   outline: none;
 }
-.md-find-input::placeholder { color: var(--color-text-muted); }
+.md-find-field input::placeholder { color: var(--color-text-muted); }
 .md-find-count {
   flex-shrink: 0;
   padding: 1px 8px;
@@ -4644,26 +4663,17 @@ const showSearchPaperPopup = (paper: any) => {
   background: rgba(var(--color-primary-rgb), 0.12);
   color: var(--color-primary);
 }
-.md-find-divider {
-  width: 1px;
-  height: 16px;
-  margin: 0 2px;
-  background: var(--color-border);
-  flex-shrink: 0;
-}
 .md-find-btn {
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
   border: none;
-  border-radius: 999px;
+  border-radius: 8px;
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 13px;
-  line-height: 1;
   cursor: pointer;
-  flex-shrink: 0;
   transition: color 0.15s ease, background 0.15s ease;
 }
 .md-find-btn:hover:not(:disabled) {
@@ -4671,7 +4681,6 @@ const showSearchPaperPopup = (paper: any) => {
   color: var(--color-primary);
 }
 .md-find-btn:disabled { opacity: 0.4; cursor: default; }
-.md-find-btn.close { font-size: 15px; }
 .md-find-btn.close:hover { background: rgba(239, 68, 68, 0.1); color: var(--color-error); }
 .dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-border-hover); flex-shrink: 0; }
 .dirty-dot.active { background: var(--color-warning); }
