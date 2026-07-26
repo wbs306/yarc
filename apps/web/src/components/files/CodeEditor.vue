@@ -782,10 +782,18 @@ onBeforeUnmount(() => {
 }
 
 /* Custom find/replace panel (createFindPanel). */
+/* Overlay the editor instead of participating in its flex flow, so opening
+   the panel does not push the document content down. */
 .code-editor :deep(.cm-panels) {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
   border: none;
   background: transparent;
   color: var(--color-text);
+  pointer-events: none;
 }
 .code-editor :deep(.cm-panels-top) { border-bottom: none; }
 .code-editor :deep(.cmx-find) {
@@ -796,6 +804,8 @@ onBeforeUnmount(() => {
   max-width: calc(100% - 20px);
   margin: 10px 10px 4px auto;
   padding: 7px 8px;
+  pointer-events: auto;
+  animation: cmx-find-in 0.16s ease;
   border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
   border-radius: 12px;
   background: rgba(var(--color-bg-card-rgb), 0.9);
@@ -883,6 +893,10 @@ onBeforeUnmount(() => {
   color: var(--color-error);
 }
 .code-editor :deep(.cmx-find-replace-row .cmx-find-field input) { width: 170px; }
+@keyframes cmx-find-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .code-editor :deep(.cm-searchMatch) {
   background: rgba(var(--color-primary-rgb), 0.22);
   border-radius: 3px;
