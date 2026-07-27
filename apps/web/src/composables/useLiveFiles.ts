@@ -1,5 +1,6 @@
 import { ref, type Ref } from 'vue'
 import * as Y from 'yjs'
+import { getOfflineWorkspaceFile, putOfflineWorkspaceFile } from '@/lib/offline-workspace-cache'
 
 export interface LiveFileStatus {
   path: string
@@ -20,6 +21,8 @@ export interface LiveFileClient {
   modified: Ref<string>
   connected: Ref<boolean>
   ready: Ref<boolean>
+  offline: Ref<boolean>
+  cachedAt: Ref<number | null>
   dirty: Ref<boolean>
   saving: Ref<boolean>
   conflict: Ref<boolean>
@@ -60,23 +63,37 @@ export function useLiveFiles() {
     const existing = clients.get(path)
     if (existing) return existing
 
+    const cachedSnapshot = await getOfflineWorkspaceFile(path)
+    if (navigator.onLine === false && !cachedSnapshot) {
+      throw new Error('当前处于离线状态，且没有此文件的本地缓存')
+    }
+
     const ydoc = new Y.Doc()
     const ytext = ydoc.getText('content')
     const content = ref('')
-    const language = ref('plaintext')
-    const modified = ref('')
+    const language = ref(cachedSnapshot?.language || 'plaintext')
+    const modified = ref(cachedSnapshot?.modified || '')
     const connected = ref(false)
     const ready = ref(false)
+    const offline = ref(!!cachedSnapshot)
+    const cachedAt = ref<number | null>(cachedSnapshot?.cachedAt || null)
     const dirty = ref(false)
     const saving = ref(false)
     const conflict = ref(false)
     const error = ref('')
     const status = ref<LiveFileStatus | null>(null)
 
+    let usingCachedSnapshot = !!cachedSnapshot
+    if (cachedSnapshot) {
+      ydoc.transact(() => ytext.insert(0, cachedSnapshot.content), 'cache')
+      content.value = cachedSnapshot.content
+    }
+
     let ws: WebSocket | null = null
     let closedByClient = false
     let reconnectTimer: number | null = null
     let reconnectCountdownTimer: number | null = null
+    let snapshotTimer: number | null = null
     let reconnectDeadline = 0
     let reconnectAttempt = 0
     let pendingFlushRequested = false
@@ -121,9 +138,30 @@ export function useLiveFiles() {
       reconnectDeadline = 0
     }
 
-    const scheduleReconnect = () => {
+    const persistSnapshot = () => {
+      void putOfflineWorkspaceFile({
+        path,
+        content: ytext.toString(),
+        language: language.value,
+        modified: modified.value,
+      })
+    }
+
+    const scheduleSnapshot = () => {
+      if (snapshotTimer !== null) window.clearTimeout(snapshotTimer)
+      snapshotTimer = window.setTimeout(() => {
+        snapshotTimer = null
+        persistSnapshot()
+      }, 300)
+    }
+
+    const scheduleReconnect = (delayOverride?: number) => {
       if (closedByClient || reconnectTimer !== null) return
-      const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * (2 ** reconnectAttempt))
+      if (navigator.onLine === false) {
+        offline.value = true
+        return
+      }
+      const delay = delayOverride ?? Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * (2 ** reconnectAttempt))
       reconnectAttempt += 1
       clearReconnectCountdown()
       reconnectDeadline = Date.now() + delay
@@ -143,10 +181,11 @@ export function useLiveFiles() {
 
     ytext.observe(() => {
       content.value = ytext.toString()
+      scheduleSnapshot()
     })
 
     ydoc.on('update', (update: Uint8Array, origin: unknown) => {
-      if (origin === 'server') return
+      if (origin === 'server' || origin === 'cache') return
       dirty.value = true
       if (!sendJson({ type: 'update', update: toBase64(update) })) {
         // The next successful connection sends the full local Y.Doc state, so
@@ -160,10 +199,19 @@ export function useLiveFiles() {
         const msg = JSON.parse(String(event.data))
         if (msg.type === 'init') {
           const hadLocalDirty = dirty.value
+          // A cached document originated from another Y.Doc instance. Clear its
+          // provisional content before applying the authoritative server state,
+          // otherwise the two CRDT histories would be merged into duplicate text.
+          if (usingCachedSnapshot && !hadLocalDirty && ytext.length) {
+            ydoc.transact(() => ytext.delete(0, ytext.length), 'server')
+          }
+          usingCachedSnapshot = false
           language.value = msg.language || 'plaintext'
           modified.value = msg.modified || ''
           Y.applyUpdate(ydoc, fromBase64(msg.update), 'server')
           content.value = ytext.toString()
+          offline.value = false
+          persistSnapshot()
           if (msg.status) {
             status.value = msg.status
             dirty.value = !!msg.status.dirty || hadLocalDirty
@@ -211,8 +259,27 @@ export function useLiveFiles() {
       }
     }
 
-    function connect() {
+    const reconnectWhenOnline = () => {
       if (closedByClient) return
+      scheduleReconnect(0)
+    }
+
+    const pauseWhenOffline = () => {
+      offline.value = true
+      if (!ready.value && !usingCachedSnapshot) {
+        readyReject?.(new Error('当前处于离线状态，无法读取未缓存的文件'))
+        readyReject = null
+      }
+    }
+
+    window.addEventListener('online', reconnectWhenOnline)
+    window.addEventListener('offline', pauseWhenOffline)
+
+    function connect() {
+      if (closedByClient || navigator.onLine === false) {
+        offline.value = true
+        return
+      }
       try { ws?.close() } catch { /* ignore */ }
       ws = new WebSocket(liveFileUrl(path))
 
@@ -225,12 +292,14 @@ export function useLiveFiles() {
       ws.onmessage = handleMessage
       ws.onerror = () => {
         connected.value = false
+        offline.value = true
         if (!closedByClient) {
-          error.value = '实时文件连接失败，准备重连…'
+          error.value = '实时文件连接失败，正在显示缓存副本'
         }
       }
       ws.onclose = () => {
         connected.value = false
+        offline.value = true
         if (!closedByClient) {
           // Keep pending flush promises open across reconnects. After init, the
           // client resends dirty local state and any requested flush.
@@ -248,6 +317,8 @@ export function useLiveFiles() {
       modified,
       connected,
       ready,
+      offline,
+      cachedAt,
       dirty,
       saving,
       conflict,
@@ -286,6 +357,13 @@ export function useLiveFiles() {
       },
       close: () => {
         closedByClient = true
+        window.removeEventListener('online', reconnectWhenOnline)
+        window.removeEventListener('offline', pauseWhenOffline)
+        if (snapshotTimer !== null) {
+          window.clearTimeout(snapshotTimer)
+          snapshotTimer = null
+        }
+        persistSnapshot()
         if (reconnectTimer !== null) {
           window.clearTimeout(reconnectTimer)
           reconnectTimer = null
@@ -298,13 +376,27 @@ export function useLiveFiles() {
     }
 
     clients.set(path, client)
+    if (navigator.onLine === false) return client
+
     connect()
+    if (cachedSnapshot) return client
+    const initialConnectionTimer = window.setTimeout(() => {
+      if (!ready.value) {
+        readyReject?.(new Error('实时文件连接超时，请检查后端连接后重试'))
+        readyReject = null
+      }
+    }, 10_000)
     try {
       await readyPromise
+      window.clearTimeout(initialConnectionTimer)
       return client
     } catch (err) {
+      window.clearTimeout(initialConnectionTimer)
       clients.delete(path)
       closedByClient = true
+      window.removeEventListener('online', reconnectWhenOnline)
+      window.removeEventListener('offline', pauseWhenOffline)
+      if (snapshotTimer !== null) window.clearTimeout(snapshotTimer)
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
       clearReconnectCountdown()
       try { (ws as WebSocket | null)?.close() } catch { /* ignore */ }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useApi, type OfficeViewMode } from '@/composables/useApi'
+import { getOfflineOfficeView, putOfflineOfficeView } from '@/lib/offline-workspace-cache'
 
 const props = defineProps<{
   path: string
@@ -21,6 +22,7 @@ const activeMode = ref<OfficeViewMode>('html')
 const content = ref('')
 const loading = ref(false)
 const error = ref('')
+const offlineCachedAt = ref<number | null>(null)
 let requestSeq = 0
 
 const loadPreview = async () => {
@@ -31,8 +33,17 @@ const loadPreview = async () => {
     const res = await api.getOfficeView(props.path, activeMode.value)
     if (seq !== requestSeq) return
     content.value = res.content
+    offlineCachedAt.value = null
+    void putOfflineOfficeView(props.path, activeMode.value, res.content)
   } catch (err) {
+    const cached = await getOfflineOfficeView(props.path, activeMode.value)
     if (seq !== requestSeq) return
+    if (cached) {
+      content.value = cached.content
+      offlineCachedAt.value = cached.cachedAt
+      error.value = ''
+      return
+    }
     content.value = ''
     error.value = (err as Error).message || 'Office 预览失败'
   } finally {
@@ -53,6 +64,7 @@ watch(
       <div class="office-preview-title">
         <span class="office-preview-icon">📝</span>
         <span>{{ name }}</span>
+        <small v-if="offlineCachedAt" class="office-offline-badge" :title="`缓存于 ${new Date(offlineCachedAt).toLocaleString()}`">离线副本</small>
       </div>
       <div class="office-preview-tabs" role="tablist" aria-label="Office 预览模式">
         <button
@@ -124,6 +136,13 @@ watch(
 
 .office-preview-icon {
   flex: 0 0 auto;
+}
+
+.office-offline-badge {
+  flex: 0 0 auto;
+  color: var(--color-warning);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .office-preview-tabs {

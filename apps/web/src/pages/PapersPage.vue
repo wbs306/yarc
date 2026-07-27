@@ -7,6 +7,7 @@ import { useNoteStore, type Note } from '@/stores/note'
 import { useThemeStore } from '@/stores/theme'
 import { useApi, useTemporaryPdfUrl } from '@/composables/useApi'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
+import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
 import type { IeeeJournalBrowserPreferences, ReparseAction, ReparsePaperInfo } from '@yarc/shared'
@@ -214,6 +215,7 @@ const recentWorkspaceFiles = ref<FileNode[]>(loadRecentWorkspaceFiles())
 const openWorkspaceTabs = ref<WorkspaceFileTab[]>([])
 const filesLoading = ref(false)
 const filesError = ref('')
+const workspaceTreeFromCache = ref(false)
 const workspaceContent = ref('')
 const workspaceSavedContent = ref('')
 const workspaceLanguage = ref('plaintext')
@@ -231,7 +233,15 @@ const workspaceDirty = computed(() => {
   if (live && selectedWorkspacePath.value === live.path) return live.dirty.value || live.saving.value || live.conflict.value
   return workspaceContent.value !== workspaceSavedContent.value
 })
-const workspaceCanEdit = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.editable && !selectedWorkspaceFile.value.readonly)
+const workspaceCanEdit = computed(() => selectedWorkspaceFile.value?.type === 'file'
+  && selectedWorkspaceFile.value.editable
+  && !selectedWorkspaceFile.value.readonly
+  && !currentLiveClient.value?.offline.value)
+const workspaceIsOfflineCopy = computed(() => !!currentLiveClient.value?.offline.value)
+const workspaceOfflineCachedAt = computed(() => {
+  const cachedAt = currentLiveClient.value?.cachedAt.value
+  return cachedAt ? new Date(cachedAt).toLocaleString() : ''
+})
 const workspaceIsImage = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.mime?.startsWith('image/'))
 const workspaceIsOffice = computed(() => isOfficeFile(selectedWorkspaceFile.value))
 const workspaceIsLegacyOffice = computed(() => isLegacyOfficeFile(selectedWorkspaceFile.value))
@@ -417,10 +427,6 @@ watch(() => currentLiveClient.value?.language.value, (language) => {
 watch(() => currentLiveClient.value?.modified.value, (modified) => {
   if (currentLiveClient.value && modified) workspaceModified.value = modified
 })
-watch(() => currentLiveClient.value?.error.value, (message) => {
-  if (currentLiveClient.value) filesError.value = message || ''
-})
-
 const persistRecentWorkspaceFiles = () => {
   const items = recentWorkspaceFiles.value.filter(isWorkspaceFile).map(({ children, ...node }) => node)
   localStorage.setItem('yarc_recent_workspace_files', JSON.stringify(items.slice(0, 6)))
@@ -646,11 +652,23 @@ const loadWorkspaceFiles = async (silent = false) => {
   try {
     const res = await api.getFileTree()
     workspaceFiles.value = res.files
+    workspaceTreeFromCache.value = false
+    void putOfflineWorkspaceTree(res.files)
     if (selectedWorkspacePath.value) {
       selectedWorkspaceFile.value = findWorkspaceNode(workspaceFiles.value, selectedWorkspacePath.value) || selectedWorkspaceFile.value
     }
   } catch (err) {
-    filesError.value = (err as Error).message || '加载文件失败'
+    const cachedTree = await getOfflineWorkspaceTree()
+    if (cachedTree?.files && Array.isArray(cachedTree.files)) {
+      workspaceFiles.value = cachedTree.files as FileNode[]
+      workspaceTreeFromCache.value = true
+      if (selectedWorkspacePath.value) {
+        selectedWorkspaceFile.value = findWorkspaceNode(workspaceFiles.value, selectedWorkspacePath.value) || selectedWorkspaceFile.value
+      }
+    } else {
+      workspaceTreeFromCache.value = false
+      filesError.value = (err as Error).message || '加载文件失败'
+    }
   } finally {
     if (!silent) filesLoading.value = false
   }
@@ -3034,21 +3052,24 @@ const showSearchPaperPopup = (paper: any) => {
             <div v-if="workspaceUploading" class="side-empty">正在上传文件…</div>
             <div v-else-if="filesLoading" class="side-empty">正在加载文件…</div>
             <div v-else-if="filesError" class="side-empty error-text">{{ filesError }}</div>
-            <div v-else-if="!workspaceFiles.length" class="side-empty">暂无文件</div>
-            <FileTree
-              ref="fileTreeRef"
-              :nodes="workspaceFiles"
-              :selected-path="selectedWorkspacePath"
-              :creating-parent-path="creatingParentPath"
-              :creating-type="creatingType"
-              @select="selectWorkspaceFile"
-              @context-menu="openFileContextMenu"
-              @rename="handleTreeRename"
-              @create="handleCreate"
-              @cancel-create="cancelCreate"
-              @move="moveWorkspaceNode"
-              @upload="(targetDirPath, files) => uploadWorkspaceFiles(files, targetDirPath)"
-            />
+            <template v-else>
+              <div v-if="workspaceTreeFromCache" class="side-empty workspace-offline-tree-note">离线模式：显示最近缓存的文件列表</div>
+              <div v-if="!workspaceFiles.length" class="side-empty">暂无文件</div>
+              <FileTree
+                ref="fileTreeRef"
+                :nodes="workspaceFiles"
+                :selected-path="selectedWorkspacePath"
+                :creating-parent-path="creatingParentPath"
+                :creating-type="creatingType"
+                @select="selectWorkspaceFile"
+                @context-menu="openFileContextMenu"
+                @rename="handleTreeRename"
+                @create="handleCreate"
+                @cancel-create="cancelCreate"
+                @move="moveWorkspaceNode"
+                @upload="(targetDirPath, files) => uploadWorkspaceFiles(files, targetDirPath)"
+              />
+            </template>
           </div>
 
           <div v-else-if="sidebarMode === 'settings'" key="m-settings" class="category-list settings-inline-list">
@@ -3481,6 +3502,7 @@ const showSearchPaperPopup = (paper: any) => {
                 <p>{{ selectedWorkspaceFile.path || 'data/' }}</p>
               </div>
               <div class="workspace-file-meta">
+                <span v-if="workspaceIsOfflineCopy" class="readonly-pill" :title="workspaceOfflineCachedAt ? `缓存于 ${workspaceOfflineCachedAt}` : '正在使用本地缓存'">离线副本</span>
                 <span v-if="selectedWorkspaceFile.readonly" class="readonly-pill">受保护</span>
                 <span v-if="selectedWorkspaceFile.type === 'file'">{{ formatWorkspaceSize(selectedWorkspaceFile.size) }}</span>
                 <span v-if="selectedWorkspaceFile.type === 'file'">{{ workspaceLanguage }}</span>
@@ -3517,6 +3539,9 @@ const showSearchPaperPopup = (paper: any) => {
             <div v-else-if="workspaceContentLoading" class="workspace-empty compact">正在读取文件…</div>
 
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
+              <div v-if="workspaceIsOfflineCopy" class="workspace-offline-notice">
+                当前显示的是{{ workspaceOfflineCachedAt ? ` ${workspaceOfflineCachedAt} 保存的` : '' }}本地副本；恢复连接后会自动刷新，离线期间仅可阅读。
+              </div>
               <div v-if="mdSearchOpen && workspaceIsMarkdown && markdownPreview" class="md-find-bar">
                 <div class="md-find-field">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -4566,6 +4591,15 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-file-summary p { margin-top: 2px; color: var(--color-text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-file-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; color: var(--color-text-muted); font-size: 12px; }
 .readonly-pill { color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 999px; padding: 2px 8px; }
+.workspace-offline-notice {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+  border-bottom: 1px solid rgba(245, 158, 11, 0.25);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--color-warning);
+  font-size: 12px;
+}
+.workspace-offline-tree-note { color: var(--color-warning); }
 .workspace-text-editor-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
 .workspace-status-bar {
   display: flex;

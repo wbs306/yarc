@@ -34,8 +34,11 @@ app.use(createPinia())
 app.use(router)
 app.mount('#app')
 
-// Register the PWA Service Worker (currently also handles PDF caching).
-if ('serviceWorker' in navigator) {
+// Service Workers require HTTPS except for loopback origins. The workspace's
+// IndexedDB-based offline reader remains available for direct HTTP/EasyTier use.
+const serviceWorkerSupportedHere = window.isSecureContext
+  || ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)
+if (serviceWorkerSupportedHere && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch((error: unknown) => {
     console.warn('[YARC] Service Worker registration failed:', error)
   })

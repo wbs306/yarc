@@ -4,6 +4,7 @@ import type { Paper } from '@/stores/paper'
 import { useChatStore } from '@/stores/chat'
 import { useNoteStore, type Note } from '@/stores/note'
 import { usePdfUrl } from '@/composables/useApi'
+import { getOfflinePdf, putOfflinePdf } from '@/lib/offline-workspace-cache'
 import { copyToClipboard } from '@/lib/clipboard'
 import pdfiumWasmUrl from '@embedpdf/pdfium/pdfium.wasm?url'
 
@@ -282,8 +283,70 @@ const isTemporaryDocument = computed(() => !!props.sourceUrl)
 const canAnnotate = computed(() => !!props.paper?.id && !isTemporaryDocument.value)
 const canAskAI = computed(() => !!props.paper?.id || isTemporaryDocument.value)
 const documentTitle = computed(() => props.title || props.paper?.title || '临时 PDF')
-const pdfUrl = computed(() => props.sourceUrl || (props.paper?.id ? usePdfUrl(props.paper.id) : ''))
+const pdfSourceUrl = computed(() => props.sourceUrl || (props.paper?.id ? usePdfUrl(props.paper.id) : ''))
+const cachedPdfUrl = ref('')
+const pdfOfflineCopy = ref(false)
+let cachedPdfObjectUrl = ''
+let pdfCacheSequence = 0
+
+const releaseCachedPdfUrl = () => {
+  if (cachedPdfObjectUrl) URL.revokeObjectURL(cachedPdfObjectUrl)
+  cachedPdfObjectUrl = ''
+  cachedPdfUrl.value = ''
+}
+
+const activateCachedPdf = async () => {
+  const sourceUrl = pdfSourceUrl.value
+  if (!sourceUrl || cachedPdfUrl.value) return !!cachedPdfUrl.value
+  const snapshot = await getOfflinePdf(sourceUrl)
+  if (!snapshot?.blob.size || sourceUrl !== pdfSourceUrl.value) return false
+  cachedPdfObjectUrl = URL.createObjectURL(snapshot.blob)
+  cachedPdfUrl.value = cachedPdfObjectUrl
+  pdfOfflineCopy.value = true
+  return true
+}
+
+const cachePdfInBrowser = async (sourceUrl: string) => {
+  try {
+    const existing = await getOfflinePdf(sourceUrl)
+    if (existing?.blob.size) return
+    const response = await fetch(sourceUrl, { credentials: 'include' })
+    if (!response.ok) return
+    const blob = await response.blob()
+    if (blob.size) await putOfflinePdf(sourceUrl, blob)
+  } catch {
+    // The visible reader keeps its own request. A failed background cache must
+    // not interrupt it when the EasyTier route is temporarily unavailable.
+  }
+}
+
+const preparePdfCache = async () => {
+  const sourceUrl = pdfSourceUrl.value
+  const sequence = ++pdfCacheSequence
+  releaseCachedPdfUrl()
+  pdfOfflineCopy.value = false
+  if (!sourceUrl) return
+
+  const snapshot = await getOfflinePdf(sourceUrl)
+  if (sequence !== pdfCacheSequence) return
+  if (navigator.onLine === false) {
+    if (snapshot?.blob.size) await activateCachedPdf()
+    return
+  }
+  if (!snapshot?.blob.size) void cachePdfInBrowser(sourceUrl)
+}
+
+const pdfUrl = computed(() => cachedPdfUrl.value || pdfSourceUrl.value)
 const currentDocumentId = computed(() => props.documentId || (props.paper?.id ? `paper-${props.paper.id}` : ''))
+
+const handlePdfOffline = () => { void activateCachedPdf() }
+const handlePdfOnline = () => {
+  if (!pdfOfflineCopy.value) return
+  releaseCachedPdfUrl()
+  pdfOfflineCopy.value = false
+}
+
+watch(pdfSourceUrl, () => { void preparePdfCache() }, { immediate: true })
 
 const isTouchDevice = typeof window !== 'undefined'
   && (window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 768)
@@ -302,10 +365,11 @@ const { engine, isLoading, error: engineError } = usePdfiumEngine({
 type Unsubscribe = () => void
 
 // PDFium's direct engine needs a complete byte source for temporary remote
-// documents. The proxy still supports ranges for future consumers, while the
-// preview deliberately uses one full in-memory fetch and never persists it.
+// documents. The proxy still supports ranges for future consumers; a separate
+// background fetch persists a full blob for offline fallback when no Service
+// Worker is available (such as direct HTTP/EasyTier access).
 const documentLoadMode = computed(() => (isTouchDevice || isTemporaryDocument.value) ? 'full-fetch' as const : 'auto' as const)
-const embedPdfKey = computed(() => currentDocumentId.value || 'no-document')
+const embedPdfKey = computed(() => `${currentDocumentId.value || 'no-document'}:${pdfUrl.value}`)
 
 const plugins = computed(() => {
   const url = pdfUrl.value
@@ -488,6 +552,9 @@ const bindDocumentEvents = () => {
     if (event.documentId !== activeDocId.value) return
     loadingDocument.value = false
     documentError.value = event.message || 'PDF 加载失败'
+    // EasyTier connections can fail while the browser itself still reports
+    // online. Fall back to a full PDF blob cached by the page in that case.
+    void activateCachedPdf()
   })
 
   const activeChanged = docManager.onActiveDocumentChanged?.((event: any) => {
@@ -648,6 +715,9 @@ onBeforeUnmount(() => {
   cleanupWheelListener()
   documentUnsubs.forEach((unsub) => unsub())
   document.removeEventListener('keydown', handlePdfCopyKeydown, true)
+  window.removeEventListener('offline', handlePdfOffline)
+  window.removeEventListener('online', handlePdfOnline)
+  releaseCachedPdfUrl()
   pdfContentEl.value?.removeEventListener('scroll', onPdfScroll, true)
 })
 
@@ -692,6 +762,8 @@ const handlePdfCopyKeydown = (event: KeyboardEvent) => {
 
 onMounted(() => {
   document.addEventListener('keydown', handlePdfCopyKeydown, true)
+  window.addEventListener('offline', handlePdfOffline)
+  window.addEventListener('online', handlePdfOnline)
   pdfContentEl.value?.addEventListener('scroll', onPdfScroll, { capture: true, passive: true })
 })
 
@@ -1286,7 +1358,7 @@ defineExpose({ scrollToNote, goToPage })
             <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
           </svg>
         </button>
-        <span class="pdf-title">{{ documentTitle }}<small v-if="isTemporaryDocument">临时阅读</small></span>
+        <span class="pdf-title">{{ documentTitle }}<small v-if="isTemporaryDocument">临时阅读</small><small v-if="pdfOfflineCopy">离线副本</small></span>
       </div>
       <div class="pdf-toolbar-right">
         <button v-if="canAnnotate" class="tb-btn info-btn" @click="$emit('showDetails')" title="论文详情">
