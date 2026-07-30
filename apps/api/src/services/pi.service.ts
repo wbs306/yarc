@@ -22,16 +22,18 @@ import type { AgentInteractionResponse, ChatEvent } from '@yarc/shared'
 
 export class PiService {
   private piModule: any = null
-  private authStorage: any = null
-  private modelRegistry: any = null
+  private modelRuntime: any = null
   private initialized = false
 
   private async refreshPiState() {
     if (!this.piModule) return
-    const { AuthStorage, ModelRegistry } = this.piModule
+    const { ModelRuntime } = this.piModule
     const agentWorkspace = await ensureAgentWorkspace()
-    this.authStorage = AuthStorage.create(join(agentWorkspace.agentDir, 'auth.json'))
-    this.modelRegistry = ModelRegistry.create(this.authStorage, join(agentWorkspace.agentDir, 'models.json'))
+    this.modelRuntime = await ModelRuntime.create({
+      authPath: join(agentWorkspace.agentDir, 'auth.json'),
+      modelsPath: join(agentWorkspace.agentDir, 'models.json'),
+      modelsStorePath: join(agentWorkspace.agentDir, 'models-store.json'),
+    })
   }
 
   // ── Pi session persistence ──────────────────────────────────────────────
@@ -230,9 +232,9 @@ export class PiService {
     let model: any = undefined
     if (modelId) {
       const parts = modelId.split('/')
-      if (parts.length === 2) model = this.modelRegistry?.find(parts[0], parts[1])
+      if (parts.length === 2) model = this.modelRuntime?.getModel(parts[0], parts[1])
       if (!model) {
-        const available = await this.modelRegistry?.getAvailable()
+        const available = await this.modelRuntime?.getAvailable()
         model = available?.find((m: any) => m.id === modelId)
       }
     }
@@ -263,8 +265,7 @@ export class PiService {
       const sessionManager = SessionManager.open(sessionFile, sessionDir, agentWorkspace.cwd)
       const result = await createAgentSession({
         sessionManager,
-        authStorage: this.authStorage,
-        modelRegistry: this.modelRegistry,
+        modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
         resourceLoader,
       })
@@ -298,6 +299,7 @@ export class PiService {
       console.warn('[PiService] Pi SDK not available, cannot init for extensions')
       return
     }
+    if (this._extensionSession) return
     await this.refreshPiState()
 
     const { createAgentSession, DefaultResourceLoader, SessionManager } = this.piModule
@@ -324,8 +326,7 @@ export class PiService {
     try {
       const { session } = await createAgentSession({
         sessionManager,
-        authStorage: this.authStorage,
-        modelRegistry: this.modelRegistry,
+        modelRuntime: this.modelRuntime,
         resourceLoader,
       })
 
@@ -339,6 +340,31 @@ export class PiService {
 
   // Reference to keep-alive session for extensions
   private _extensionSession: any = null
+
+  async reloadExtensions(reason = 'manual'): Promise<{ reloaded: boolean; reason: string }> {
+    await this.initPi()
+    if (!this.piModule) return { reloaded: false, reason }
+
+    if (this._extensionSession?.reload) {
+      try {
+        await this._extensionSession.reload()
+      } catch (err) {
+        console.warn('[PiService] Extension reload failed, recreating session:', err)
+        await this._extensionSession?.dispose?.().catch(() => {})
+        this._extensionSession = null
+        await this.refreshPiState()
+        await this.initForExtensions()
+        if (!this._extensionSession) throw new Error('Extension session recreation failed')
+      }
+    }
+
+    sseHub.emit({
+      type: 'pi-config-changed',
+      reason: `extensions:${reason}`,
+      at: new Date().toISOString(),
+    })
+    return { reloaded: true, reason }
+  }
 
   /**
    * Build YARC tools with direct service access (no HTTP, no auth bypass).
@@ -359,7 +385,7 @@ export class PiService {
     if (!this.piModule) return []
 
     const { defineTool } = this.piModule
-    const { Type } = await import('@sinclair/typebox')
+    const { Type } = await import('typebox')
 
     const askQuestionOptionSchema = Type.Object({
       label: Type.String(),
@@ -1738,9 +1764,9 @@ export class PiService {
     let model: any = undefined
     if (options.model) {
       const parts = options.model.split('/')
-      if (parts.length === 2) model = this.modelRegistry?.find(parts[0], parts[1])
+      if (parts.length === 2) model = this.modelRuntime?.getModel(parts[0], parts[1])
       if (!model) {
-        const available = await this.modelRegistry?.getAvailable()
+        const available = await this.modelRuntime?.getAvailable()
         model = available?.find((m: any) => m.id === options.model)
       }
     }
@@ -1776,8 +1802,7 @@ export class PiService {
     try {
       const result = await createAgentSession({
         sessionManager,
-        authStorage: this.authStorage,
-        modelRegistry: this.modelRegistry,
+        modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
         resourceLoader,
       })
@@ -1875,9 +1900,9 @@ export class PiService {
     let model: any = undefined
     if (options.model) {
       const parts = options.model.split('/')
-      if (parts.length === 2) model = this.modelRegistry?.find(parts[0], parts[1])
+      if (parts.length === 2) model = this.modelRuntime?.getModel(parts[0], parts[1])
       if (!model) {
-        const available = await this.modelRegistry?.getAvailable()
+        const available = await this.modelRuntime?.getAvailable()
         model = available?.find((item: any) => item.id === options.model)
       }
     }
@@ -1910,8 +1935,7 @@ export class PiService {
     try {
       const result = await createAgentSession({
         sessionManager,
-        authStorage: this.authStorage,
-        modelRegistry: this.modelRegistry,
+        modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
         resourceLoader,
       })
@@ -2004,12 +2028,12 @@ export class PiService {
     // Resolve model: use requested model or fall back to first available
     let model: any = undefined
     if (options.model) {
-      const parts = options.model.split('/')      
+      const parts = options.model.split('/')
       if (parts.length === 2) {
-        model = this.modelRegistry?.find(parts[0], parts[1])      
+        model = this.modelRuntime?.getModel(parts[0], parts[1])
       }
       if (!model) {
-        const available = await this.modelRegistry?.getAvailable()
+        const available = await this.modelRuntime?.getAvailable()
         model = available?.find((m: any) => m.id === options.model)
       }
     }
@@ -2048,8 +2072,7 @@ export class PiService {
     try {
       const result = await createAgentSession({
         sessionManager,
-        authStorage: this.authStorage,
-        modelRegistry: this.modelRegistry,
+        modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
         customTools: enabledTools,
         resourceLoader,
@@ -2105,7 +2128,7 @@ export class PiService {
 
       // Emit session state so frontend can display current model/thinking
       try {
-        const available = await this.filterByEnabledModels(await this.modelRegistry?.getAvailable() || [])
+        const available = await this.filterByEnabledModels(await this.modelRuntime?.getAvailable() || [])
         push({
           type: 'session_state',
           model: session.model?.id || '',
@@ -2470,18 +2493,20 @@ export class PiService {
 
   async listModels(force = false): Promise<any> {
     try {
-      if (force) await this.reload('models-refresh')
-      else await this.initPi()
+      await this.initPi()
+      if (force) {
+        await this.modelRuntime?.refresh({ allowNetwork: true, force: true })
+      }
     } catch (err) {
       console.error('[PiService] listModels reload/init failed:', err)
     }
 
-    if (!this.modelRegistry) {
+    if (!this.modelRuntime) {
       return { models: [], source: 'unavailable' }
     }
 
     try {
-      const allModels = await this.modelRegistry.getAvailable()
+      const allModels = await this.modelRuntime.getAvailable()
       const models = await this.filterByEnabledModels(allModels)
 
       return {

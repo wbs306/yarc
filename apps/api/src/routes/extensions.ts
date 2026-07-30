@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { config } from '../lib/config.js'
 import { AppError } from '../lib/errors.js'
+import { piService } from '../services/pi.service.js'
 
 const execFileAsync = promisify(execFile)
 const extensions = new Hono()
@@ -127,6 +128,63 @@ async function readSettings(): Promise<PiSettings> {
 async function writeSettings(settings: PiSettings): Promise<void> {
   await mkdir(agentDir, { recursive: true })
   await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
+}
+
+let extensionUpdateInProgress = false
+
+const assertExtensionsIdle = () => {
+  if (extensionUpdateInProgress) {
+    throw new AppError('CONFLICT', '已有插件更新任务正在执行', 409)
+  }
+}
+
+const isPackageSource = (source: string) =>
+  source.startsWith('npm:') ||
+  source.startsWith('git:') ||
+  source.startsWith('https://') ||
+  source.startsWith('http://') ||
+  source.startsWith('ssh://') ||
+  source.startsWith('git@')
+
+async function updatePackages(source?: string) {
+  assertExtensionsIdle()
+  if (source && !isPackageSource(source)) {
+    throw new AppError('INVALID_REQUEST', '本地或上传插件不支持在线更新', 400)
+  }
+
+  extensionUpdateInProgress = true
+  try {
+    const settings = await readSettings()
+    const packages = (settings.packages || [])
+      .map(item => item.replace(/^-/, ''))
+      .filter(isPackageSource)
+
+    const { DefaultPackageManager, SettingsManager } = await import('@earendil-works/pi-coding-agent')
+    const settingsManager = SettingsManager.inMemory({ ...settings, packages })
+    const packageManager = new DefaultPackageManager({
+      cwd: resolve(config.dataDir),
+      agentDir,
+      settingsManager,
+    })
+    const progress: Array<{ type: string; action: string; source: string; message?: string }> = []
+    packageManager.setProgressCallback(event => {
+      progress.push({
+        type: event.type,
+        action: event.action,
+        source: event.source,
+        ...(event.message ? { message: event.message } : {}),
+      })
+    })
+
+    await packageManager.update(source)
+    await piService.reloadExtensions(source || 'all')
+    return { progress }
+  } catch (err) {
+    console.error('[Extensions] Update failed:', err)
+    throw new AppError('UPDATE_FAILED', '插件更新失败，请检查插件来源或版本兼容性', 500)
+  } finally {
+    extensionUpdateInProgress = false
+  }
 }
 
 // ── Types ────────────────────────────────────────────────────────
@@ -305,6 +363,7 @@ extensions.get('/', async (c) => {
 
 // POST /api/extensions/install — install a package
 extensions.post('/install', async (c) => {
+  assertExtensionsIdle()
   const body = await c.req.json().catch(() => ({}))
   const source = typeof body.source === 'string' ? body.source.trim() : ''
   if (!source) throw new AppError('INVALID_REQUEST', 'source is required', 400)
@@ -455,8 +514,22 @@ extensions.post('/install', async (c) => {
   }
 })
 
+// POST /api/extensions/update — update every configured npm/git package
+extensions.post('/update', async (c) => {
+  const result = await updatePackages()
+  return c.json({ ok: true, ...result })
+})
+
+// POST /api/extensions/:id/update — update one configured npm/git package
+extensions.post('/:id/update', async (c) => {
+  const id = decodeURIComponent(c.req.param('id')).replace(/^-/, '')
+  const result = await updatePackages(id)
+  return c.json({ ok: true, id, ...result })
+})
+
 // POST /api/extensions/:id/enable — re-enable a disabled package
 extensions.post('/:id/enable', async (c) => {
+  assertExtensionsIdle()
   const id = decodeURIComponent(c.req.param('id'))
 
   if (id.startsWith('local:')) {
@@ -485,6 +558,7 @@ extensions.post('/:id/enable', async (c) => {
 
 // POST /api/extensions/:id/disable — disable a package
 extensions.post('/:id/disable', async (c) => {
+  assertExtensionsIdle()
   const id = decodeURIComponent(c.req.param('id'))
 
   if (id.startsWith('local:')) {
@@ -513,6 +587,7 @@ extensions.post('/:id/disable', async (c) => {
 
 // POST /api/extensions/upload — upload a .ts/.js file or .zip/.tar.gz archive
 extensions.post('/upload', async (c) => {
+  assertExtensionsIdle()
   const formData = await c.req.formData()
   const file = formData.get('file') as File | null
   if (!file || !(file instanceof File) || !file.name) {
@@ -634,6 +709,7 @@ async function installDeps(dir: string): Promise<void> {
 
 // DELETE /api/extensions/:id — uninstall
 extensions.delete('/:id', async (c) => {
+  assertExtensionsIdle()
   const id = decodeURIComponent(c.req.param('id'))
 
   if (id.startsWith('local:')) {

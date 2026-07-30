@@ -594,6 +594,12 @@ export function useApi() {
     disableExtension: (id: string) =>
       request<{ ok: boolean }>(`/extensions/${encodeURIComponent(id)}/disable`, { method: 'POST' }),
 
+    updateExtensions: () =>
+      request<{ ok: boolean; progress: Array<{ type: string; action: string; source: string; message?: string }> }>('/extensions/update', { method: 'POST' }),
+
+    updateExtension: (id: string) =>
+      request<{ ok: boolean; id: string; progress: Array<{ type: string; action: string; source: string; message?: string }> }>(`/extensions/${encodeURIComponent(id)}/update`, { method: 'POST' }),
+
     installExtension: (source: string) =>
       request<{ ok: boolean; id: string; type: string }>('/extensions/install', {
         method: 'POST',

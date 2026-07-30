@@ -15,7 +15,7 @@ import {
 import { getAllPiSessionMetadata } from '../lib/pi-metadata.js'
 
 // Types from pi-ai (re-defined locally to avoid import issues)
-type StopReason = 'stop' | 'length' | 'toolUse' | 'error' | 'aborted'
+type StopReason = 'stop' | 'length' | 'toolUse' | 'error' | 'aborted' | 'pending'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

@@ -21,7 +21,9 @@ const extensions = ref<Extension[]>([])
 const paths = ref<{ extensionsDir: string; npmDir: string }>({ extensionsDir: '', npmDir: '' })
 const loading = ref(false)
 const error = ref('')
+const success = ref('')
 const actionLoading = ref('')
+const updateAllLoading = ref(false)
 
 // Install form
 const showInstallForm = ref(false)
@@ -50,6 +52,7 @@ const fetchExtensions = async () => {
 const toggleExtension = async (ext: Extension) => {
   actionLoading.value = ext.id
   error.value = ''
+  success.value = ''
   try {
     if (ext.enabled) {
       await api.disableExtension(ext.id)
@@ -64,10 +67,43 @@ const toggleExtension = async (ext: Extension) => {
   }
 }
 
+const updateExtension = async (ext: Extension) => {
+  actionLoading.value = ext.id
+  error.value = ''
+  success.value = ''
+  installError.value = ''
+  try {
+    await api.updateExtension(ext.id)
+    await fetchExtensions()
+    success.value = `“${ext.name}”检查与更新完成`
+  } catch (err) {
+    error.value = (err as Error).message || '更新失败'
+  } finally {
+    actionLoading.value = ''
+  }
+}
+
+const updateAllExtensions = async () => {
+  updateAllLoading.value = true
+  error.value = ''
+  success.value = ''
+  installError.value = ''
+  try {
+    await api.updateExtensions()
+    await fetchExtensions()
+    success.value = '插件检查与更新完成'
+  } catch (err) {
+    error.value = (err as Error).message || '更新失败'
+  } finally {
+    updateAllLoading.value = false
+  }
+}
+
 const uninstallExtension = async (ext: Extension) => {
   if (!confirm(`确定卸载 "${ext.name}"？${ext.type !== 'local' ? '已安装的文件也会被删除。' : ''}`)) return
   actionLoading.value = ext.id
   error.value = ''
+  success.value = ''
   try {
     await api.uninstallExtension(ext.id)
     await fetchExtensions()
@@ -82,6 +118,7 @@ const doInstall = async () => {
   if (!installSource.value.trim()) return
   installLoading.value = true
   installError.value = ''
+  success.value = ''
   try {
     await api.installExtension(installSource.value.trim())
     installSource.value = ''
@@ -100,6 +137,7 @@ const doUpload = async (event: Event) => {
   if (!file) return
   uploadLoading.value = true
   installError.value = ''
+  success.value = ''
   try {
     const form = new FormData()
     form.append('file', file)
@@ -131,16 +169,20 @@ onMounted(fetchExtensions)
     <div class="extensions-header">
       <h4>插件管理</h4>
       <div class="header-actions">
-        <button class="ext-btn" :disabled="loading" @click="fetchExtensions">
+        <button class="ext-btn" :disabled="loading || updateAllLoading || installLoading || uploadLoading || !!actionLoading" @click="fetchExtensions">
           {{ loading ? '加载中…' : '刷新' }}
         </button>
-        <button class="ext-btn primary" @click="showInstallForm = !showInstallForm">
+        <button class="ext-btn" :disabled="loading || updateAllLoading || installLoading || uploadLoading || !!actionLoading" @click="updateAllExtensions">
+          {{ updateAllLoading ? '更新中…' : '更新全部' }}
+        </button>
+        <button class="ext-btn primary" :disabled="updateAllLoading || installLoading || uploadLoading || !!actionLoading" @click="showInstallForm = !showInstallForm">
           {{ showInstallForm ? '取消' : '安装插件' }}
         </button>
       </div>
     </div>
 
     <div v-if="error" class="ext-error">{{ error }}</div>
+    <div v-if="success" class="ext-success">{{ success }}</div>
 
     <!-- Install form -->
     <div v-if="showInstallForm" class="install-form">
@@ -158,14 +200,15 @@ onMounted(fetchExtensions)
       </div>
       <div v-if="installError" class="ext-error">{{ installError }}</div>
       <div class="install-actions">
-        <button class="ext-btn primary" :disabled="installLoading || !installSource.trim()" @click="doInstall">
+        <button class="ext-btn primary" :disabled="installLoading || updateAllLoading || !!actionLoading || !installSource.trim()" @click="doInstall">
           {{ installLoading ? '安装中…' : '安装' }}
         </button>
-        <label class="ext-btn" :class="{ disabled: uploadLoading }">
+        <label class="ext-btn" :class="{ disabled: uploadLoading || installLoading || updateAllLoading || !!actionLoading }">
           {{ uploadLoading ? '上传中…' : '上传文件' }}
           <input
             type="file"
             accept=".ts,.js,.zip,.tar.gz,.tgz"
+            :disabled="uploadLoading || installLoading || updateAllLoading || !!actionLoading"
             style="display: none"
             @change="doUpload"
           />
@@ -198,14 +241,22 @@ onMounted(fetchExtensions)
           <button
             v-if="ext.installed"
             class="ext-btn"
-            :disabled="!!actionLoading"
+            :disabled="!!actionLoading || updateAllLoading || installLoading || uploadLoading"
             @click="toggleExtension(ext)"
           >
             {{ actionLoading === ext.id ? '…' : (ext.enabled ? '停用' : '启用') }}
           </button>
           <button
+            v-if="ext.installed && ext.type !== 'local'"
+            class="ext-btn"
+            :disabled="!!actionLoading || updateAllLoading || installLoading || uploadLoading"
+            @click="updateExtension(ext)"
+          >
+            {{ actionLoading === ext.id ? '…' : '更新' }}
+          </button>
+          <button
             class="ext-btn danger"
-            :disabled="!!actionLoading"
+            :disabled="!!actionLoading || updateAllLoading || installLoading || uploadLoading"
             @click="uninstallExtension(ext)"
           >
             {{ actionLoading === ext.id ? '…' : '卸载' }}
@@ -238,16 +289,26 @@ onMounted(fetchExtensions)
 }
 .header-actions { display: flex; gap: 8px; }
 
-.ext-error {
+.ext-error,
+.ext-success {
   padding: 8px 12px;
   margin-bottom: 12px;
-  background: rgba(239,68,68,0.08);
-  border: 1px solid rgba(239,68,68,0.2);
   border-radius: var(--radius-sm);
-  color: var(--color-error);
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.ext-error {
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.2);
+  color: var(--color-error);
+}
+
+.ext-success {
+  background: rgba(34,197,94,0.08);
+  border: 1px solid rgba(34,197,94,0.2);
+  color: #16a34a;
 }
 
 .ext-empty { color: var(--color-text-muted); font-size: 13px; padding: 16px 0; }
