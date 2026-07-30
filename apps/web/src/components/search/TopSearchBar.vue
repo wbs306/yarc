@@ -796,8 +796,8 @@ onUnmounted(() => {
 
 .search-container {
   position: relative;
-  width: 640px;
-  max-width: 100%;
+  width: 85%;
+  min-width: 0;
 }
 
 .import-status {

@@ -3955,7 +3955,7 @@ const showSearchPaperPopup = (paper: any) => {
 .app-header {
   height: var(--header-height);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 640px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, clamp(360px, 56vw, 960px)) minmax(0, 1fr);
   column-gap: 8px;
   align-items: center;
   padding: 0 12px;
@@ -4016,6 +4016,7 @@ const showSearchPaperPopup = (paper: any) => {
 .icon-btn {
   width: 32px;
   height: 32px;
+  flex: 0 0 32px;
   display: flex;
   align-items: center;
   justify-content: center;
