@@ -288,6 +288,77 @@ export function configureMarked() {
   marked.use({ breaks: true })
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function isEscaped(text: string, index: number): boolean {
+  let backslashes = 0
+  for (let cursor = index - 1; cursor >= 0 && text.charAt(cursor) === '\\'; cursor--) backslashes++
+  return backslashes % 2 === 1
+}
+
+/**
+ * Renders only inline LaTeX delimiters and escapes all remaining title text.
+ * Unlike renderMarkdown(), this is safe to place inside headings and other
+ * inline-only containers whose content is supplied by external metadata.
+ */
+export function renderInlineLatex(text: string): string {
+  if (!text) return ''
+
+  let html = ''
+  let cursor = 0
+  let plainStart = 0
+
+  const appendPlain = (end: number) => {
+    html += escapeHtml(text.slice(plainStart, end))
+  }
+
+  while (cursor < text.length) {
+    const isDollar = text.charAt(cursor) === '$'
+      && !isEscaped(text, cursor)
+      && text.charAt(cursor - 1) !== '$'
+      && text.charAt(cursor + 1) !== '$'
+    const isParenStart = text.slice(cursor, cursor + 2) === '\\('
+    if (!isDollar && !isParenStart) {
+      cursor++
+      continue
+    }
+
+    const delimiter = isDollar ? '$' : '\\('
+    const closingDelimiter = isDollar ? '$' : '\\)'
+    const formulaStart = cursor + delimiter.length
+    let end = formulaStart
+    while (end < text.length) {
+      if (text.startsWith(closingDelimiter, end) && !isEscaped(text, end)) break
+      end++
+    }
+
+    const formula = text.slice(formulaStart, end).trim()
+    if (end === text.length || !formula || (isDollar && text.charAt(formulaStart) === '$')) {
+      cursor = formulaStart
+      continue
+    }
+
+    appendPlain(cursor)
+    try {
+      html += katex.renderToString(formula, { throwOnError: false, displayMode: false })
+    } catch {
+      html += escapeHtml(text.slice(cursor, end + closingDelimiter.length))
+    }
+    cursor = end + closingDelimiter.length
+    plainStart = cursor
+  }
+
+  appendPlain(text.length)
+  return html
+}
+
 export function renderMarkdown(text: string): string {
   if (!text) return ''
   configureMarked()

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { IeeeBrowseMode, IeeeJournalConfig, SearchPaper } from '@yarc/shared'
 import { useApi } from '@/composables/useApi'
+import InlineLatex from '@/components/markdown/InlineLatex.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 
 const props = defineProps<{
@@ -209,7 +210,7 @@ watch(mode, () => { if (props.selectedJournalId) void loadDirectory() })
       </div>
       <article v-for="paper in visiblePapers" :key="paper.articleNumber || paper.id" class="paper-row ieee-paper-row">
         <div class="paper-row-main">
-          <h3>{{ paper.title || 'IEEE 未提供标题' }}</h3>
+          <h3><InlineLatex :content="paper.title || 'IEEE 未提供标题'" /></h3>
           <p class="paper-authors">{{ paper.authors?.join(', ') || '未知作者' }}</p>
           <div class="paper-meta">
             <span class="paper-venue">{{ paper.journal || paper.venue || selectedJournal?.publicationTitle }}</span>
