@@ -249,6 +249,10 @@ const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'fil
 const workspaceIsMarkdown = computed(() => workspaceLanguage.value === 'markdown')
 const markdownPreview = ref(false)
 const markdownPreviewRef = ref<HTMLElement | null>(null)
+const markdownPreviewContent = computed(() => currentLiveClient.value?.content.value ?? workspaceContent.value)
+const markdownPreviewPending = computed(() => !!currentLiveClient.value
+  && !currentLiveClient.value.ready.value
+  && !markdownPreviewContent.value)
 const markdownScrollPercent = ref(0)
 const markdownViewportPercent = ref(100)
 
@@ -3579,9 +3583,11 @@ const showSearchPaperPopup = (paper: any) => {
               </div>
               <div v-show="workspaceIsMarkdown && markdownPreview" class="workspace-md-preview-shell">
                 <div ref="markdownPreviewRef" class="workspace-md-preview" @scroll="updateMarkdownPreviewScroll">
+                  <div v-if="markdownPreviewPending" class="workspace-md-preview-loading">正在同步文件内容…</div>
                   <MarkdownContent
+                    v-else
                     :style="{ fontSize: `${theme.editor.markdownFontSize}px` }"
-                    :content="workspaceContent"
+                    :content="markdownPreviewContent"
                   />
                 </div>
                 <aside class="markdown-preview-strip" aria-label="Markdown 文档预览条">
@@ -4790,6 +4796,7 @@ const showSearchPaperPopup = (paper: any) => {
   scroll-padding-bottom: 32px;
   color: var(--color-text);
 }
+.workspace-md-preview-loading { display: flex; min-height: 160px; align-items: center; justify-content: center; color: var(--color-text-muted); font-size: 13px; }
 .workspace-md-preview :deep(h1) { font-size: 1.7em; font-weight: 700; margin: 1.4em 0 0.7em; }
 .workspace-md-preview :deep(h2) { font-size: 1.4em; font-weight: 700; margin: 1.3em 0 0.65em; padding-bottom: 0.4em; border-bottom: 1px solid var(--color-border); }
 .workspace-md-preview :deep(h3) { font-size: 1.2em; font-weight: 600; margin: 1.2em 0 0.6em; }
