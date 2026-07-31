@@ -14,6 +14,33 @@ const JOURNAL_PREFERENCES_KEY = 'ieee_journal_browser'
 const DIRECTORY_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 20_000
 const MAX_JOURNALS = 50
+const ieeeSessionCookies = new Map<string, string>()
+
+const readSetCookieHeaders = (headers: Headers) => {
+  const values = (headers as any).getSetCookie?.()
+  if (Array.isArray(values)) return values as string[]
+  const combined = headers.get('set-cookie')
+  return combined ? combined.split(/,(?=\s*[^;,=]+=[^;,]+)/g) : []
+}
+
+export const captureIeeeSessionCookies = (headers: Headers) => {
+  for (const cookie of readSetCookieHeaders(headers)) {
+    const pair = cookie.split(';')[0]?.trim()
+    if (!pair) continue
+    const eq = pair.indexOf('=')
+    if (eq <= 0) continue
+    const name = pair.slice(0, eq)
+    const value = pair.slice(eq + 1)
+    if (value && value !== '_remove_') ieeeSessionCookies.set(name, value)
+    else ieeeSessionCookies.delete(name)
+  }
+}
+
+export const getIeeeSessionCookieJar = () => ieeeSessionCookies
+
+const ieeeSessionCookieHeader = () => Array.from(ieeeSessionCookies.entries())
+  .map(([key, value]) => `${key}=${value}`)
+  .join('; ')
 
 interface CachedValue<T> {
   value: T
@@ -549,7 +576,11 @@ export class IeeeXploreService {
     let lastError: unknown
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+        const headers = new Headers(init.headers)
+        const cookie = ieeeSessionCookieHeader()
+        if (cookie) headers.set('Cookie', cookie)
+        const response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+        captureIeeeSessionCookies(response.headers)
         if (response.ok) return response
         const retryable = [429, 500, 502, 503, 504].includes(response.status)
         if (retryable && attempt === 0) {
