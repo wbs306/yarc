@@ -1710,6 +1710,7 @@ const onDocumentKeydown = (event: KeyboardEvent) => {
 onMounted(async () => {
   window.addEventListener('resize', onResize)
   window.addEventListener('yarc-open-chat', openChatPanel)
+  window.addEventListener('yarc-open-temporary-pdf', onOpenTemporaryPdf)
   document.addEventListener('click', onDocumentClick)
   document.addEventListener('keydown', onDocumentKeydown)
   document.addEventListener('scroll', closeAllContextMenus, true)
@@ -1744,6 +1745,7 @@ onBeforeUnmount(() => {
   void liveFiles.releaseAll()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('yarc-open-chat', openChatPanel)
+  window.removeEventListener('yarc-open-temporary-pdf', onOpenTemporaryPdf)
   document.removeEventListener('click', onDocumentClick)
   document.removeEventListener('keydown', onDocumentKeydown)
   document.removeEventListener('scroll', closeAllContextMenus, true)
@@ -2567,6 +2569,12 @@ const openTemporaryPdf = async (paper: any) => {
   }
 
   if (tab && route.params.id !== tab.paper.id) await router.push(`/paper/${tab.paper.id}`)
+}
+
+const onOpenTemporaryPdf = (event: Event) => {
+  const paper = (event as CustomEvent<unknown>).detail
+  if (!paper || typeof paper !== 'object') return
+  void openTemporaryPdf(paper)
 }
 
 const handleImportStarted = (job: any) => {

@@ -114,6 +114,14 @@ const startImport = () => {
   showImport.value = true
 }
 
+const openPdf = () => {
+  if (!paper.value || !pdfUrl.value) return
+  window.dispatchEvent(new CustomEvent('yarc-open-temporary-pdf', {
+    detail: { ...paper.value, pdfUrl: pdfUrl.value },
+  }))
+  close()
+}
+
 const searchAgain = () => {
   const title = searchTitle.value.trim()
   if (!title) return
@@ -267,6 +275,7 @@ onBeforeUnmount(() => {
         </div>
 
         <footer class="reference-footer">
+          <button v-if="paper && !isLocal && pdfUrl" class="reference-action primary" @click="openPdf">阅读 PDF</button>
           <button v-if="paper && !isLocal && pdfUrl" class="reference-action" @click="startImport">导入 PDF</button>
           <button v-if="paper && !isLocal" class="reference-action" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存题录' }}</button>
           <button v-if="paper?.url || reference?.url" class="reference-action" @click="openExternal">查看原文</button>
@@ -327,6 +336,7 @@ onBeforeUnmount(() => {
 .reference-action { padding: 6px 9px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text-secondary); font-size: 11px; cursor: pointer; }
 .reference-action:hover:not(:disabled) { border-color: rgba(var(--color-primary-rgb), .4); color: var(--color-primary); }
 .reference-action.primary { border-color: var(--color-primary); background: var(--color-primary); color: #fff; }
+.reference-action.primary:hover:not(:disabled) { border-color: var(--color-primary-hover); background: var(--color-primary-hover); color: #fff; }
 .reference-action:disabled { opacity: .5; cursor: not-allowed; }
 .paper-popover-enter-active, .paper-popover-leave-active { transition: opacity .12s ease, transform .12s ease; }
 .paper-popover-enter-from, .paper-popover-leave-to { opacity: 0; transform: translateY(-3px) scale(.985); }
