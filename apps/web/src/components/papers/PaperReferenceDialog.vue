@@ -4,9 +4,11 @@ import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import type { SearchPaper } from '@yarc/shared'
 import ImportToLibraryDialog from '@/components/search/ImportToLibraryDialog.vue'
+import { useApi } from '@/composables/useApi'
 import { usePaperReferenceStore } from '@/stores/paperReference'
 
 const router = useRouter()
+const api = useApi()
 const store = usePaperReferenceStore()
 const { open, loading, saving, error, reference, resolution, anchorRect, anchorElement } = storeToRefs(store)
 const searchTitle = ref('')
@@ -27,6 +29,40 @@ const sourceLabel = computed(() => ({
   ieee: 'IEEE Xplore',
 } as Record<string, string>)[paper.value?.source || ''] || paper.value?.source || '未知')
 const pdfUrl = computed(() => paper.value?.pdfUrl || paper.value?.openAccessPdf?.url || null)
+const ieeeArticleNumber = computed(() => {
+  if (paper.value?.source !== 'ieee') return null
+  const value = paper.value.articleNumber || (String(paper.value.id).match(/^\d{4,20}$/) ? paper.value.id : '')
+  return /^\d{4,20}$/.test(String(value)) ? String(value) : null
+})
+const fullAbstracts = ref<Record<string, string>>({})
+const loadingAbstracts = ref<Set<string>>(new Set())
+const abstractErrors = ref<Record<string, string>>({})
+const displayedAbstract = computed(() => {
+  const articleNumber = ieeeArticleNumber.value
+  return (articleNumber && fullAbstracts.value[articleNumber]) || paper.value?.abstract || ''
+})
+
+const loadFullAbstract = async () => {
+  const articleNumber = ieeeArticleNumber.value
+  if (!articleNumber || loadingAbstracts.value.has(articleNumber)) return
+
+  loadingAbstracts.value = new Set(loadingAbstracts.value).add(articleNumber)
+  const nextErrors = { ...abstractErrors.value }
+  delete nextErrors[articleNumber]
+  abstractErrors.value = nextErrors
+  try {
+    const response = await api.getIeeeArticleAbstract(articleNumber)
+    const abstract = response.papers[0]?.abstract
+    if (!abstract) throw new Error('IEEE 未提供完整摘要')
+    fullAbstracts.value = { ...fullAbstracts.value, [articleNumber]: abstract }
+  } catch (err) {
+    abstractErrors.value = { ...abstractErrors.value, [articleNumber]: (err as Error).message || '完整摘要加载失败' }
+  } finally {
+    const nextLoading = new Set(loadingAbstracts.value)
+    nextLoading.delete(articleNumber)
+    loadingAbstracts.value = nextLoading
+  }
+}
 
 const popoverStyle = computed(() => {
   const margin = 12
@@ -200,9 +236,19 @@ onBeforeUnmount(() => {
               <div v-if="paper.arxivId"><span>arXiv</span><strong>{{ paper.arxivId }}</strong></div>
               <div v-if="paper.citationCount !== undefined && paper.citationCount !== null"><span>引用次数</span><strong>{{ paper.citationCount }}</strong></div>
             </div>
-            <div v-if="paper.abstract" class="reference-abstract">
+            <div v-if="displayedAbstract || ieeeArticleNumber" class="reference-abstract">
               <strong>摘要</strong>
-              <p>{{ paper.abstract }}</p>
+              <p v-if="displayedAbstract">{{ displayedAbstract }}</p>
+              <div v-if="ieeeArticleNumber" class="abstract-load-row">
+                <button
+                  v-if="!fullAbstracts[ieeeArticleNumber]"
+                  class="abstract-load-button"
+                  :disabled="loadingAbstracts.has(ieeeArticleNumber)"
+                  @click="loadFullAbstract"
+                >{{ loadingAbstracts.has(ieeeArticleNumber) ? '正在加载完整摘要…' : '加载完整摘要' }}</button>
+                <span v-else class="abstract-complete">已加载完整摘要</span>
+                <span v-if="abstractErrors[ieeeArticleNumber]" class="abstract-error">{{ abstractErrors[ieeeArticleNumber] }}</span>
+              </div>
             </div>
           </template>
 
@@ -266,6 +312,12 @@ onBeforeUnmount(() => {
 .reference-abstract { margin-top: 14px; }
 .reference-abstract > strong { font-size: 13px; }
 .reference-abstract p { margin: 6px 0 0; color: var(--color-text-secondary); font-size: 14px; line-height: 1.75; cursor: text; user-select: text; }
+.abstract-load-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 7px; }
+.abstract-load-button { padding: 0; border: none; background: transparent; color: var(--color-primary); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.abstract-load-button:hover:not(:disabled) { text-decoration: underline; }
+.abstract-load-button:disabled { color: var(--color-text-muted); cursor: wait; }
+.abstract-complete { color: var(--color-text-muted); font-size: 12px; }
+.abstract-error { color: var(--color-danger); font-size: 12px; }
 .reference-search { display: flex; gap: 8px; }
 .reference-search input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text); }
 .reference-search button { padding: 7px 10px; border: 0; border-radius: var(--radius-sm); background: var(--color-primary); color: #fff; cursor: pointer; }
