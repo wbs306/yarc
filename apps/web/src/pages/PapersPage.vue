@@ -10,7 +10,7 @@ import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
-import type { IeeeJournalBrowserPreferences, ReparseAction, ReparsePaperInfo } from '@yarc/shared'
+import type { CurrentChatResource, IeeeJournalBrowserPreferences, ReparseAction, ReparsePaperInfo } from '@yarc/shared'
 
 import PdfViewer from '@/components/pdf/PdfViewer.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
@@ -1393,6 +1393,15 @@ const activePaper = computed(() => {
   if (!id) return null
   if (paperStore.currentPaper?.id === id) return paperStore.currentPaper
   return readerTabs.value.find((tab) => tab.paper.id === id)?.paper || null
+})
+const currentChatResource = computed<CurrentChatResource | null>(() => {
+  if (hasPaper.value && activePaper.value && !isTemporaryReader.value) {
+    return { type: 'paper', paperId: activePaper.value.id, title: activePaper.value.title }
+  }
+  if (!hasPaper.value && sidebarMode.value === 'files' && selectedWorkspaceFile.value?.type === 'file') {
+    return { type: 'file', path: selectedWorkspaceFile.value.path, name: selectedWorkspaceFile.value.name }
+  }
+  return null
 })
 const workSwitcherLabel = computed(() => {
   if (hasPaper.value) return activePaper.value?.title || `${readerTabs.value.length} 篇已打开`
@@ -3724,7 +3733,7 @@ const showSearchPaperPopup = (paper: any) => {
         :class="{ 'mobile-drawer': isMobile, 'bg-active': !!theme.backgroundImage, closed: !isMobile && !chatOpen }"
         :style="!isMobile ? { width: chatPanelWidth + 'px', minWidth: chatPanelWidth + 'px' } : {}"
       >
-        <ChatPanel @close="isMobile ? (mobileChat = false) : (chatOpen = false)" />
+        <ChatPanel :current-resource="currentChatResource" @close="isMobile ? (mobileChat = false) : (chatOpen = false)" />
       </aside>
     </div>
 

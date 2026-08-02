@@ -205,6 +205,10 @@ export interface AgentInteractionResolved {
   reason?: string
 }
 
+export type CurrentChatResource =
+  | { type: 'paper'; paperId: string; title: string }
+  | { type: 'file'; path: string; name?: string }
+
 export interface ChatRequest {
   type: 'chat'
   content: string
@@ -218,6 +222,7 @@ export interface ChatRequest {
     selectedText: string
     temporaryPdf?: boolean
     documentTitle?: string
+    currentResource?: CurrentChatResource
   }
 }
 

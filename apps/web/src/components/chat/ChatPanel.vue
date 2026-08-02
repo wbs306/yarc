@@ -9,7 +9,9 @@ import ModelSelector from './ModelSelector.vue'
 import ReasoningEffort from './ReasoningEffort.vue'
 import AgentInteractionHost from '@/components/agent/AgentInteractionHost.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
+import type { CurrentChatResource } from '@yarc/shared'
 
+const props = defineProps<{ currentResource?: CurrentChatResource | null }>()
 const emit = defineEmits<{ close: [] }>()
 const chatStore = useChatStore()
 const theme = useThemeStore()
@@ -54,6 +56,7 @@ const commandOptions = [
   { trigger: '/edit ', label: '/edit <path>', hint: '编辑工作区文件' },
   { trigger: '/search ', label: '/search <query>', hint: '搜索论文' },
   { trigger: '/list ', label: '/list papers', hint: '列出论文或分类' },
+  { trigger: '@current ', label: '@current', hint: '引用当前文件或论文' },
   { trigger: '@file ', label: '@file <path>', hint: '引用工作区文件' },
   { trigger: '@paper ', label: '@paper', hint: '引用论文' },
   { trigger: '@category ', label: '@category <name>', hint: '引用分类' },
@@ -172,7 +175,7 @@ interface SuggestionItem {
   label: string
   insert: string
   hint: string
-  type: 'command' | 'file' | 'paper' | 'category'
+  type: 'command' | 'current' | 'file' | 'paper' | 'category'
   matchStart: number
   matchEnd: number
 }
@@ -247,6 +250,7 @@ const suggestions = computed<SuggestionItem[]>(() => {
     const matchStart = atMatch.index!
     const matchEnd = matchStart + atMatch[0].length
     const items: SuggestionItem[] = []
+    if ('current'.startsWith(prefix) || !prefix) items.push({ label: '@current', insert: '@current ', hint: props.currentResource ? `引用当前${props.currentResource.type === 'paper' ? '论文' : '文件'}` : '当前没有可引用内容', type: 'current', matchStart, matchEnd })
     if ('file'.startsWith(prefix) || !prefix) items.push({ label: '@file', insert: '@file ', hint: '引用工作区文件', type: 'file', matchStart, matchEnd })
     if ('paper'.startsWith(prefix) || !prefix) items.push({ label: '@paper', insert: '@paper ', hint: '引用论文', type: 'paper', matchStart, matchEnd })
     if ('category'.startsWith(prefix) || !prefix) items.push({ label: '@category', insert: '@category ', hint: '引用分类', type: 'category', matchStart, matchEnd })
@@ -554,6 +558,12 @@ const send = async () => {
 
   if (await handleWebSlashCommand(text)) return
 
+  const referencesCurrent = /@current\b/i.test(text)
+  if (referencesCurrent && !props.currentResource) {
+    chatStore.chatError = '当前没有可引用的文件或文献库论文'
+    return
+  }
+
   const btwMatch = text.match(/^\/btw(?:\s+([\s\S]+))?$/i)
   if (btwMatch) {
     const question = (btwMatch[1] || '').trim()
@@ -585,7 +595,11 @@ const send = async () => {
   editingMessageId.value = ''
   // Reset textarea height
   if (textareaRef.value) textareaRef.value.style.height = 'auto'
-  const sendPromise = chatStore.sendMessage(text, { editMessageId, editForkMessageId })
+  const sendPromise = chatStore.sendMessage(text, {
+    editMessageId,
+    editForkMessageId,
+    currentResource: referencesCurrent ? props.currentResource || undefined : undefined,
+  })
   await nextTick()
   scrollBottom()
   await sendPromise

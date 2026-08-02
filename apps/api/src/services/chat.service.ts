@@ -14,6 +14,9 @@ interface ChatContext {
   selectedText?: string
   temporaryPdf?: boolean
   documentTitle?: string
+  currentResource?:
+    | { type: 'paper'; paperId: string; title: string }
+    | { type: 'file'; path: string; name?: string }
 }
 
 interface StoredContext {
@@ -223,6 +226,27 @@ export class ChatService {
       }
     }
 
+    // @current is a request-scoped alias resolved by the frontend at send time.
+    // It behaves like @paper for a library paper and @file for a workspace file.
+    let currentFileRef: string | null = null
+    if (/@current\b/i.test(userContent)) {
+      const current = context?.currentResource
+      if (!current) throw new Error('使用 @current 时没有提供当前文件或文献库论文上下文')
+
+      if (current.type === 'paper') {
+        const paper = await prisma.paper.findUnique({
+          where: { id: current.paperId },
+          select: { id: true, title: true, authors: true, year: true, doi: true },
+        })
+        if (!paper) throw new Error(`@current 引用的论文不存在：${current.title || current.paperId}`)
+        lines.push(`current_ref: paper ${paper.title} (id: ${paper.id}, ${paper.authors.slice(0, 2).join(', ')}${paper.year ? `, ${paper.year}` : ''}${paper.doi ? `, DOI ${paper.doi}` : ''})`)
+      } else {
+        currentFileRef = current.path.trim()
+        if (!currentFileRef) throw new Error('@current 引用的文件路径为空')
+        lines.push(`current_ref: file ${currentFileRef}`)
+      }
+    }
+
     // @paper references — resolve the selected title and inject metadata.
     // The UI inserts `@paper ${title} ` and the user usually continues typing
     // the question after it, so a plain /@paper\s+([^@]+)/ match is too greedy.
@@ -242,7 +266,7 @@ export class ChatService {
     }
 
     // @file references — inject file paths only; Pi can decide whether to read them.
-    const fileRefs: string[] = []
+    const fileRefs: string[] = currentFileRef ? [currentFileRef] : []
     for (const match of userContent.matchAll(/@file\s+([^@\s]+)/gi)) fileRefs.push(match[1])
     const readMatch = userContent.match(/^\s*\/read\s+([^\s]+)/i)
     if (readMatch?.[1]) fileRefs.push(readMatch[1])

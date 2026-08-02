@@ -43,6 +43,9 @@ export interface ConversationMessage {
     selectedText?: string
     temporaryPdf?: boolean
     documentTitle?: string
+    currentResource?:
+      | { type: 'paper'; paperId: string; title: string }
+      | { type: 'file'; path: string; name?: string }
     injected?: Array<{ type: 'paper' | 'file' | 'category' | 'search' | 'other'; label: string; detail?: string }>
     raw?: string
   }

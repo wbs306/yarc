@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useApi } from '@/composables/useApi'
 import { createClientId } from '@/lib/id'
+import type { CurrentChatResource } from '@yarc/shared'
 
 export interface ChatSegment { type: 'text' | 'tool' | 'error'; text?: string; toolCallId?: string }
 export interface Message {
@@ -662,14 +663,22 @@ export const useChatStore = defineStore('chat', () => {
 
   // ── Send message ──────────────────────────────────────────────────
 
-  const sendMessage = async (content: string, opts: { editMessageId?: string; editForkMessageId?: string } = {}) => {
+  const sendMessage = async (content: string, opts: { editMessageId?: string; editForkMessageId?: string; currentResource?: CurrentChatResource } = {}) => {
     chatError.value = ''
     let assistantMsg: Message | null = null
     let convId = ''
     let shouldReconnect = false
+    const requestContext = pdfContext.value || opts.currentResource
+      ? {
+          ...(pdfContext.value || { pageNumber: 0, selectedText: '' }),
+          ...(opts.currentResource ? { currentResource: opts.currentResource } : {}),
+        }
+      : null
 
     try {
-      if (!currentConvId.value) await createConversation(pdfContext.value?.paperId)
+      const conversationPaperId = requestContext?.paperId
+        || (requestContext?.currentResource?.type === 'paper' ? requestContext.currentResource.paperId : undefined)
+      if (!currentConvId.value) await createConversation(conversationPaperId)
       ensureModel()
       convId = currentConvId.value || ''
       if (!convId) throw new Error('没有可用对话')
@@ -679,7 +688,7 @@ export const useChatStore = defineStore('chat', () => {
 
       if (!opts.editMessageId) {
         // Optimistic: add user message to cache
-        const um: Message = { id: createClientId(), conversationId: convId, branchId: currentBranchId.value, role: 'user', content, toolCalls: null, metadata: { pending: true, context: pdfContext.value }, createdAt: new Date().toISOString() }
+        const um: Message = { id: createClientId(), conversationId: convId, branchId: currentBranchId.value, role: 'user', content, toolCalls: null, metadata: { pending: true, context: requestContext }, createdAt: new Date().toISOString() }
         if (currentBranchId.value) appendToBranch(currentBranchId.value, um)
       }
 
@@ -689,7 +698,7 @@ export const useChatStore = defineStore('chat', () => {
       assistantMsg = await streamWs(convId, {
         type: 'chat', content, model: currentModel.value || undefined,
         reasoning_effort: reasoningEffort.value,
-        context: pdfContext.value, branchId: currentBranchId.value || undefined,
+        context: requestContext || undefined, branchId: currentBranchId.value || undefined,
         ...(opts.editMessageId ? { editMessageId: opts.editMessageId } : {}),
         ...(opts.editForkMessageId ? { editForkMessageId: opts.editForkMessageId } : {}),
       })
