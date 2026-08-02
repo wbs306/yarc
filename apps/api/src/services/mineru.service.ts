@@ -110,10 +110,15 @@ export class MinerUService {
     // MinerU is the authoritative parser for YARC. Do not fall back to
     // pdftotext: downstream embedding/summary require content_list_v2 and
     // images from MinerU artifacts.
-    return this.parseWithMinerU(pdfPath, paperId)
+    const outputDir = paperId ? join(config.papersDir, paperId, 'mineru') : undefined
+    return this.parseWithMinerU(pdfPath, outputDir)
   }
 
-  private async parseWithMinerU(pdfPath: string, paperId?: string): Promise<MinerUParseResult> {
+  async parsePdfToDirectory(pdfPath: string, outputDir: string): Promise<MinerUParseResult> {
+    return this.parseWithMinerU(pdfPath, outputDir)
+  }
+
+  private async parseWithMinerU(pdfPath: string, outputDir?: string): Promise<MinerUParseResult> {
     const formData = new FormData()
     const fileBuffer = await readFile(pdfPath)
     formData.append('files', new Blob([fileBuffer], { type: 'application/pdf' }), 'paper.pdf')
@@ -141,7 +146,7 @@ export class MinerUService {
 
     const contentType = res.headers.get('content-type') || ''
     const data = contentType.includes('application/zip') || contentType.includes('application/octet-stream')
-      ? await this.persistZipResult(paperId, res)
+      ? await this.persistZipResult(outputDir, res)
       : await res.json()
 
     // Check if MinerU returned a failed status
@@ -150,7 +155,7 @@ export class MinerUService {
     }
 
     let pages = normalizePages(data)
-    const resultPath = paperId ? await this.persistRawResult(paperId, data) : undefined
+    const resultPath = outputDir ? await this.persistRawResult(outputDir, data) : undefined
 
     // Fallback: if no pages extracted but text exists, use full text as single page
     const fullText = normalizeText(data, pages)
@@ -172,13 +177,13 @@ export class MinerUService {
     }
   }
 
-  private async persistZipResult(paperId: string | undefined, res: Response) {
+  private async persistZipResult(outputDir: string | undefined, res: Response) {
     const buffer = Buffer.from(await res.arrayBuffer())
-    if (!paperId) {
-      throw new Error('ZIP MinerU response requires paperId for artifact persistence')
+    if (!outputDir) {
+      throw new Error('ZIP MinerU response requires an output directory for artifact persistence')
     }
 
-    const dir = join(config.papersDir, paperId, 'mineru')
+    const dir = outputDir
     const artifactDir = join(dir, 'artifacts')
     const extractDir = join(dir, '.mineru-extract')
     await rm(dir, { recursive: true, force: true })
@@ -238,10 +243,9 @@ export class MinerUService {
     }
   }
 
-  private async persistRawResult(paperId: string, data: unknown) {
-    const dir = join(config.papersDir, paperId, 'mineru')
-    await mkdir(dir, { recursive: true })
-    const resultPath = join(dir, 'result.json')
+  private async persistRawResult(outputDir: string, data: unknown) {
+    await mkdir(outputDir, { recursive: true })
+    const resultPath = join(outputDir, 'result.json')
     await writeFile(resultPath, JSON.stringify(data, null, 2))
     return resultPath
   }

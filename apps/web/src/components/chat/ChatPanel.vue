@@ -11,7 +11,7 @@ import AgentInteractionHost from '@/components/agent/AgentInteractionHost.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import type { CurrentChatResource } from '@yarc/shared'
 
-const props = defineProps<{ currentResource?: CurrentChatResource | null }>()
+const props = defineProps<{ currentResource?: CurrentChatResource | null; currentResourceNotice?: string }>()
 const emit = defineEmits<{ close: [] }>()
 const chatStore = useChatStore()
 const theme = useThemeStore()
@@ -250,7 +250,7 @@ const suggestions = computed<SuggestionItem[]>(() => {
     const matchStart = atMatch.index!
     const matchEnd = matchStart + atMatch[0].length
     const items: SuggestionItem[] = []
-    if ('current'.startsWith(prefix) || !prefix) items.push({ label: '@current', insert: '@current ', hint: props.currentResource ? `引用当前${props.currentResource.type === 'paper' ? '论文' : '文件'}` : '当前没有可引用内容', type: 'current', matchStart, matchEnd })
+    if ('current'.startsWith(prefix) || !prefix) items.push({ label: '@current', insert: '@current ', hint: props.currentResource ? `引用当前${props.currentResource.type === 'paper' ? '论文' : '文件'}` : props.currentResourceNotice || '当前没有可引用内容', type: 'current', matchStart, matchEnd })
     if ('file'.startsWith(prefix) || !prefix) items.push({ label: '@file', insert: '@file ', hint: '引用工作区文件', type: 'file', matchStart, matchEnd })
     if ('paper'.startsWith(prefix) || !prefix) items.push({ label: '@paper', insert: '@paper ', hint: '引用论文', type: 'paper', matchStart, matchEnd })
     if ('category'.startsWith(prefix) || !prefix) items.push({ label: '@category', insert: '@category ', hint: '引用分类', type: 'category', matchStart, matchEnd })
@@ -560,7 +560,7 @@ const send = async () => {
 
   const referencesCurrent = /@current\b/i.test(text)
   if (referencesCurrent && !props.currentResource) {
-    chatStore.chatError = '当前没有可引用的文件或文献库论文'
+    chatStore.chatError = props.currentResourceNotice || '当前没有可引用的文件或文献库论文'
     return
   }
 
@@ -1152,6 +1152,9 @@ const sessionState = computed(() => {
       <div v-if="chatStore.pdfContext" class="context-badge">
         <span>📄 {{ chatStore.pdfContext.documentTitle || currentPaperTitle || (chatStore.pdfContext.temporaryPdf ? '临时 PDF' : '论文') }} · 第{{ chatStore.pdfContext.pageNumber }}页</span>
         <button @click="chatStore.pdfContext = null">✕</button>
+      </div>
+      <div v-if="props.currentResourceNotice" class="context-badge">
+        <span>⏳ {{ props.currentResourceNotice }}</span>
       </div>
       <div v-if="chatStore.chatError" class="chat-error">
         <span>{{ chatStore.chatError }}</span>

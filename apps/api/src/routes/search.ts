@@ -5,6 +5,7 @@ import {
   ieeeXploreService,
   readIeeeJournalBrowserPreferences,
 } from '../services/ieee-xplore.service.js'
+import { temporaryPdfService } from '../services/temporary-pdf.service.js'
 import type { IeeeSearchMode, IeeeSearchSort, PaperReferenceInput } from '@yarc/shared'
 
 const search = new Hono()
@@ -158,6 +159,43 @@ search.post('/resolve', async (c) => {
 
   const results = await searchService.resolvePaperReferences(normalized)
   return c.json({ results })
+})
+
+// Temporary PDF parsing lifecycle. Parsing starts when the reader opens and
+// produces a Markdown file inside the agent data workspace for @current.
+search.post('/temporary-pdfs', async (c) => {
+  const body = await c.req.json().catch(() => null) as { url?: string; title?: string } | null
+  const url = body?.url?.trim()
+  if (!url) {
+    return c.json({ error: { code: 'MISSING_URL', message: 'URL is required' } }, 400)
+  }
+
+  const document = await temporaryPdfService.create(url, body?.title)
+  return c.json({ document }, 202)
+})
+
+search.get('/temporary-pdfs/:id', (c) => {
+  const id = c.req.param('id')
+  if (!/^[a-f0-9]{24}$/.test(id)) {
+    return c.json({ error: { code: 'INVALID_TEMPORARY_PDF_ID', message: 'Invalid temporary PDF id' } }, 400)
+  }
+  const document = temporaryPdfService.get(id)
+  if (!document) {
+    return c.json({ error: { code: 'TEMPORARY_PDF_NOT_FOUND', message: 'Temporary PDF not found or expired' } }, 404)
+  }
+  return c.json({ document })
+})
+
+search.delete('/temporary-pdfs/:id', (c) => {
+  const id = c.req.param('id')
+  if (!/^[a-f0-9]{24}$/.test(id)) {
+    return c.json({ error: { code: 'INVALID_TEMPORARY_PDF_ID', message: 'Invalid temporary PDF id' } }, 400)
+  }
+  const scheduled = temporaryPdfService.scheduleCleanup(id)
+  if (!scheduled) {
+    return c.json({ error: { code: 'TEMPORARY_PDF_NOT_FOUND', message: 'Temporary PDF not found or expired' } }, 404)
+  }
+  return c.json({ ok: true })
 })
 
 // GET/HEAD /api/search/pdf — stream a remote PDF for the temporary reader.

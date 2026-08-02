@@ -1382,9 +1382,14 @@ type ReaderTab = {
   paper: Paper
   lastAccessedAt: number
   temporaryPdfUrl?: string
+  temporaryPdfId?: string
+  temporaryPdfPath?: string
+  temporaryPdfStatus?: 'parsing' | 'ready' | 'failed'
+  temporaryPdfError?: string
 }
 
 const readerTabs = ref<ReaderTab[]>([])
+const temporaryPdfPollTimers = new Map<string, number>()
 const readerTabLimit = computed(() => (isMobile.value ? 4 : 6))
 const activeReaderTab = computed(() => readerTabs.value.find((tab) => tab.paper.id === activePaperId.value) || null)
 const isTemporaryReader = computed(() => !!activeReaderTab.value?.temporaryPdfUrl)
@@ -1398,10 +1403,21 @@ const currentChatResource = computed<CurrentChatResource | null>(() => {
   if (hasPaper.value && activePaper.value && !isTemporaryReader.value) {
     return { type: 'paper', paperId: activePaper.value.id, title: activePaper.value.title }
   }
+  if (isTemporaryReader.value && activeReaderTab.value?.temporaryPdfStatus === 'ready' && activeReaderTab.value.temporaryPdfPath) {
+    return { type: 'file', path: activeReaderTab.value.temporaryPdfPath, name: `${activeReaderTab.value.paper.title}.md` }
+  }
   if (!hasPaper.value && sidebarMode.value === 'files' && selectedWorkspaceFile.value?.type === 'file') {
     return { type: 'file', path: selectedWorkspaceFile.value.path, name: selectedWorkspaceFile.value.name }
   }
   return null
+})
+const currentChatResourceNotice = computed(() => {
+  if (!isTemporaryReader.value || !activeReaderTab.value) return ''
+  if (activeReaderTab.value.temporaryPdfStatus === 'failed') {
+    return `临时 PDF 解析失败：${activeReaderTab.value.temporaryPdfError || '未知错误'}`
+  }
+  if (activeReaderTab.value.temporaryPdfStatus !== 'ready') return '临时 PDF 正在通过 MinerU 解析，完成后可使用 @current'
+  return ''
 })
 const workSwitcherLabel = computed(() => {
   if (hasPaper.value) return activePaper.value?.title || `${readerTabs.value.length} 篇已打开`
@@ -1630,6 +1646,64 @@ const currentCategoryLabel = computed(() => {
   return categoryNameById.value.get(selectedCategory.value) || '分类'
 })
 
+const clearTemporaryPdfPoll = (paperId: string) => {
+  const timer = temporaryPdfPollTimers.get(paperId)
+  if (timer !== undefined) window.clearTimeout(timer)
+  temporaryPdfPollTimers.delete(paperId)
+}
+
+const cleanupTemporaryReaderTab = (tab: ReaderTab) => {
+  clearTemporaryPdfPoll(tab.paper.id)
+  if (tab.temporaryPdfId) void api.deleteTemporaryPdf(tab.temporaryPdfId).catch(() => {})
+}
+
+const applyTemporaryPdfDocument = (paperId: string, document: { id: string; status: 'parsing' | 'ready' | 'failed'; path?: string; error?: string }) => {
+  const tab = readerTabs.value.find(item => item.paper.id === paperId)
+  if (!tab) return false
+  tab.temporaryPdfId = document.id
+  tab.temporaryPdfStatus = document.status
+  tab.temporaryPdfPath = document.path
+  tab.temporaryPdfError = document.error
+  return true
+}
+
+const pollTemporaryPdf = (paperId: string, documentId: string) => {
+  clearTemporaryPdfPoll(paperId)
+  const timer = window.setTimeout(async () => {
+    temporaryPdfPollTimers.delete(paperId)
+    if (!readerTabs.value.some(tab => tab.paper.id === paperId)) return
+    try {
+      const response = await api.getTemporaryPdf(documentId)
+      if (!applyTemporaryPdfDocument(paperId, response.document)) return
+      if (response.document.status === 'parsing') pollTemporaryPdf(paperId, documentId)
+    } catch (err) {
+      const tab = readerTabs.value.find(item => item.paper.id === paperId)
+      if (tab) {
+        tab.temporaryPdfStatus = 'failed'
+        tab.temporaryPdfError = (err as Error).message || '无法读取临时 PDF 解析状态'
+      }
+    }
+  }, 1500)
+  temporaryPdfPollTimers.set(paperId, timer)
+}
+
+const startTemporaryPdfParse = async (paperId: string, sourceUrl: string, title: string) => {
+  try {
+    const response = await api.createTemporaryPdf(sourceUrl, title)
+    if (!applyTemporaryPdfDocument(paperId, response.document)) {
+      void api.deleteTemporaryPdf(response.document.id).catch(() => {})
+      return
+    }
+    if (response.document.status === 'parsing') pollTemporaryPdf(paperId, response.document.id)
+  } catch (err) {
+    const tab = readerTabs.value.find(item => item.paper.id === paperId)
+    if (tab) {
+      tab.temporaryPdfStatus = 'failed'
+      tab.temporaryPdfError = (err as Error).message || '无法启动临时 PDF 解析'
+    }
+  }
+}
+
 const touchReaderTab = (paper: Paper) => {
   const now = Date.now()
   const existing = readerTabs.value.find((tab) => tab.paper.id === paper.id)
@@ -1644,6 +1718,7 @@ const touchReaderTab = (paper: Paper) => {
     const candidates = readerTabs.value.filter((tab) => tab.paper.id !== paper.id)
     const evict = candidates.sort((a, b) => a.lastAccessedAt - b.lastAccessedAt)[0]
     if (!evict) break
+    cleanupTemporaryReaderTab(evict)
     readerTabs.value = readerTabs.value.filter((tab) => tab.paper.id !== evict.paper.id)
   }
 }
@@ -1660,6 +1735,7 @@ const closeReaderTab = (event: Event, paperId: string) => {
   const idx = readerTabs.value.findIndex((tab) => tab.paper.id === paperId)
   if (idx < 0) return
   const wasActive = activePaperId.value === paperId
+  cleanupTemporaryReaderTab(readerTabs.value[idx])
   readerTabs.value.splice(idx, 1)
   if (!wasActive) return
   const next = readerTabs.value[Math.min(idx, readerTabs.value.length - 1)] || readerTabs.value[idx - 1]
@@ -1756,6 +1832,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   void liveFiles.releaseAll()
+  for (const paperId of temporaryPdfPollTimers.keys()) clearTemporaryPdfPoll(paperId)
   window.removeEventListener('resize', onResize)
   window.removeEventListener('yarc-open-chat', openChatPanel)
   window.removeEventListener('yarc-open-temporary-pdf', onOpenTemporaryPdf)
@@ -2578,7 +2655,15 @@ const openTemporaryPdf = async (paper: any) => {
     }
     touchReaderTab(temporaryPaper)
     tab = readerTabs.value.find((item) => item.paper.id === id)
-    if (tab) tab.temporaryPdfUrl = temporaryPdfUrl
+    if (tab) {
+      tab.temporaryPdfUrl = temporaryPdfUrl
+      tab.temporaryPdfStatus = 'parsing'
+      void startTemporaryPdfParse(tab.paper.id, source, temporaryPaper.title)
+    }
+  } else if (!tab.temporaryPdfId && tab.temporaryPdfStatus !== 'parsing') {
+    tab.temporaryPdfStatus = 'parsing'
+    tab.temporaryPdfError = undefined
+    void startTemporaryPdfParse(tab.paper.id, source, tab.paper.title)
   }
 
   if (tab && route.params.id !== tab.paper.id) await router.push(`/paper/${tab.paper.id}`)
@@ -3733,7 +3818,11 @@ const showSearchPaperPopup = (paper: any) => {
         :class="{ 'mobile-drawer': isMobile, 'bg-active': !!theme.backgroundImage, closed: !isMobile && !chatOpen }"
         :style="!isMobile ? { width: chatPanelWidth + 'px', minWidth: chatPanelWidth + 'px' } : {}"
       >
-        <ChatPanel :current-resource="currentChatResource" @close="isMobile ? (mobileChat = false) : (chatOpen = false)" />
+        <ChatPanel
+          :current-resource="currentChatResource"
+          :current-resource-notice="currentChatResourceNotice"
+          @close="isMobile ? (mobileChat = false) : (chatOpen = false)"
+        />
       </aside>
     </div>
 

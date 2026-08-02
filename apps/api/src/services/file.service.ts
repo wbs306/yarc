@@ -21,7 +21,7 @@ const DEFAULT_TREE_DEPTH = 4
 const PI_TREE_DEPTH = 6
 
 // Items hidden from the file tree (internal app resources)
-const EXCLUDED_NAMES = new Set(['backgrounds', 'model-catalog.json'])
+const EXCLUDED_NAMES = new Set(['backgrounds', 'model-catalog.json', 'temporary-pdfs'])
 
 export class FileService {
   private rootDir: string

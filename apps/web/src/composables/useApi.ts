@@ -18,6 +18,15 @@ interface RequestInitExt extends RequestInit {
 
 export type OfficeViewMode = 'html' | 'text' | 'outline' | 'issues' | 'stats'
 
+export interface TemporaryPdfDocument {
+  id: string
+  title: string
+  sourceUrl: string
+  status: 'parsing' | 'ready' | 'failed'
+  path?: string
+  error?: string
+}
+
 async function request<T>(endpoint: string, options: RequestInitExt = {}): Promise<T> {
   const { params, ...fetchOptions } = options
 
@@ -330,6 +339,18 @@ export function useApi() {
         method: 'POST',
         body: JSON.stringify({ references }),
       }),
+
+    createTemporaryPdf: (url: string, title?: string) =>
+      request<{ document: TemporaryPdfDocument }>('/search/temporary-pdfs', {
+        method: 'POST',
+        body: JSON.stringify({ url, title }),
+      }),
+
+    getTemporaryPdf: (id: string) =>
+      request<{ document: TemporaryPdfDocument }>(`/search/temporary-pdfs/${id}`),
+
+    deleteTemporaryPdf: (id: string) =>
+      request<{ ok: boolean }>(`/search/temporary-pdfs/${id}`, { method: 'DELETE' }),
 
     // Search Categories
     getSearchCategories: () =>
