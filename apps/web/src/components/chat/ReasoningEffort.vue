@@ -9,11 +9,11 @@ const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 
 const LABELS: Record<string, string> = {
   off: '关',
-  minimal: '低',
+  minimal: '极低',
   low: '低',
   medium: '中',
   high: '高',
-  xhigh: '极高',
+  xhigh: '超高',
   max: '极高',
 }
 

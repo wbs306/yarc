@@ -114,6 +114,11 @@ settings.get('/models', async (c) => {
   return c.json(result)
 })
 
+// GET /api/settings/pi-thinking-levels — levels advertised by the Pi runtime
+settings.get('/pi-thinking-levels', async (c) => {
+  return c.json(await piService.listThinkingLevels())
+})
+
 // GET /api/settings/prompt-defaults
 settings.get('/prompt-defaults', (c) => {
   return c.json({

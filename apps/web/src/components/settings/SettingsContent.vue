@@ -71,6 +71,19 @@ const customProviders = ref<Record<string, Provider>>({})
 const customModelsLoading = ref(false)
 const customModelsSaving = ref(false)
 const customModelsError = ref('')
+const piThinkingLevels = ref<string[]>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+const THINKING_LEVEL_LABELS: Record<string, string> = {
+  off: '关',
+  minimal: '极低',
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '超高',
+  max: '极高',
+}
+const thinkingLevelLabel = (level: string) => THINKING_LEVEL_LABELS[level] || level
+const addingThinkingLevelsFor = ref<ProviderModel | null>(null)
+const pendingThinkingLevels = ref<string[]>([])
 const editingProvider = ref('')
 const showAddProvider = ref(false)
 const newProvider = ref<{ id: string; baseUrl: string; api: string; apiKey: string; compat?: Record<string, any> }>({ id: '', baseUrl: '', api: 'openai-completions', apiKey: '' })
@@ -113,6 +126,15 @@ const loadCustomModels = async () => {
     customModelsError.value = (err as Error).message || '加载失败'
   } finally {
     customModelsLoading.value = false
+  }
+}
+
+const loadPiThinkingLevels = async () => {
+  try {
+    const result = await api.getPiThinkingLevels()
+    if (result.levels.length) piThinkingLevels.value = result.levels
+  } catch (err) {
+    console.warn('Failed to load Pi thinking levels:', err)
   }
 }
 
@@ -257,17 +279,47 @@ const ensureCost = (model: ProviderModel) => {
   if (!model.cost) model.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 }
 
-const setThinkingLevelMap = (model: ProviderModel, level: string, value: string) => {
-  if (!model.thinkingLevelMap) model.thinkingLevelMap = {}
-  const v = value.trim().toLowerCase()
-  if (v === '' || v === 'default') {
-    delete model.thinkingLevelMap[level]
-  } else if (v === 'null' || v === '不支持' || v === 'unsupported') {
-    model.thinkingLevelMap[level] = null
-  } else {
-    model.thinkingLevelMap[level] = value.trim()
+const thinkingLevelEntries = (model: ProviderModel): Array<[string, string | null]> => {
+  const map = model.thinkingLevelMap || {}
+  const order = new Map(piThinkingLevels.value.map((level, index) => [level, index]))
+  return Object.entries(map).sort(([a], [b]) => {
+    const aOrder = order.get(a)
+    const bOrder = order.get(b)
+    if (aOrder != null && bOrder != null) return aOrder - bOrder
+    if (aOrder != null) return -1
+    if (bOrder != null) return 1
+    return a.localeCompare(b)
+  })
+}
+
+const openThinkingLevelPicker = (model: ProviderModel) => {
+  addingThinkingLevelsFor.value = model
+  pendingThinkingLevels.value = []
+}
+
+const addThinkingLevels = async (model: ProviderModel) => {
+  const selected = pendingThinkingLevels.value.filter(level => !(level in (model.thinkingLevelMap || {})))
+  if (selected.length) {
+    model.thinkingLevelMap = { ...model.thinkingLevelMap, ...Object.fromEntries(selected.map(level => [level, level])) }
+    await saveCustomModels()
   }
-  // Clean up if empty
+  addingThinkingLevelsFor.value = null
+  pendingThinkingLevels.value = []
+}
+
+const setThinkingLevelMap = (model: ProviderModel, level: string, value: string) => {
+  const v = value.trim()
+  if (!v) {
+    removeThinkingLevel(model, level)
+    return
+  }
+  model.thinkingLevelMap = { ...model.thinkingLevelMap, [level]: v }
+  saveCustomModels()
+}
+
+const removeThinkingLevel = (model: ProviderModel, level: string) => {
+  if (!model.thinkingLevelMap) return
+  delete model.thinkingLevelMap[level]
   if (Object.keys(model.thinkingLevelMap).length === 0) delete model.thinkingLevelMap
   saveCustomModels()
 }
@@ -1519,6 +1571,7 @@ const onPiConfigChanged = () => {
   void loadEnabledModels()
   void loadAllSettings()
   void loadCustomModels()
+  void loadPiThinkingLevels()
 }
 
 onMounted(async () => {
@@ -1534,6 +1587,7 @@ onMounted(async () => {
     loadAllSettings(),
     loadBgImages(),
     loadCustomModels(),
+    loadPiThinkingLevels(),
     loadPiSettings(),
     loadAuth(),
     loadModelCatalog(),
@@ -1851,16 +1905,34 @@ onBeforeUnmount(() => {
                           </div>
                           <div class="edit-field" style="grid-column: span 2;">
                             <label>Thinking Level Map</label>
-                            <div class="tlm-grid">
-                              <template v-for="level in ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']" :key="level">
-                                <span class="tlm-label">{{ level }}</span>
-                                <input
-                                  class="text-input-sm"
-                                  :value="m.thinkingLevelMap?.[level] === null ? 'null' : (m.thinkingLevelMap?.[level] || '')"
-                                  :placeholder="m.thinkingLevelMap?.[level] === null ? '不支持' : '默认'"
-                                  @change="setThinkingLevelMap(m, level, ($event.target as HTMLInputElement).value)"
-                                />
+                            <p class="field-hint">未添加等级即使用 Pi 默认映射。添加后默认映射到同名等级，值可按上游 API 要求修改。</p>
+                            <div v-if="thinkingLevelEntries(m).length" class="tlm-grid">
+                              <template v-for="[level, mappedLevel] in thinkingLevelEntries(m)" :key="level">
+                                <span class="tlm-label">{{ thinkingLevelLabel(level) }}（{{ level }}）</span>
+                                <div class="tlm-value-row">
+                                  <input
+                                    class="text-input-sm"
+                                    :value="mappedLevel ?? ''"
+                                    :placeholder="mappedLevel === null ? '已禁用' : level"
+                                    @change="setThinkingLevelMap(m, level, ($event.target as HTMLInputElement).value)"
+                                  />
+                                  <button class="tag-remove" title="移除此映射并恢复 Pi 默认" @click="removeThinkingLevel(m, level)">×</button>
+                                </div>
                               </template>
+                            </div>
+                            <p v-else class="empty-text">未设置自定义推理映射</p>
+                            <div class="tlm-add-row">
+                              <button class="btn-ghost-sm" @click="openThinkingLevelPicker(m)">添加推理等级</button>
+                              <div v-if="addingThinkingLevelsFor === m" class="tlm-picker">
+                                <label v-for="level in piThinkingLevels.filter(level => !(level in (m.thinkingLevelMap || {})))" :key="level" class="check-label">
+                                  <input v-model="pendingThinkingLevels" type="checkbox" :value="level" /> {{ thinkingLevelLabel(level) }}（{{ level }}）
+                                </label>
+                                <span v-if="!piThinkingLevels.some(level => !(level in (m.thinkingLevelMap || {})))" class="empty-text">所有 Pi 等级均已添加</span>
+                                <div class="tlm-picker-actions">
+                                  <button class="btn-primary-sm" :disabled="!pendingThinkingLevels.length" @click="addThinkingLevels(m)">添加</button>
+                                  <button class="btn-ghost-sm" @click="addingThinkingLevelsFor = null; pendingThinkingLevels = []">取消</button>
+                                </div>
+                              </div>
                             </div>
                           </div>
                           <div class="edit-field">
@@ -4296,6 +4368,29 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--color-text-muted);
   font-family: monospace;
+}
+.tlm-value-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tlm-value-row .text-input-sm { flex: 1; }
+.tlm-add-row { margin-top: 8px; }
+.tlm-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-muted);
+}
+.tlm-picker .check-label { font-family: monospace; }
+.tlm-picker-actions {
+  display: flex;
+  gap: 6px;
+  width: 100%;
 }
 .add-model-row {
   display: flex;

@@ -20,6 +20,21 @@ import { agentInteractionRegistry } from '../lib/agent-interaction-registry.js'
 import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/mineru-content-v2.js'
 import type { AgentInteractionResponse, ChatEvent } from '@yarc/shared'
 
+const DEFAULT_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh'] as const
+const PI_THINKING_LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+const orderThinkingLevels = (levels: Iterable<string>): string[] => {
+  const order = new Map<string, number>(PI_THINKING_LEVEL_ORDER.map((level, index) => [level, index]))
+  return [...new Set(levels)].sort((a, b) => {
+    const aOrder = order.get(a)
+    const bOrder = order.get(b)
+    if (aOrder != null && bOrder != null) return aOrder - bOrder
+    if (aOrder != null) return -1
+    if (bOrder != null) return 1
+    return a.localeCompare(b)
+  })
+}
+
 export class PiService {
   private piModule: any = null
   private modelRuntime: any = null
@@ -2491,6 +2506,32 @@ export class PiService {
     return text.length > 4000 ? `${text.slice(0, 4000)}…` : text
   }
 
+  /**
+   * Return the Pi runtime's advertised thinking levels for the settings UI.
+   *
+   * Pi does not expose a standalone runtime constant for these levels; model
+   * metadata is its public capability source. The YARC defaults make a new
+   * custom model immediately configurable with the usual five controls, while
+   * runtime-advertised levels such as `minimal` and `max` are added dynamically.
+   */
+  async listThinkingLevels(): Promise<{ levels: string[]; defaultLevels: string[] }> {
+    try {
+      await this.initPi()
+      const models = this.modelRuntime ? await this.modelRuntime.getAvailable() : []
+      const runtimeLevels = models.flatMap((model: any) => Object.keys(model.thinkingLevelMap || {}))
+      return {
+        // Pi 0.83 exposes this canonical set through its SDK model metadata;
+        // include all current levels so a custom model can opt into `max` even
+        // before another configured model advertises it.
+        levels: orderThinkingLevels([...PI_THINKING_LEVEL_ORDER, ...runtimeLevels]),
+        defaultLevels: [...DEFAULT_THINKING_LEVELS],
+      }
+    } catch (err) {
+      console.warn('[PiService] Failed to read Pi thinking levels:', err)
+      return { levels: [...PI_THINKING_LEVEL_ORDER], defaultLevels: [...DEFAULT_THINKING_LEVELS] }
+    }
+  }
+
   async listModels(force = false): Promise<any> {
     try {
       await this.initPi()
@@ -2507,10 +2548,9 @@ export class PiService {
 
     try {
       const allModels = await this.modelRuntime.getAvailable()
-      const models = await this.filterByEnabledModels(allModels)
-
-      return {
-        models: models.map((m: any) => ({
+      const enabledModels = await this.filterByEnabledModels(allModels)
+      const models = enabledModels
+        .map((m: any) => ({
           id: m.id,
           name: m.name || m.id,
           provider: m.provider,
@@ -2518,8 +2558,22 @@ export class PiService {
           contextWindow: m.contextWindow,
           maxTokens: m.maxTokens,
           cost: m.cost,
-          thinkingLevels: m.thinkingLevelMap ? Object.keys(m.thinkingLevelMap) : undefined,
-        })),
+          // Pi uses null to mean hidden/unsupported. YARC starts with its
+          // five default controls and adds explicitly mapped Pi levels (such
+          // as `minimal` or `max`), independent of JSON insertion order.
+          thinkingLevels: m.reasoning
+            ? orderThinkingLevels([
+              ...DEFAULT_THINKING_LEVELS.filter(level => m.thinkingLevelMap?.[level] !== null),
+              ...Object.entries(m.thinkingLevelMap || {})
+                .filter(([, value]) => value !== null)
+                .map(([level]) => level),
+            ])
+            : undefined,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+
+      return {
+        models,
         source: 'pi',
       }
     } catch (err) {

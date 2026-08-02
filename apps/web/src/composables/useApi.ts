@@ -471,6 +471,9 @@ export function useApi() {
         params: refresh ? { refresh: '1' } : {},
       }),
 
+    getPiThinkingLevels: () =>
+      request<{ levels: string[]; defaultLevels: string[] }>('/settings/pi-thinking-levels'),
+
     getPromptDefaults: () => request<{ defaults: { summary_prompt: string; system_prompt: string } }>('/settings/prompt-defaults'),
 
     getTheme: () => request<{ theme: any }>('/settings/themes/active'),
