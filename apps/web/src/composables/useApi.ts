@@ -408,7 +408,20 @@ export function useApi() {
       request<{ files: any[] }>('/files', { params: path ? { path } : {} }),
 
     getFileContent: (path: string, options?: { refreshLive?: boolean }) =>
-      request<{ content: string; language: string; modified: string }>('/files/content', {
+      request<{
+        content: string
+        language: string
+        modified: string
+        live?: boolean
+        dirty?: boolean
+        saving?: boolean
+        conflict?: boolean
+        revision?: number
+        savedRevision?: number
+        sessionEpoch?: string
+        contentHash?: string
+        diskHash?: string
+      }>('/files/content', {
         params: { path, ...(options?.refreshLive ? { refreshLive: '1' } : {}) },
       }),
 

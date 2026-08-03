@@ -9,6 +9,7 @@
     "dev:api": "apps/api/node_modules/.bin/tsx watch apps/api/src/index.ts",
     "dev:web": "pnpm --filter @yarc/web dev",
     "build": "pnpm --filter @yarc/web build && pnpm --filter @yarc/api build",
+    "test": "pnpm --filter @yarc/api test",
     "start": "apps/api/node_modules/.bin/tsx apps/api/src/index.ts",
     "db:migrate": "pnpm --filter @yarc/db migrate",
     "db:deploy": "pnpm --filter @yarc/db migrate:deploy",

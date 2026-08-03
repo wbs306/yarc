@@ -1,6 +1,11 @@
 import { ref, type Ref } from 'vue'
 import * as Y from 'yjs'
-import { getOfflineWorkspaceFile, putOfflineWorkspaceFile } from '@/lib/offline-workspace-cache'
+import {
+  getOfflineWorkspaceFile,
+  putOfflineWorkspaceFile,
+  removeOfflineWorkspaceFile,
+  type OfflineWorkspaceFileSnapshot,
+} from '@/lib/offline-workspace-cache'
 
 export interface LiveFileStatus {
   path: string
@@ -10,6 +15,11 @@ export interface LiveFileStatus {
   modified?: string
   savedAt?: string
   clients?: number
+  revision?: number
+  savedRevision?: number
+  sessionEpoch?: string
+  contentHash?: string
+  diskHash?: string
 }
 
 export interface LiveFileClient {
@@ -23,6 +33,9 @@ export interface LiveFileClient {
   ready: Ref<boolean>
   offline: Ref<boolean>
   cachedAt: Ref<number | null>
+  serverRevision: Ref<number>
+  sessionEpoch: Ref<string>
+  draftAvailable: Ref<boolean>
   dirty: Ref<boolean>
   saving: Ref<boolean>
   conflict: Ref<boolean>
@@ -34,9 +47,24 @@ export interface LiveFileClient {
   close: () => void
 }
 
+type PendingOperationKind = 'flush' | 'resolve-conflict' | 'replace-content'
+
+type PendingOperation = {
+  id: string
+  kind: PendingOperationKind
+  generation: number
+  resolve: () => void
+  reject: (error: Error) => void
+  timer: number
+  sent: boolean
+}
+
 const clients = new Map<string, LiveFileClient>()
 const RECONNECT_BASE_MS = 500
 const RECONNECT_MAX_MS = 15_000
+const INITIAL_CONNECTION_TIMEOUT_MS = 5_000
+const FLUSH_TIMEOUT_MS = 20_000
+const CONFLICT_TIMEOUT_MS = 10_000
 
 const fromBase64 = (value: string) => {
   const binary = window.atob(value)
@@ -51,10 +79,28 @@ const toBase64 = (update: Uint8Array) => {
   return window.btoa(binary)
 }
 
+const sha256Text = async (value: string): Promise<string | null> => {
+  const subtle = globalThis.crypto?.subtle
+  if (!subtle) return null
+  try {
+    const digest = await subtle.digest('SHA-256', new TextEncoder().encode(value))
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return null
+  }
+}
+
+const createRequestId = () => {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
 const liveFileUrl = (path: string) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${protocol}//${window.location.host}/api/files/live?path=${encodeURIComponent(path)}`
 }
+
+const isIgnoredOrigin = (origin: unknown) => origin === 'server' || origin === 'cache' || origin === 'recovery'
 
 export function useLiveFiles() {
   const get = (path?: string | null) => (path ? clients.get(path) || null : null)
@@ -63,71 +109,63 @@ export function useLiveFiles() {
     const existing = clients.get(path)
     if (existing) return existing
 
-    const cachedSnapshot = await getOfflineWorkspaceFile(path)
-    if (navigator.onLine === false && !cachedSnapshot) {
-      throw new Error('当前处于离线状态，且没有此文件的本地缓存')
-    }
-
     const ydoc = new Y.Doc()
     const ytext = ydoc.getText('content')
     const content = ref('')
-    const language = ref(cachedSnapshot?.language || 'plaintext')
-    const modified = ref(cachedSnapshot?.modified || '')
+    const language = ref('plaintext')
+    const modified = ref('')
     const connected = ref(false)
     const ready = ref(false)
-    const offline = ref(!!cachedSnapshot)
-    const cachedAt = ref<number | null>(cachedSnapshot?.cachedAt || null)
+    const offline = ref(false)
+    const cachedAt = ref<number | null>(null)
+    const serverRevision = ref(0)
+    const sessionEpoch = ref('')
+    const draftAvailable = ref(false)
     const dirty = ref(false)
     const saving = ref(false)
     const conflict = ref(false)
     const error = ref('')
     const status = ref<LiveFileStatus | null>(null)
 
-    let usingCachedSnapshot = !!cachedSnapshot
-    if (cachedSnapshot) {
-      ydoc.transact(() => ytext.insert(0, cachedSnapshot.content), 'cache')
-      content.value = cachedSnapshot.content
-    }
-
     let ws: WebSocket | null = null
     let closedByClient = false
     let reconnectTimer: number | null = null
     let reconnectCountdownTimer: number | null = null
-    let snapshotTimer: number | null = null
     let reconnectDeadline = 0
     let reconnectAttempt = 0
-    let pendingFlushRequested = false
     let readyResolve: (() => void) | null = null
-    let readyReject: ((err: Error) => void) | null = null
-    let pendingFlushResolve: (() => void) | null = null
-    let pendingFlushReject: ((err: Error) => void) | null = null
+    let readySettled = false
+    let authoritativeReady = false
+    let localDirty = false
+    let localChangeGeneration = 0
+    let localDraftContent: string | null = null
+    let pendingServerContent: string | null = null
+    let pendingFlushRequested = false
+    let activeFlushId: string | null = null
+    let draftTimer: number | null = null
+    let statusVersion = 0
+    const pendingOperations = new Map<string, PendingOperation>()
 
-    const readyPromise = new Promise<void>((resolve, reject) => {
+    const readyPromise = new Promise<void>((resolve) => {
       readyResolve = resolve
-      readyReject = reject
     })
 
-    const clearPendingFlush = (err?: Error) => {
-      if (err) pendingFlushReject?.(err)
-      else pendingFlushResolve?.()
-      pendingFlushResolve = null
-      pendingFlushReject = null
+    const resolveReady = () => {
+      if (readySettled) return
+      readySettled = true
+      ready.value = true
+      readyResolve?.()
+      readyResolve = null
     }
 
     const sendJson = (message: unknown) => {
       if (ws?.readyState !== WebSocket.OPEN) return false
-      ws.send(JSON.stringify(message))
-      return true
-    }
-
-    const sendFullLocalStateIfNeeded = () => {
-      if (!dirty.value) return
-      sendJson({ type: 'update', update: toBase64(Y.encodeStateAsUpdate(ydoc)) })
-    }
-
-    const requestFlush = () => {
-      pendingFlushRequested = true
-      if (sendJson({ type: 'flush' })) pendingFlushRequested = false
+      try {
+        ws.send(JSON.stringify(message))
+        return true
+      } catch {
+        return false
+      }
     }
 
     const clearReconnectCountdown = () => {
@@ -136,23 +174,6 @@ export function useLiveFiles() {
         reconnectCountdownTimer = null
       }
       reconnectDeadline = 0
-    }
-
-    const persistSnapshot = () => {
-      void putOfflineWorkspaceFile({
-        path,
-        content: ytext.toString(),
-        language: language.value,
-        modified: modified.value,
-      })
-    }
-
-    const scheduleSnapshot = () => {
-      if (snapshotTimer !== null) window.clearTimeout(snapshotTimer)
-      snapshotTimer = window.setTimeout(() => {
-        snapshotTimer = null
-        persistSnapshot()
-      }, 300)
     }
 
     const scheduleReconnect = (delayOverride?: number) => {
@@ -179,80 +200,343 @@ export function useLiveFiles() {
       }, delay)
     }
 
-    ytext.observe(() => {
-      content.value = ytext.toString()
-      scheduleSnapshot()
-    })
+    const persistLastKnownGood = () => {
+      if (!authoritativeReady || offline.value || localDirty || dirty.value || saving.value || conflict.value) return
+      const snapshot: Omit<OfflineWorkspaceFileSnapshot, 'cachedAt'> = {
+        path,
+        content: ytext.toString(),
+        language: language.value,
+        modified: modified.value,
+        kind: 'last-known-good',
+        contentHash: status.value?.contentHash,
+        serverRevision: serverRevision.value,
+        sessionEpoch: sessionEpoch.value,
+        savedAt: status.value?.savedAt ? Date.parse(status.value.savedAt) : Date.now(),
+      }
+      cachedAt.value = Date.now()
+      void putOfflineWorkspaceFile(snapshot)
+    }
 
-    ydoc.on('update', (update: Uint8Array, origin: unknown) => {
-      if (origin === 'server' || origin === 'cache') return
-      dirty.value = true
-      if (!sendJson({ type: 'update', update: toBase64(update) })) {
-        // The next successful connection sends the full local Y.Doc state, so
-        // edits made while offline are preserved without queuing every update.
-        scheduleReconnect()
+    const persistLocalDraft = () => {
+      if (!localDirty) return
+      localDraftContent = ytext.toString()
+      const snapshot: Omit<OfflineWorkspaceFileSnapshot, 'cachedAt'> = {
+        path,
+        content: localDraftContent,
+        language: language.value,
+        modified: modified.value,
+        kind: 'local-draft',
+        serverRevision: serverRevision.value,
+        sessionEpoch: sessionEpoch.value,
+      }
+      draftAvailable.value = true
+      void putOfflineWorkspaceFile(snapshot)
+    }
+
+    const scheduleLocalDraft = () => {
+      if (draftTimer !== null) window.clearTimeout(draftTimer)
+      draftTimer = window.setTimeout(() => {
+        draftTimer = null
+        persistLocalDraft()
+      }, 300)
+    }
+
+    const clearLocalDraft = () => {
+      localDraftContent = null
+      draftAvailable.value = false
+      void removeOfflineWorkspaceFile(path, 'local-draft')
+    }
+
+    const applyCachedSnapshot = (snapshot: OfflineWorkspaceFileSnapshot) => {
+      ydoc.transact(() => {
+        if (ytext.length) ytext.delete(0, ytext.length)
+        if (snapshot.content) ytext.insert(0, snapshot.content)
+      }, 'cache')
+      content.value = snapshot.content
+      language.value = snapshot.language || 'plaintext'
+      modified.value = snapshot.modified || ''
+      cachedAt.value = snapshot.cachedAt
+      offline.value = true
+      resolveReady()
+    }
+
+    const failPendingOperations = (reason: Error, includeQueued = true) => {
+      for (const [id, operation] of pendingOperations) {
+        if (!includeQueued && !operation.sent) continue
+        window.clearTimeout(operation.timer)
+        operation.reject(reason)
+        pendingOperations.delete(id)
+      }
+      activeFlushId = null
+      pendingFlushRequested = false
+    }
+
+    const sendNextFlush = () => {
+      if (conflict.value || activeFlushId || !pendingFlushRequested || ws?.readyState !== WebSocket.OPEN) return
+      const operation = [...pendingOperations.values()].find((item) => item.kind === 'flush' && !item.sent)
+      if (!operation) {
+        pendingFlushRequested = false
+        return
+      }
+      if (!sendJson({ type: 'flush', requestId: operation.id })) return
+      operation.sent = true
+      activeFlushId = operation.id
+      pendingFlushRequested = false
+    }
+
+    const createOperation = (
+      kind: PendingOperationKind,
+      generation: number,
+      message: Record<string, unknown>,
+      timeoutMs: number
+    ) => new Promise<void>((resolve, reject) => {
+      const id = String(message.requestId || createRequestId())
+      const timer = window.setTimeout(() => {
+        const operation = pendingOperations.get(id)
+        if (!operation) return
+        pendingOperations.delete(id)
+        if (activeFlushId === id) activeFlushId = null
+        reject(new Error(kind === 'flush' ? '保存超时' : '冲突处理超时'))
+        sendNextFlush()
+      }, timeoutMs)
+      const operation: PendingOperation = { id, kind, generation, resolve, reject, timer, sent: false }
+      pendingOperations.set(id, operation)
+
+      if (kind === 'flush') {
+        pendingFlushRequested = true
+        sendNextFlush()
+      } else if (!sendJson({ ...message, requestId: id })) {
+        window.clearTimeout(timer)
+        pendingOperations.delete(id)
+        reject(new Error('实时文件连接未建立'))
+      } else {
+        operation.sent = true
       }
     })
 
-    const handleMessage = (event: MessageEvent) => {
+    const completeFlushOperation = (msg: any) => {
+      const operation = pendingOperations.get(String(msg.requestId || ''))
+      if (!operation) return
+      pendingOperations.delete(operation.id)
+      window.clearTimeout(operation.timer)
+      if (activeFlushId === operation.id) activeFlushId = null
+
+      if (msg.conflict) {
+        conflict.value = true
+        error.value = '文件存在外部修改冲突，请先处理冲突'
+        operation.reject(new Error(error.value))
+        sendNextFlush()
+        return
+      }
+
+      if (typeof msg.revision === 'number') serverRevision.value = msg.revision
+      if (msg.savedAt) {
+        status.value = status.value || {
+          path,
+          dirty: dirty.value,
+          saving: saving.value,
+          conflict: conflict.value,
+        }
+        status.value.savedAt = msg.savedAt
+        modified.value = status.value.modified || modified.value
+      }
+
+      if (operation.kind !== 'flush' && typeof msg.update === 'string') {
+        applyAuthoritativeUpdate(fromBase64(msg.update))
+      }
+      if (typeof msg.hash === 'string' && status.value) status.value.contentHash = msg.hash
+
+      if (localChangeGeneration <= operation.generation) {
+        localDirty = false
+        dirty.value = false
+        clearLocalDraft()
+        persistLastKnownGood()
+      } else {
+        dirty.value = true
+        scheduleLocalDraft()
+      }
+      saving.value = false
+      operation.resolve()
+      sendNextFlush()
+    }
+
+    const acknowledgeAutosave = async (serverStatus: LiveFileStatus, observedStatusVersion: number) => {
+      if (serverStatus.dirty || serverStatus.saving || serverStatus.conflict) return
+      if (!localDirty || activeFlushId || pendingServerContent !== null) return
+      if (statusVersion !== observedStatusVersion) return
+      if (!serverStatus.contentHash) return
+
+      const generation = localChangeGeneration
+      const localHash = await sha256Text(ytext.toString())
+      if (localHash === null) return
+      if (generation !== localChangeGeneration || statusVersion !== observedStatusVersion) return
+      if (!localDirty || activeFlushId || pendingServerContent !== null) return
+      if (localHash !== serverStatus.contentHash) return
+
+      // The backend's clean status is an acknowledgement of the debounced
+      // autosave. Only clear the local dirty flag when the acknowledged disk
+      // content is exactly the current local Yjs content; a newer local edit
+      // must remain visible as dirty.
+      localDirty = false
+      dirty.value = false
+      clearLocalDraft()
+      persistLastKnownGood()
+    }
+
+    const syncText = (nextContent: string, origin: 'server' | 'recovery' = 'server') => {
+      if (ytext.toString() === nextContent) return
+      ydoc.transact(() => {
+        if (ytext.length) ytext.delete(0, ytext.length)
+        if (nextContent) ytext.insert(0, nextContent)
+      }, origin)
+      content.value = nextContent
+    }
+
+    const applyAuthoritativeUpdate = (update: Uint8Array) => {
+      ydoc.transact(() => {
+        if (ytext.length) ytext.delete(0, ytext.length)
+      }, 'server')
+      Y.applyUpdate(ydoc, update, 'server')
+      content.value = ytext.toString()
+    }
+
+    const loadOfflineFallback = async () => {
+      const cachedSnapshot = await getOfflineWorkspaceFile(path, 'last-known-good')
+      if (!cachedSnapshot) return false
+      applyCachedSnapshot(cachedSnapshot)
+      return true
+    }
+
+    const loadCachedDraft = async (serverContent: string) => {
+      const draft = await getOfflineWorkspaceFile(path, 'local-draft')
+      if (!draft || draft.content === serverContent) {
+        if (draft) await removeOfflineWorkspaceFile(path, 'local-draft')
+        return
+      }
+      localDraftContent = draft.content
+      draftAvailable.value = true
+      conflict.value = true
+      error.value = '发现未同步的本地草稿，请选择保留草稿或使用服务端版本。'
+    }
+
+    const sendFullLocalStateIfNeeded = () => {
+      if (!localDirty || pendingServerContent !== null) return
+      if (!sendJson({ type: 'update', update: toBase64(Y.encodeStateAsUpdate(ydoc)) })) {
+        scheduleReconnect()
+      }
+    }
+
+    ytext.observe(() => {
+      content.value = ytext.toString()
+    })
+
+    ydoc.on('update', (update: Uint8Array, origin: unknown) => {
+      if (isIgnoredOrigin(origin)) return
+      localChangeGeneration += 1
+      localDirty = true
+      dirty.value = true
+      scheduleLocalDraft()
+      if (!sendJson({ type: 'update', update: toBase64(update) })) scheduleReconnect()
+    })
+
+    const handleMessage = async (event: MessageEvent) => {
       try {
         const msg = JSON.parse(String(event.data))
         if (msg.type === 'init') {
-          const hadLocalDirty = dirty.value
-          // A cached document originated from another Y.Doc instance. Clear its
-          // provisional content before applying the authoritative server state,
-          // otherwise the two CRDT histories would be merged into duplicate text.
-          if (usingCachedSnapshot && !hadLocalDirty && ytext.length) {
-            ydoc.transact(() => ytext.delete(0, ytext.length), 'server')
+          const incomingEpoch = String(msg.sessionEpoch || msg.status?.sessionEpoch || '')
+          const epochChanged = !!sessionEpoch.value && !!incomingEpoch && incomingEpoch !== sessionEpoch.value
+          const serverDoc = new Y.Doc()
+          Y.applyUpdate(serverDoc, fromBase64(msg.update), 'server')
+          const serverContent = serverDoc.getText('content').toString()
+          serverDoc.destroy()
+
+          if (authoritativeReady && epochChanged && localDirty) {
+            pendingServerContent = serverContent
+            conflict.value = true
+            error.value = '实时文件服务端 session 已重建，当前本地修改需要确认是否覆盖服务端版本。'
+            failPendingOperations(new Error(error.value))
+          } else if (!authoritativeReady || epochChanged) {
+            applyAuthoritativeUpdate(fromBase64(msg.update))
+            localDirty = false
+            dirty.value = false
+            pendingServerContent = null
+          } else {
+            Y.applyUpdate(ydoc, fromBase64(msg.update), 'server')
           }
-          usingCachedSnapshot = false
-          language.value = msg.language || 'plaintext'
-          modified.value = msg.modified || ''
-          Y.applyUpdate(ydoc, fromBase64(msg.update), 'server')
-          content.value = ytext.toString()
+
+          authoritativeReady = true
+          sessionEpoch.value = incomingEpoch || sessionEpoch.value
+          language.value = msg.language || language.value || 'plaintext'
+          modified.value = msg.modified || modified.value
+          connected.value = true
           offline.value = false
-          persistSnapshot()
+          status.value = msg.status || status.value
           if (msg.status) {
-            status.value = msg.status
-            dirty.value = !!msg.status.dirty || hadLocalDirty
+            serverRevision.value = Number(msg.status.revision || msg.revision || 0)
             saving.value = !!msg.status.saving
-            conflict.value = !!msg.status.conflict
+            if (msg.status.conflict) conflict.value = true
+            else if (!localDirty && !pendingServerContent) dirty.value = !!msg.status.dirty
           }
-          ready.value = true
-          readyResolve?.()
-          readyResolve = null
-          if (hadLocalDirty) sendFullLocalStateIfNeeded()
-          if (pendingFlushRequested) requestFlush()
+          resolveReady()
+          if (pendingServerContent === null) {
+            if (!msg.status?.dirty && !msg.status?.saving && !msg.status?.conflict) persistLastKnownGood()
+            void loadCachedDraft(serverContent)
+          }
+          sendFullLocalStateIfNeeded()
+          sendNextFlush()
           return
         }
+
         if (msg.type === 'update' && typeof msg.update === 'string') {
+          if (pendingServerContent !== null) return
           Y.applyUpdate(ydoc, fromBase64(msg.update), 'server')
-          content.value = ytext.toString()
+          if (typeof msg.revision === 'number') serverRevision.value = msg.revision
           return
         }
+
         if (msg.type === 'status' && msg.status) {
-          status.value = msg.status
-          dirty.value = !!msg.status.dirty
-          saving.value = !!msg.status.saving
-          conflict.value = !!msg.status.conflict
-          if (msg.status.modified) modified.value = msg.status.modified
-          if (!dirty.value && !saving.value && !conflict.value) clearPendingFlush()
-          if (conflict.value) clearPendingFlush(new Error('文件存在冲突，请先处理冲突'))
+          const nextStatus = msg.status as LiveFileStatus
+          status.value = nextStatus
+          const observedStatusVersion = ++statusVersion
+          if (typeof nextStatus.revision === 'number') serverRevision.value = nextStatus.revision
+          if (nextStatus.sessionEpoch && !sessionEpoch.value) sessionEpoch.value = nextStatus.sessionEpoch
+          saving.value = !!nextStatus.saving
+          if (nextStatus.conflict) {
+            conflict.value = true
+          } else if (nextStatus.dirty) {
+            dirty.value = true
+          } else if (!localDirty && !activeFlushId && !pendingServerContent) {
+            dirty.value = false
+          } else if (!activeFlushId && pendingServerContent === null) {
+            // Autosaves do not have a request-specific flush-ack. Verify the
+            // server's content hash before clearing a local dirty flag.
+            void acknowledgeAutosave(nextStatus, observedStatusVersion)
+          }
+          if (nextStatus.modified) modified.value = nextStatus.modified
+          if (!dirty.value && !saving.value && !conflict.value) persistLastKnownGood()
           return
         }
+
+        if (msg.type === 'flush-ack') {
+          completeFlushOperation(msg)
+          return
+        }
+
         if (msg.type === 'conflict') {
           conflict.value = true
           error.value = msg.message || '文件存在冲突'
-          clearPendingFlush(new Error(error.value))
+          failPendingOperations(new Error(error.value))
           return
         }
+
         if (msg.type === 'error') {
           error.value = msg.message || '实时文件同步失败'
-          if (!ready.value) {
-            readyReject?.(new Error(error.value))
-            readyReject = null
+          const operationError = new Error(error.value)
+          if (!readySettled && !authoritativeReady) {
+            const loaded = await loadOfflineFallback()
+            if (loaded && !ready.value) resolveReady()
           }
-          clearPendingFlush(new Error(error.value))
+          failPendingOperations(operationError)
         }
       } catch (err) {
         error.value = (err as Error).message || '实时文件消息解析失败'
@@ -266,14 +550,10 @@ export function useLiveFiles() {
 
     const pauseWhenOffline = () => {
       offline.value = true
-      if (!ready.value && !usingCachedSnapshot) {
-        readyReject?.(new Error('当前处于离线状态，无法读取未缓存的文件'))
-        readyReject = null
-      }
+      if (!authoritativeReady) void loadOfflineFallback()
+      else if (localDirty || dirty.value || saving.value || conflict.value) persistLocalDraft()
+      else persistLastKnownGood()
     }
-
-    window.addEventListener('online', reconnectWhenOnline)
-    window.addEventListener('offline', pauseWhenOffline)
 
     function connect() {
       if (closedByClient || navigator.onLine === false) {
@@ -289,22 +569,23 @@ export function useLiveFiles() {
         clearReconnectCountdown()
         error.value = ''
       }
-      ws.onmessage = handleMessage
+      ws.onmessage = (event) => { void handleMessage(event) }
       ws.onerror = () => {
         connected.value = false
         offline.value = true
-        if (!closedByClient) {
-          error.value = '实时文件连接失败，正在显示缓存副本'
-        }
+        if (!authoritativeReady) error.value = '实时文件连接失败，正在显示缓存副本'
+        else if (!closedByClient) error.value = '实时文件连接已断开，正在重连…'
       }
       ws.onclose = () => {
         connected.value = false
         offline.value = true
-        if (!closedByClient) {
-          // Keep pending flush promises open across reconnects. After init, the
-          // client resends dirty local state and any requested flush.
-          scheduleReconnect()
+        if (activeFlushId) {
+          const operation = pendingOperations.get(activeFlushId)
+          if (operation) operation.sent = false
+          activeFlushId = null
+          pendingFlushRequested = true
         }
+        if (!closedByClient) scheduleReconnect()
       }
     }
 
@@ -319,56 +600,66 @@ export function useLiveFiles() {
       ready,
       offline,
       cachedAt,
+      serverRevision,
+      sessionEpoch,
+      draftAvailable,
       dirty,
       saving,
       conflict,
       error,
       status,
       flush: () => {
-        if (conflict.value) return Promise.reject(new Error('文件存在冲突，请先处理冲突'))
-        requestFlush()
-        if (!dirty.value && !saving.value && !pendingFlushRequested) return Promise.resolve()
-        return new Promise<void>((resolve, reject) => {
-          pendingFlushResolve = resolve
-          pendingFlushReject = reject
-          window.setTimeout(() => {
-            if (pendingFlushReject === reject) clearPendingFlush(new Error('保存超时'))
-          }, 20_000)
-        })
+        if (conflict.value) return Promise.reject(new Error(error.value || '文件存在冲突，请先处理冲突'))
+        if (!localDirty && !dirty.value && !saving.value && !activeFlushId) return Promise.resolve()
+        return createOperation('flush', localChangeGeneration, { type: 'flush' }, FLUSH_TIMEOUT_MS)
       },
       resolveConflict: (strategy) => {
-        if (!sendJson({ type: 'resolve-conflict', strategy })) return Promise.reject(new Error('实时文件连接未建立'))
-        return new Promise<void>((resolve, reject) => {
-          pendingFlushResolve = resolve
-          pendingFlushReject = reject
-          window.setTimeout(() => {
-            if (pendingFlushReject === reject) clearPendingFlush(new Error('冲突处理超时'))
-          }, 10_000)
+        const recoveryContent = strategy === 'use-live'
+          ? (localDraftContent ?? ytext.toString())
+          : (pendingServerContent ?? ytext.toString())
+
+        if (pendingServerContent !== null || localDraftContent !== null) {
+          const operation = createOperation(
+            'replace-content',
+            localChangeGeneration,
+            { type: 'replace-content', content: recoveryContent },
+            CONFLICT_TIMEOUT_MS
+          )
+          return operation.then(() => {
+            pendingServerContent = null
+            localDraftContent = null
+            conflict.value = false
+            error.value = ''
+          })
+        }
+
+        return createOperation(
+          'resolve-conflict',
+          localChangeGeneration,
+          { type: 'resolve-conflict', strategy },
+          CONFLICT_TIMEOUT_MS
+        ).then(() => {
+          conflict.value = false
+          error.value = ''
         })
       },
-      syncContent: (nextContent) => {
-        const current = ytext.toString()
-        if (current === nextContent) return
-        ydoc.transact(() => {
-          ytext.delete(0, ytext.length)
-          ytext.insert(0, nextContent)
-        }, 'server')
-        content.value = nextContent
-      },
+      syncContent: (nextContent) => syncText(nextContent, 'server'),
       close: () => {
         closedByClient = true
         window.removeEventListener('online', reconnectWhenOnline)
         window.removeEventListener('offline', pauseWhenOffline)
-        if (snapshotTimer !== null) {
-          window.clearTimeout(snapshotTimer)
-          snapshotTimer = null
+        if (draftTimer !== null) {
+          window.clearTimeout(draftTimer)
+          draftTimer = null
         }
-        persistSnapshot()
+        if (localDirty) persistLocalDraft()
+        else if (authoritativeReady) persistLastKnownGood()
         if (reconnectTimer !== null) {
           window.clearTimeout(reconnectTimer)
           reconnectTimer = null
         }
         clearReconnectCountdown()
+        failPendingOperations(new Error('实时文件客户端已关闭'))
         try { ws?.close() } catch { /* ignore */ }
         ydoc.destroy()
         clients.delete(path)
@@ -376,44 +667,37 @@ export function useLiveFiles() {
     }
 
     clients.set(path, client)
-    if (navigator.onLine === false) return client
+    window.addEventListener('online', reconnectWhenOnline)
+    window.addEventListener('offline', pauseWhenOffline)
 
-    connect()
-    if (cachedSnapshot) return client
-    const initialConnectionTimer = window.setTimeout(() => {
-      if (!ready.value) {
-        readyReject?.(new Error('实时文件连接超时，请检查后端连接后重试'))
-        readyReject = null
-      }
-    }, 10_000)
-    try {
-      await readyPromise
-      window.clearTimeout(initialConnectionTimer)
-      return client
-    } catch (err) {
-      window.clearTimeout(initialConnectionTimer)
+    if (navigator.onLine === false) {
+      if (await loadOfflineFallback()) return client
       clients.delete(path)
       closedByClient = true
       window.removeEventListener('online', reconnectWhenOnline)
       window.removeEventListener('offline', pauseWhenOffline)
-      if (snapshotTimer !== null) window.clearTimeout(snapshotTimer)
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
-      clearReconnectCountdown()
-      try { (ws as WebSocket | null)?.close() } catch { /* ignore */ }
       ydoc.destroy()
-      throw err
+      throw new Error('当前处于离线状态，且没有此文件的本地缓存')
     }
+
+    connect()
+    const connectedInTime = await Promise.race([
+      readyPromise.then(() => true),
+      new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), INITIAL_CONNECTION_TIMEOUT_MS)),
+    ])
+    if (connectedInTime) return client
+
+    if (await loadOfflineFallback()) return client
+
+    client.close()
+    throw new Error('实时文件连接超时，且没有此文件的本地缓存')
   }
 
   const release = async (path: string) => {
     const client = clients.get(path)
     if (!client) return
-    // Do not block tab close on a flush acknowledgement. Every local edit has
-    // already been sent as a Yjs update; the backend also flushes when the socket
-    // detaches, so waiting here only makes the close button feel stuck if a status
-    // message is delayed or lost.
-    if (!client.conflict.value && (client.dirty.value || client.saving.value)) {
-      void client.flush().catch(() => {})
+    if (!client.conflict.value && (client.dirty.value || client.saving.value) && !client.offline.value) {
+      await client.flush().catch(() => undefined)
     }
     client.close()
   }

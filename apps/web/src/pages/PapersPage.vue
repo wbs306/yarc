@@ -236,7 +236,8 @@ const workspaceDirty = computed(() => {
 const workspaceCanEdit = computed(() => selectedWorkspaceFile.value?.type === 'file'
   && selectedWorkspaceFile.value.editable
   && !selectedWorkspaceFile.value.readonly
-  && !currentLiveClient.value?.offline.value)
+  && !!currentLiveClient.value
+  && !currentLiveClient.value.offline.value)
 const workspaceIsOfflineCopy = computed(() => !!currentLiveClient.value?.offline.value)
 const workspaceOfflineCachedAt = computed(() => {
   const cachedAt = currentLiveClient.value?.cachedAt.value
@@ -423,7 +424,12 @@ watch([selectedWorkspacePath, markdownPreview], () => {
 const workspaceEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
 
 watch(() => currentLiveClient.value?.content.value, (content) => {
-  if (currentLiveClient.value && content !== undefined) workspaceContent.value = content
+  const live = currentLiveClient.value
+  if (!live || content === undefined) return
+  workspaceContent.value = content
+  if (!live.dirty.value && !live.saving.value && !live.conflict.value && !live.offline.value) {
+    workspaceSavedContent.value = content
+  }
 })
 watch(() => currentLiveClient.value?.language.value, (language) => {
   if (currentLiveClient.value && language) workspaceLanguage.value = language
@@ -1025,7 +1031,7 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
   if (live?.conflict.value) {
     const choice = await confirmChoice({
       title: '关闭冲突文件？',
-      message: `「${file?.name || '当前文件'}」存在外部修改冲突。关闭后不会自动覆盖磁盘版本。`,
+      message: `「${file?.name || '当前文件'}」存在外部修改或未同步草稿。关闭后不会自动覆盖服务端版本。`,
       cancelText: '取消关闭',
       icon: 'alert',
       actions: [
@@ -2014,36 +2020,20 @@ const refreshOpenWorkspaceFileContent = async (changedPath?: string) => {
   }
 
   for (const path of candidatePaths) {
-    // On exact save/create events we only need to refresh the affected file. For
-    // watcher `external-change` events, still refresh every open tab because the
-    // backend watcher intentionally coalesces quick filesystem changes.
+    // On exact save/create events we only need to refresh the affected file.
+    // External changes for an open live file arrive through its WebSocket; the
+    // HTTP fallback below is reserved for non-live tabs.
     if (normalizedChangedPath && path !== normalizedChangedPath) continue
 
     try {
       const live = liveFiles.get(path)
-      if (live && (live.dirty.value || live.saving.value || live.conflict.value)) continue
-      const res = await api.getFileContent(path, { refreshLive: !!live })
       if (live) {
-        if (!live.dirty.value && !live.saving.value && !live.conflict.value) live.syncContent(res.content)
-        live.language.value = res.language
-        live.modified.value = res.modified
-        const isCurrentLive = selectedWorkspacePath.value === path
-        const tabLive = openWorkspaceTabs.value.find((item) => item.file.path === path)
-        if (isCurrentLive) {
-          workspaceContent.value = live.content.value
-          workspaceSavedContent.value = live.content.value
-          workspaceLanguage.value = res.language
-          workspaceModified.value = res.modified
-          snapshotCurrentWorkspaceTab()
-        }
-        if (tabLive) {
-          tabLive.content = live.content.value
-          tabLive.savedContent = live.content.value
-          tabLive.language = res.language
-          tabLive.modified = res.modified
-        }
+        // The WebSocket live document is authoritative for an open editable
+        // file. Do not fall back to a cacheable HTTP response here: a stale
+        // Service Worker response must never overwrite a live document.
         continue
       }
+      const res = await api.getFileContent(path)
       const isCurrent = selectedWorkspacePath.value === path
       const tab = openWorkspaceTabs.value.find((item) => item.file.path === path)
       const previousSavedContent = isCurrent ? workspaceSavedContent.value : tab?.savedContent
@@ -3720,9 +3710,9 @@ const showSearchPaperPopup = (paper: any) => {
                 </aside>
               </div>
               <div v-if="currentLiveClient?.conflict.value" class="workspace-live-conflict">
-                文件在磁盘被外部程序修改，无法安全自动合并。
+                {{ currentLiveClient.error.value || '文件存在外部修改或未同步草稿。' }}
                 <button @click="resolveCurrentLiveConflict('use-live')">保留编辑器版本</button>
-                <button @click="resolveCurrentLiveConflict('use-disk')">使用磁盘版本</button>
+                <button @click="resolveCurrentLiveConflict('use-disk')">使用服务端版本</button>
               </div>
               <CodeEditor
                 ref="workspaceEditorRef"

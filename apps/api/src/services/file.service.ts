@@ -1,5 +1,6 @@
-import { readdir, stat, readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises'
+import { readdir, stat, readFile, mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, extname, relative, resolve, sep, basename } from 'node:path'
+import { atomicWriteFile, atomicWriteTextFile } from '../lib/atomic-file.js'
 import { config } from '../lib/config.js'
 import { AppError } from '../lib/errors.js'
 import { sseHub } from '../lib/sse.js'
@@ -165,19 +166,20 @@ export class FileService {
       : DEFAULT_TREE_DEPTH
   }
 
-  private emitFilesChanged(action: string, path?: string) {
+  private async emitFilesChanged(action: string, path?: string) {
     if (action === 'external-change' && path) {
-      void liveFileService.handleDiskChange(path)
-        .then((result) => {
-          if (result === 'self') return
-          sseHub.emit({ type: 'files-changed', action, path, live: result === 'live', at: new Date().toISOString() })
-          if (this.isPiConfigPath(path)) {
-            void import('./pi.service.js')
-              .then(({ piService }) => piService.reload(`files:${action}`))
-              .catch((err) => console.warn('[FileService] Pi reload failed:', err))
-          }
-        })
-        .catch((err) => console.warn('[FileService] live disk-change bridge failed:', err))
+      try {
+        const result = await liveFileService.handleDiskChange(path)
+        if (result === 'self') return
+        sseHub.emit({ type: 'files-changed', action, path, live: result === 'live', at: new Date().toISOString() })
+        if (this.isPiConfigPath(path)) {
+          void import('./pi.service.js')
+            .then(({ piService }) => piService.reload(`files:${action}`))
+            .catch((err) => console.warn('[FileService] Pi reload failed:', err))
+        }
+      } catch (err) {
+        console.warn('[FileService] live disk-change bridge failed:', err)
+      }
       return
     }
 
@@ -224,14 +226,15 @@ export class FileService {
     return snapshot
   }
 
-  private firstSnapshotDiff(previous: Map<string, string>, next: Map<string, string>): string | undefined {
+  private snapshotDiffs(previous: Map<string, string>, next: Map<string, string>): string[] {
+    const changed = new Set<string>()
     for (const [path, value] of next.entries()) {
-      if (previous.get(path) !== value) return path
+      if (previous.get(path) !== value) changed.add(path)
     }
     for (const path of previous.keys()) {
-      if (!next.has(path)) return path
+      if (!next.has(path)) changed.add(path)
     }
-    return undefined
+    return [...changed].sort()
   }
 
   startWatcher(intervalMs = 1000): void {
@@ -247,11 +250,14 @@ export class FileService {
         try {
           await mkdir(this.rootDir, { recursive: true })
           const next = await this.collectSnapshot(this.rootDir)
-          if (this.lastSnapshot) {
-            const changedPath = this.firstSnapshotDiff(this.lastSnapshot, next)
-            if (changedPath) this.emitFilesChanged('external-change', changedPath)
-          }
+          const changedPaths = this.lastSnapshot ? this.snapshotDiffs(this.lastSnapshot, next) : []
+          // Publish the snapshot before processing so changes made while the
+          // bridge is waiting are observed by the next scan. Await every bridge
+          // operation to avoid re-entering handleDiskChange for the same file.
           this.lastSnapshot = next
+          for (const changedPath of changedPaths) {
+            await this.emitFilesChanged('external-change', changedPath)
+          }
         } finally {
           this.scanning = false
         }
@@ -328,7 +334,20 @@ export class FileService {
     return this.sortNodes(nodes)
   }
 
-  async getFileContent(filePath: string): Promise<{ content: string; language: string; modified: string; live?: boolean; dirty?: boolean; saving?: boolean; conflict?: boolean }> {
+  async getFileContent(filePath: string): Promise<{
+    content: string
+    language: string
+    modified: string
+    live?: boolean
+    dirty?: boolean
+    saving?: boolean
+    conflict?: boolean
+    revision?: number
+    savedRevision?: number
+    sessionEpoch?: string
+    contentHash?: string
+    diskHash?: string
+  }> {
     const liveSnapshot = liveFileService.getSnapshot(filePath)
     if (liveSnapshot) return liveSnapshot
 
@@ -376,7 +395,8 @@ export class FileService {
   async saveFileContent(filePath: string, content: string): Promise<void> {
     if (liveFileService.hasSession(filePath)) {
       await liveFileService.replaceContent(filePath, content, 'api')
-      await liveFileService.flush(filePath)
+      const result = await liveFileService.flush(filePath)
+      if (result?.conflict) throw new AppError('CONFLICT', '文件存在外部修改冲突，请先处理冲突', 409)
       return
     }
 
@@ -388,8 +408,8 @@ export class FileService {
       throw new AppError('UNSUPPORTED_FILE', 'This file type or size cannot be edited as text', 400)
     }
 
-    await writeFile(fullPath, content, 'utf-8')
-    this.emitFilesChanged('save', this.toRelativePath(fullPath))
+    await liveFileService.withWorkspaceMutationLock(() => atomicWriteTextFile(fullPath, content))
+    void this.emitFilesChanged('save', this.toRelativePath(fullPath))
   }
 
   async writeTextFile(filePath: string, content: string, create = false): Promise<FileNode> {
@@ -409,10 +429,16 @@ export class FileService {
       await mkdir(dirname(fullPath), { recursive: true })
     }
 
-    await writeFile(fullPath, content, 'utf-8')
+    if (liveFileService.hasSession(filePath)) {
+      await liveFileService.replaceContent(filePath, content, 'api')
+      const result = await liveFileService.flush(filePath)
+      if (result?.conflict) throw new AppError('CONFLICT', '文件存在外部修改冲突，请先处理冲突', 409)
+    } else {
+      await liveFileService.withWorkspaceMutationLock(() => atomicWriteTextFile(fullPath, content))
+    }
     const node = await this.buildNode(fullPath, DEFAULT_TREE_DEPTH)
     if (!node) throw new AppError('WRITE_FAILED', 'Failed to write file', 500)
-    this.emitFilesChanged('write', node.path)
+    void this.emitFilesChanged('write', node.path)
     return node
   }
 
@@ -431,11 +457,10 @@ export class FileService {
       if (err instanceof AppError) throw err
     }
 
-    await mkdir(dirname(fullPath), { recursive: true })
-    await writeFile(fullPath, content, 'utf-8')
+    await liveFileService.withWorkspaceMutationLock(() => atomicWriteTextFile(fullPath, content))
     const node = await this.buildNode(fullPath, DEFAULT_TREE_DEPTH)
     if (!node) throw new AppError('CREATE_FAILED', 'Failed to create file', 500)
-    this.emitFilesChanged('create-file', node.path)
+    void this.emitFilesChanged('create-file', node.path)
     return node
   }
 
@@ -464,8 +489,10 @@ export class FileService {
     } catch (err) {
       if (err instanceof AppError) throw err
     }
-    await mkdir(dirname(to), { recursive: true })
-    await rename(from, to)
+    await liveFileService.withWorkspaceMutationLock(async () => {
+      await mkdir(dirname(to), { recursive: true })
+      await rename(from, to)
+    })
     const node = await this.buildNode(to, DEFAULT_TREE_DEPTH)
     if (!node) throw new AppError('RENAME_FAILED', 'Failed to rename path', 500)
     this.emitFilesChanged('rename', node.path)
@@ -477,8 +504,8 @@ export class FileService {
     if (this.isProtectedPath(filePath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
     const fullPath = this.resolvePath(filePath)
     await this.assertExists(fullPath)
-    await rm(fullPath, { recursive: true, force: false })
-    this.emitFilesChanged('delete', this.normalizeRelativePath(filePath))
+    await liveFileService.withWorkspaceMutationLock(() => rm(fullPath, { recursive: true, force: false }))
+    void this.emitFilesChanged('delete', this.normalizeRelativePath(filePath))
   }
 
   async uploadFile(dirPath: string, file: File): Promise<FileNode> {
@@ -498,7 +525,7 @@ export class FileService {
 
     await mkdir(dirname(target), { recursive: true })
     const buffer = Buffer.from(await file.arrayBuffer())
-    await writeFile(target, buffer)
+    await liveFileService.withWorkspaceMutationLock(() => atomicWriteFile(target, buffer))
     const node = await this.buildNode(target, DEFAULT_TREE_DEPTH)
     if (!node) throw new AppError('UPLOAD_FAILED', 'Failed to upload file', 500)
     this.emitFilesChanged('upload', node.path)

@@ -1,7 +1,7 @@
 import { prisma } from '@yarc/db'
 import { randomUUID } from 'node:crypto'
 import { access, mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
 import { searchService } from './search.service.js'
 import { searchCategoryService } from './search-category.service.js'
 import { categoryService } from './category.service.js'
@@ -17,6 +17,7 @@ import { applyAgentWorkspaceEnv, ensureAgentWorkspace, readAgentSettings } from 
 import { getPiSessionMetadata, savePiSessionMetadata } from '../lib/pi-metadata.js'
 import { DEFAULT_CHAT_SYSTEM_PROMPT } from '../lib/prompts.js'
 import { agentInteractionRegistry } from '../lib/agent-interaction-registry.js'
+import { liveFileService } from './live-file.service.js'
 import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/mineru-content-v2.js'
 import type { AgentInteractionResponse, ChatEvent } from '@yarc/shared'
 
@@ -283,6 +284,7 @@ export class PiService {
         modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
         resourceLoader,
+        customTools: this.createWorkspaceToolOverrides(agentWorkspace.cwd),
       })
       session = result.session
 
@@ -343,6 +345,7 @@ export class PiService {
         sessionManager,
         modelRuntime: this.modelRuntime,
         resourceLoader,
+        customTools: this.createWorkspaceToolOverrides(agentWorkspace.cwd),
       })
 
       // Keep session alive so extensions can maintain connections
@@ -1820,6 +1823,7 @@ export class PiService {
         modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
         resourceLoader,
+        customTools: this.createWorkspaceToolOverrides(agentWorkspace.cwd),
       })
       session = result.session
     } catch (err) {
@@ -1953,6 +1957,7 @@ export class PiService {
         modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
         resourceLoader,
+        customTools: this.createWorkspaceToolOverrides(agentWorkspace.cwd),
       })
       session = result.session
     } catch (err) {
@@ -2089,7 +2094,7 @@ export class PiService {
         sessionManager,
         modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
-        customTools: enabledTools,
+        customTools: [...this.createWorkspaceToolOverrides(agentWorkspace.cwd), ...enabledTools],
         resourceLoader,
       })
       session = result.session
@@ -2342,6 +2347,73 @@ export class PiService {
       emitInteractionEvent = null
       await session.dispose()
     }
+  }
+
+  private createWorkspaceToolOverrides(cwd: string): any[] {
+    if (!this.piModule) return []
+    const {
+      createBashToolDefinition,
+      createEditToolDefinition,
+      createLocalBashOperations,
+      createReadToolDefinition,
+      createWriteToolDefinition,
+    } = this.piModule
+    if (typeof createEditToolDefinition !== 'function' || typeof createWriteToolDefinition !== 'function') return []
+
+    const agentReadBases = new Map<string, string>()
+    const readFile = async (absolutePath: string) => {
+      const buffer = await liveFileService.readAgentFile(absolutePath)
+      agentReadBases.set(absolutePath, buffer.toString('utf-8'))
+      return buffer
+    }
+    const readOperations = {
+      readFile,
+      access: (absolutePath: string) => liveFileService.accessAgentFile(absolutePath),
+      detectImageMimeType: async (absolutePath: string) => {
+        const mimeTypes: Record<string, string> = {
+          '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg',
+          '.png': 'image/png',
+          '.gif': 'image/gif',
+          '.webp': 'image/webp',
+          '.bmp': 'image/bmp',
+        }
+        return mimeTypes[extname(absolutePath).toLowerCase()] || null
+      },
+    }
+    const editOperations = {
+      ...readOperations,
+      writeFile: (absolutePath: string, content: string) => {
+        const baseContent = agentReadBases.get(absolutePath)
+        agentReadBases.delete(absolutePath)
+        return liveFileService.writeAgentFile(absolutePath, content, baseContent)
+      },
+    }
+    const writeOperations = {
+      writeFile: (absolutePath: string, content: string) => {
+        const baseContent = agentReadBases.get(absolutePath)
+        agentReadBases.delete(absolutePath)
+        return liveFileService.writeAgentFile(absolutePath, content, baseContent)
+      },
+      mkdir: (directory: string) => mkdir(directory, { recursive: true }).then(() => undefined),
+    }
+
+    const definitions: any[] = [
+      createReadToolDefinition(cwd, { operations: readOperations }),
+      createEditToolDefinition(cwd, { operations: editOperations }),
+      createWriteToolDefinition(cwd, { operations: writeOperations }),
+    ]
+
+    if (typeof createBashToolDefinition === 'function' && typeof createLocalBashOperations === 'function') {
+      const localBash = createLocalBashOperations()
+      definitions.push(createBashToolDefinition(cwd, {
+        operations: {
+          exec: (command: string, commandCwd: string, options: any) =>
+            liveFileService.withWorkspaceMutationLock(() => localBash.exec(command, commandCwd, options)),
+        },
+      }))
+    }
+    return definitions
   }
 
   private filterChatTools(tools: any[]) {

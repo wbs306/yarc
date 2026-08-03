@@ -148,11 +148,33 @@ app.get(
           const msg = JSON.parse(raw)
           if (!clientId) return
           if (msg.type === 'update' && typeof msg.update === 'string') {
-            liveFileService.applyClientUpdate(path, msg.update, clientId)
+            await liveFileService.applyClientUpdate(path, msg.update, clientId)
           } else if (msg.type === 'flush') {
-            await liveFileService.flush(path)
+            const result = await liveFileService.flush(path)
+            if (msg.requestId && result) {
+              ws.send(JSON.stringify({ type: 'flush-ack', requestId: msg.requestId, ...result }))
+            }
           } else if (msg.type === 'resolve-conflict' && (msg.strategy === 'use-live' || msg.strategy === 'use-disk')) {
-            await liveFileService.resolveConflict(path, msg.strategy)
+            const result = await liveFileService.resolveConflict(path, msg.strategy, clientId)
+            if (msg.requestId && result) {
+              ws.send(JSON.stringify({
+                type: 'flush-ack',
+                requestId: msg.requestId,
+                ...result,
+                update: liveFileService.getStateUpdate(path),
+              }))
+            }
+          } else if (msg.type === 'replace-content' && typeof msg.content === 'string') {
+            await liveFileService.replaceContent(path, msg.content, 'client', clientId)
+            const result = await liveFileService.flush(path)
+            if (msg.requestId && result) {
+              ws.send(JSON.stringify({
+                type: 'flush-ack',
+                requestId: msg.requestId,
+                ...result,
+                update: liveFileService.getStateUpdate(path),
+              }))
+            }
           } else {
             ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', message: 'Unsupported live file message' }))
           }
