@@ -634,6 +634,16 @@ const setTextareaSelection = (start: number, end = start) => {
   nextTick(() => textareaRef.value?.setSelectionRange(start, end))
 }
 
+const insertComposerNewline = (e: KeyboardEvent) => {
+  const el = textareaRef.value
+  if (!el) return
+  e.preventDefault()
+  const start = el.selectionStart
+  const end = el.selectionEnd
+  inputText.value = el.value.slice(0, start) + '\n' + el.value.slice(end)
+  setTextareaSelection(start + 1)
+}
+
 const onKeydown = (e: KeyboardEvent) => {
   if (e.key === 'Tab') {
     if (suggestions.value.length) { e.preventDefault(); applySelectedSuggestion() }
@@ -694,8 +704,13 @@ const onKeydown = (e: KeyboardEvent) => {
     historyDraft.value = ''
     historyDraftSelection.value = null
   }
-  // Keep Shift/Ctrl+Enter as the textarea's native newline shortcuts.
-  if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey)) return
+  // Ctrl+Enter has no reliable native textarea behavior across browsers, so
+  // insert the line break explicitly. Shift+Enter remains native.
+  if (e.key === 'Enter' && e.ctrlKey) {
+    insertComposerNewline(e)
+    return
+  }
+  if (e.key === 'Enter' && e.shiftKey) return
   if (e.key === 'Enter') {
     if (suggestions.value.length) { e.preventDefault(); applySelectedSuggestion(); return }
     e.preventDefault(); send()

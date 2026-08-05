@@ -37,6 +37,18 @@ const toggleMulti = (value: string) => {
   else selectedMany.value.push(value)
 }
 
+const insertInputNewline = (e: KeyboardEvent) => {
+  const target = e.target as HTMLTextAreaElement
+  if (target?.tagName !== 'TEXTAREA') return
+  e.preventDefault()
+  const start = target.selectionStart
+  const end = target.selectionEnd
+  const nextValue = target.value.slice(0, start) + '\n' + target.value.slice(end)
+  target.value = nextValue
+  inputValue.value = nextValue
+  requestAnimationFrame(() => target.setSelectionRange(start + 1, start + 1))
+}
+
 // E3: Keyboard shortcuts for generic dialogs
 const onKeydown = (e: KeyboardEvent) => {
   if (e.key === 'Escape') {
@@ -44,8 +56,13 @@ const onKeydown = (e: KeyboardEvent) => {
     emit('cancel')
     return
   }
-  // Shift/Ctrl+Enter keep the textarea's native newline behavior.
-  if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey) && (e.target as HTMLElement)?.tagName === 'TEXTAREA') return
+  // Ctrl+Enter has no reliable native textarea behavior across browsers, so
+  // insert the line break explicitly. Shift+Enter remains native.
+  if (e.key === 'Enter' && e.ctrlKey && (e.target as HTMLElement)?.tagName === 'TEXTAREA') {
+    insertInputNewline(e)
+    return
+  }
+  if (e.key === 'Enter' && e.shiftKey) return
   // Enter → submit (non-textarea)
   if (e.key === 'Enter' && !e.shiftKey) {
     const target = e.target as HTMLElement

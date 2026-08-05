@@ -59,6 +59,16 @@ const ensureAnswerState = () => {
   for (const key of Object.keys(focusedLabels)) delete focusedLabels[Number(key)]
 }
 
+const insertTextareaNewline = (e: KeyboardEvent) => {
+  const target = e.target as HTMLTextAreaElement
+  if (target?.tagName !== 'TEXTAREA') return
+  e.preventDefault()
+  const start = target.selectionStart
+  const end = target.selectionEnd
+  target.setRangeText('\n', start, end, 'end')
+  target.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 // E3: Keyboard shortcuts
 const onKeydown = (e: KeyboardEvent) => {
   // Esc → cancel
@@ -67,8 +77,13 @@ const onKeydown = (e: KeyboardEvent) => {
     emit('cancel')
     return
   }
-  // Shift/Ctrl+Enter keep the textarea's native newline behavior.
-  if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey) && (e.target as HTMLElement)?.tagName === 'TEXTAREA') return
+  // Ctrl+Enter has no reliable native textarea behavior across browsers, so
+  // insert the line break explicitly. Shift+Enter remains native.
+  if (e.key === 'Enter' && e.ctrlKey && (e.target as HTMLElement)?.tagName === 'TEXTAREA') {
+    insertTextareaNewline(e)
+    return
+  }
+  if (e.key === 'Enter' && e.shiftKey) return
   // Enter (non-textarea) → submit
   if (e.key === 'Enter' && !e.shiftKey) {
     const target = e.target as HTMLElement
