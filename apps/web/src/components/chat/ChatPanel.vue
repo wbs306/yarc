@@ -694,7 +694,9 @@ const onKeydown = (e: KeyboardEvent) => {
     historyDraft.value = ''
     historyDraftSelection.value = null
   }
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // Keep Shift/Ctrl+Enter as the textarea's native newline shortcuts.
+  if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey)) return
+  if (e.key === 'Enter') {
     if (suggestions.value.length) { e.preventDefault(); applySelectedSuggestion(); return }
     e.preventDefault(); send()
   }

@@ -67,6 +67,8 @@ const onKeydown = (e: KeyboardEvent) => {
     emit('cancel')
     return
   }
+  // Shift/Ctrl+Enter keep the textarea's native newline behavior.
+  if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey) && (e.target as HTMLElement)?.tagName === 'TEXTAREA') return
   // Enter (non-textarea) → submit
   if (e.key === 'Enter' && !e.shiftKey) {
     const target = e.target as HTMLElement
@@ -75,8 +77,8 @@ const onKeydown = (e: KeyboardEvent) => {
     submit()
     return
   }
-  // Ctrl/Cmd+Enter → submit (from anywhere including textarea)
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+  // Cmd+Enter → submit (from anywhere including textarea)
+  if (e.key === 'Enter' && e.metaKey) {
     e.preventDefault()
     submit()
     return
