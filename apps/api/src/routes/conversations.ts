@@ -205,17 +205,20 @@ conversations.post('/:id/streaming-message/:messageId/stop', async (c) => {
   const convId = c.req.param('id')
   const messageId = c.req.param('messageId')
 
-  // Cancel the stream and any pending web interaction owned by it.
+  // Cancel the stream and any pending web interaction owned by it. The
+  // producer owns final stream persistence and registry cleanup; wait for it
+  // before returning so the next prompt cannot race the aborted Pi session.
   chatStreamControl.cancel(messageId)
   agentInteractionRegistry.cancelByStream(messageId, 'stream_stopped')
 
-  // Clean up stream buffer
-  if (streamBuffer.has(messageId)) {
+  const activeStream = streamingRegistry.get(convId)
+  if (activeStream?.messageId === messageId) {
+    await streamingRegistry.waitForMessage(messageId)
+  } else if (streamBuffer.has(messageId)) {
+    // Fallback for a stream whose producer has already disappeared. There is
+    // no active session left to drain, so close the buffer locally.
     await streamBuffer.fail(messageId, '已停止生成')
   }
-
-  // Unregister from streaming registry
-  streamingRegistry.unregister(convId)
 
   return c.json({ ok: true })
 })

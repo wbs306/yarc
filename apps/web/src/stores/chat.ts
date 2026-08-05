@@ -206,9 +206,12 @@ export const useChatStore = defineStore('chat', () => {
       }
     }
     
+    const errorMessage = piMsg.errorMessage || (piMsg.stopReason === 'aborted' ? 'Request aborted' : undefined)
+    const isError = !!piMsg.isError || piMsg.stopReason === 'error' || piMsg.stopReason === 'aborted' || !!errorMessage
+
     // Add error segment if present
-    if (piMsg.isError && piMsg.errorMessage) {
-      segments.push({ type: 'error', text: piMsg.errorMessage })
+    if (isError && errorMessage) {
+      segments.push({ type: 'error', text: errorMessage })
     }
     
     return {
@@ -230,8 +233,8 @@ export const useChatStore = defineStore('chat', () => {
         usage: piMsg.usage,
         stopReason: piMsg.stopReason,
         responseId: piMsg.responseId,
-        errorMessage: piMsg.errorMessage,
-        isError: piMsg.isError,
+        errorMessage,
+        isError,
         isCompaction: piMsg.isCompaction,
         compactionSummary: piMsg.compactionSummary,
         forkFromMessageId: piMsg.forkFromMessageId,
@@ -308,6 +311,46 @@ export const useChatStore = defineStore('chat', () => {
   }
   const markActive = (c: string, m = '') => { activeStreams.set(c, m); syncStream() }
   const markInactive = (c: string, m?: string) => { const cur = activeStreams.get(c); if (m && cur && cur !== m) return; activeStreams.delete(c); syncStream() }
+  const finalizeFailedStream = (convId: string, branchId: string | null | undefined, msg: Message | null) => {
+    if (msg) {
+      msg.metadata.pending = false
+      msg.metadata.streamStatus = 'failed'
+    }
+    if (!branchId) return
+    const arr = branchCache.value.get(branchId)
+    if (!arr) return
+    let changed = false
+    for (const message of arr) {
+      if (!message.metadata?.pending) continue
+      message.metadata.pending = false
+      if (message.id === msg?.id) message.metadata.streamStatus = 'failed'
+      changed = true
+    }
+    if (changed) branchCache.value.set(branchId, [...arr])
+    if (convId === currentConvId.value) streamingContent.value = ''
+  }
+
+  const applyPiUserEntry = (event: any, branchId?: string | null) => {
+    if (event?.type !== 'pi_user_entry' || !event.messageId || !event.entryId) return
+    const bid = branchId || currentBranchId.value
+    if (!bid) return
+    const arr = branchCache.value.get(bid)
+    if (!arr) return
+    const index = arr.findIndex(message => message.id === event.messageId)
+    if (index < 0) return
+    const mapped = cloneMessage(arr[index])
+    mapped.id = event.entryId
+    mapped.metadata = {
+      ...mapped.metadata,
+      pi: {
+        ...(mapped.metadata.pi || {}),
+        entryId: event.entryId,
+        sessionFile: event.sessionFile,
+      },
+    }
+    arr[index] = mapped
+    branchCache.value.set(bid, [...arr])
+  }
 
   const scheduleStreamReconnect = (convId: string, delayMs = 1200) => {
     const old = streamReconnectTimers.get(convId)
@@ -709,10 +752,9 @@ export const useChatStore = defineStore('chat', () => {
         chatError.value = err.name === 'AbortError' ? '已停止' : (err.message || '发送失败')
       }
     } finally {
-      abortControllers.delete(convId)
       if (convId) {
-        markInactive(convId)
-        if (assistantMsg?.id || shouldReconnect) scheduleStreamReconnect(convId)
+        markInactive(convId, assistantMsg?.id)
+        if (shouldReconnect) scheduleStreamReconnect(convId)
         // Auto-title: if conversation still has default title, use first message.
         if (!opts.editMessageId) {
           const conv = conversations.value.find(c => c.id === convId)
@@ -733,14 +775,38 @@ export const useChatStore = defineStore('chat', () => {
 
   const streamWs = async (convId: string, payload: any): Promise<Message | null> => {
     abortControllers.get(convId)?.abort()
-    const abort = new AbortController(); abortControllers.set(convId, abort)
+    const abort = new AbortController()
+    abortControllers.set(convId, abort)
 
     return new Promise((resolve, reject) => {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(`${proto}//${location.host}/api/chat?conversation_id=${convId}`)
       let msg: Message | null = null
+      let streamFailed = false
+      let terminalReceived = false
+      let settled = false
 
-      abort.signal.addEventListener('abort', () => { ws.close(); reject(new DOMException('Aborted', 'AbortError')) })
+      const clearAbortController = () => {
+        if (abortControllers.get(convId) === abort) abortControllers.delete(convId)
+      }
+      const resolveOnce = (value: Message | null) => {
+        if (settled) return
+        settled = true
+        clearAbortController()
+        resolve(value)
+      }
+      const rejectOnce = (error: Error) => {
+        if (settled) return
+        settled = true
+        clearAbortController()
+        reject(error)
+      }
+
+      abort.signal.addEventListener('abort', () => {
+        if (settled) return
+        rejectOnce(new DOMException('Aborted', 'AbortError'))
+        ws.close()
+      })
       ws.onopen = () => ws.send(JSON.stringify(payload))
 
       ws.onmessage = async (ev) => {
@@ -792,7 +858,20 @@ export const useChatStore = defineStore('chat', () => {
           }
 
           if (d.type === 'done') {
+            terminalReceived = true
             const bid = msg?.branchId || currentBranchId.value
+            if (streamFailed) {
+              // Keep the live error and edit-branch messages visible. A forced
+              // reload can race Pi's final JSONL write and replace the useful
+              // `❌ Request aborted` segment with an empty assistant message.
+              finalizeFailedStream(convId, bid, msg)
+              await loadBranches(convId)
+              detectSubagentRuns().catch(() => {})
+              resolveOnce(msg)
+              ws.close()
+              return
+            }
+
             if (bid) {
               await loadBranchMsgs(convId, bid, true)
               await loadContextUsage(convId, bid)
@@ -800,7 +879,21 @@ export const useChatStore = defineStore('chat', () => {
             await loadBranches(convId)
             // Detect new subagent runs from this turn
             detectSubagentRuns().catch(() => {})
-            ws.close(); resolve(msg); return
+            resolveOnce(msg)
+            ws.close()
+            return
+          }
+
+          if (d.type === 'pi_user_entry') {
+            applyPiUserEntry(d, msg?.branchId || currentBranchId.value)
+            return
+          }
+
+          if (d.type === 'error') {
+            streamFailed = true
+            if (msg) applyEvent(d, msg, convId)
+            else if (convId === currentConvId.value) chatError.value = d.message || '发送失败'
+            return
           }
 
           // When a new branch is created (edit), the server sends the full
@@ -823,8 +916,15 @@ export const useChatStore = defineStore('chat', () => {
         } catch {}
       }
 
-      ws.onerror = () => { if (msg) resolve(msg); else reject(new Error('WebSocket 连接失败')) }
-      ws.onclose = (e) => { if (!e.wasClean && !abort.signal.aborted && !msg) reject(new Error('连接断开')); else resolve(msg) }
+      ws.onerror = () => {
+        if (settled || terminalReceived || abort.signal.aborted) return
+        rejectOnce(new Error('WebSocket 连接失败'))
+      }
+      ws.onclose = (e) => {
+        if (settled || terminalReceived) return
+        if (abort.signal.aborted) rejectOnce(new DOMException('Aborted', 'AbortError'))
+        else rejectOnce(new Error(e.wasClean ? '流式连接已关闭' : '连接断开'))
+      }
     })
   }
 
@@ -990,6 +1090,10 @@ export const useChatStore = defineStore('chat', () => {
           streamCompleted = true
           ws.close(); return
         }
+        if (d.type === 'pi_user_entry') {
+          applyPiUserEntry(d, bid)
+          return
+        }
         if (d.type === 'error') streamFailed = true
         if (d.type !== 'stream_start') applyEvent(d, msgRef, convId)
       } catch {}
@@ -1009,8 +1113,7 @@ export const useChatStore = defineStore('chat', () => {
         // A stopped/failed reconnect already has the complete replayed content.
         // Keep it visible instead of replacing it with Pi JSONL while abort
         // persistence is still settling.
-        msgRef.metadata.pending = false
-        msgRef.metadata.streamStatus = 'failed'
+        finalizeFailedStream(convId, bid, msgRef)
       } else if (currentConvId.value === convId) {
         scheduleStreamReconnect(convId, navigator.onLine === false ? 5000 : 1500)
       }
@@ -1018,15 +1121,24 @@ export const useChatStore = defineStore('chat', () => {
     return true
   }
 
-  const stopStreaming = () => {
+  const stopStreaming = async () => {
     const c = currentConvId.value, m = streamingMessageId.value || (c ? activeStreams.get(c) : '') || ''
-    if (c) {
-      if (m) api.stopStreamingMessage(c, m).catch(() => {})
-      for (const [requestId, interaction] of Object.entries(interactions.value)) {
-        if (interaction.streamMessageId === m) delete interactions.value[requestId]
-      }
-      refreshActiveInteraction()
+    if (!c || !m) { syncStream(); return }
 
+    // Keep the WebSocket and local streaming state alive until the backend has
+    // drained Pi's abort events. This lets the live `Request aborted` message
+    // and terminal `done` event reach the current page, and prevents the next
+    // prompt from racing the still-settling Pi session.
+    for (const [requestId, interaction] of Object.entries(interactions.value)) {
+      if (interaction.streamMessageId === m) delete interactions.value[requestId]
+    }
+    refreshActiveInteraction()
+
+    try {
+      await api.stopStreamingMessage(c, m)
+    } catch (err) {
+      // If the stop request itself fails, fall back to the old local cleanup so
+      // a broken connection cannot leave the composer permanently blocked.
       const bid = currentBranchId.value
       if (bid) {
         const arr = branchCache.value.get(bid) || []
@@ -1039,10 +1151,11 @@ export const useChatStore = defineStore('chat', () => {
         }
         branchCache.value.set(bid, [...arr])
       }
-
-      abortControllers.get(c)?.abort(); abortControllers.delete(c); markInactive(c, m || undefined)
+      abortControllers.get(c)?.abort()
+      abortControllers.delete(c)
+      markInactive(c, m)
+      chatError.value = (err as Error).message || '停止生成失败'
     }
-    syncStream()
   }
 
   return {

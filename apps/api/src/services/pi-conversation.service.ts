@@ -460,10 +460,13 @@ export class PiConversationService {
       }
     }
 
-    // Check for errors
-    const isError = msg.stopReason === 'error' || !!msg.errorMessage
-    if (isError && msg.errorMessage) {
-      segments.push({ type: 'error', text: msg.errorMessage })
+    // Aborted assistant turns are persisted by Pi without always carrying an
+    // errorMessage. Keep them visible after a branch reload instead of
+    // replacing the live `Request aborted` event with an empty message.
+    const errorMessage = msg.errorMessage || (msg.stopReason === 'aborted' ? 'Request aborted' : undefined)
+    const isError = msg.stopReason === 'error' || msg.stopReason === 'aborted' || !!errorMessage
+    if (isError && errorMessage) {
+      segments.push({ type: 'error', text: errorMessage })
     }
 
     return {
@@ -479,7 +482,7 @@ export class PiConversationService {
       usage: msg.usage,
       stopReason: msg.stopReason,
       responseId: msg.responseId,
-      errorMessage: msg.errorMessage,
+      errorMessage,
       isError,
       timestamp: msgEntry.timestamp,
     }

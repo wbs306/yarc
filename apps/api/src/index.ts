@@ -370,40 +370,72 @@ app.get(
             if (typeof heartbeat.unref === 'function') heartbeat.unref()
             void (async () => {
               let completedNormally = false
+              let failed = false
+              let cancellationObserved = false
+              let terminalRecorded = false
               try {
+                // Always drain the generator. In particular, do not break on
+                // the first `done`: Pi's generator uses the next() after that
+                // yield to await prompt settlement and persist the session.
                 for await (const evt of chatService.processMessage(runConversationId, data, { persistUserMessage: false, cancelledMessageId: runMessageId })) {
                   if (chatStreamControl.isCancelled(runMessageId)) {
+                    cancellationObserved = true
                     agentInteractionRegistry.cancelByStream(runMessageId, 'stream_cancelled')
-                    chatStreamControl.clear(runMessageId)
-                    break
                   }
+
+                  if (evt.type === 'done') {
+                    completedNormally = true
+                    // ChatService may add a final done after Pi already did.
+                    // Persist and send only one terminal event.
+                    if (!terminalRecorded) {
+                      streamBuffer.append(runMessageId, evt)
+                      terminalRecorded = true
+                    }
+                    continue
+                  }
+
                   streamBuffer.append(runMessageId, evt)
 
                   // Pi entry IDs are applied by reloading the branch from
                   // Pi JSONL when the stream completes, not by mutating
                   // temporary in-flight IDs.
-                  if (evt.type === 'pi_user_entry' || evt.type === 'pi_assistant_entry') continue
-
-                  if (evt.type === 'done') {
-                    completedNormally = true
-                    break
-                  }
+                  // User entry mappings are needed by the live editor: the
+                  // pending user ID must be replaced before the user can edit
+                  // immediately after stopping a turn. Assistant mappings stay
+                  // internal because the stream ID is still needed by stop.
+                  if (evt.type === 'pi_assistant_entry') continue
 
                   safeSend(evt)
                 }
               } catch (err) {
+                failed = true
                 const message = (err as Error).message || 'Chat failed'
                 safeSend({ type: 'error', message })
                 await streamBuffer.fail(runMessageId, message).catch(() => {})
+                safeSend({ type: 'done' })
               } finally {
                 clearInterval(heartbeat)
-                agentInteractionRegistry.cancelByStream(runMessageId, completedNormally ? 'stream_completed' : 'stream_ended')
-                chatStreamControl.clear(runMessageId)
-                streamingRegistry.unregister(runConversationId)
-                if (completedNormally) {
+
+                // A generator that exits without a terminal event is a
+                // failure, including a cancelled /compact operation that
+                // returns early. Make it visible and unblock the client.
+                if (!completedNormally && !failed) {
+                  failed = true
+                  const wasCancelled = cancellationObserved || chatStreamControl.isCancelled(runMessageId)
+                  const message = wasCancelled ? 'Request aborted' : 'Chat stream ended unexpectedly'
+                  safeSend({ type: 'error', message })
+                  await streamBuffer.fail(runMessageId, message).catch(() => {})
+                  safeSend({ type: 'done' })
+                } else if (completedNormally) {
                   await streamBuffer.complete(runMessageId).catch(() => {})
                   safeSend({ type: 'done' })
                 }
+
+                agentInteractionRegistry.cancelByStream(runMessageId, completedNormally ? 'stream_completed' : 'stream_ended')
+                chatStreamControl.clear(runMessageId)
+                // Resolve stop requests only after stream persistence and Pi
+                // generator cleanup have completed.
+                streamingRegistry.unregister(runConversationId, runMessageId)
               }
             })()
           }
@@ -414,6 +446,9 @@ app.get(
             await streamBuffer.fail(streamMsgId, message).catch(() => {})
             streamMsgId = null
           }
+          // Even failures before stream_start (notably stale edit entry IDs)
+          // must terminate the client-side stream state.
+          safeSend({ type: 'done' })
         }
       },
 

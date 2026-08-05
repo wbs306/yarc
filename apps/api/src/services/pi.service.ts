@@ -2121,11 +2121,32 @@ export class PiService {
         queue.push(event)
         if (resolve) { resolve(); resolve = null }
       }
+      let terminalQueued = false
+      let errorQueued = false
+      const pushError = (message: string) => {
+        if (errorQueued) return
+        errorQueued = true
+        push({ type: 'error', message: message || 'Pi error' })
+      }
+      const pushDone = () => {
+        if (terminalQueued) return
+        terminalQueued = true
+        push({ type: 'done' })
+      }
+      let abortPromise: Promise<unknown> | null = null
+      const requestAbort = () => {
+        if (!abortPromise) {
+          abortPromise = Promise.resolve(session.abort()).catch((err) => {
+            console.warn('[PiService] Session abort failed:', (err as Error).message)
+          })
+        }
+        return abortPromise
+      }
       emitInteractionEvent = push
 
       if (options._cancelled) {
         unregisterAbortHandler = chatStreamControl.registerAbortHandler(options._cancelled, () => {
-          session.abort()
+          void requestAbort()
           if (resolve) { resolve(); resolve = null }
         })
       }
@@ -2158,7 +2179,6 @@ export class PiService {
       } catch { /* ignore */ }
 
       const toolContext = new Map<string, { name: string; args: any }>()
-      let agentEnded = false
       const pushContextUsage = () => {
         try {
           const usage = session.getContextUsage?.()
@@ -2196,7 +2216,9 @@ export class PiService {
               inputDelta: String(update.delta),
             })
           } else if (update?.type === 'error') {
-            push({ type: 'error', message: update.error?.errorMessage || 'Pi error' })
+            // This may be an intermediate error that Pi will retry; the
+            // final agent_end/prompt settlement decides when the turn ends.
+            pushError(update.error?.errorMessage || 'Pi error')
           }
         } else if (event.type === 'tool_execution_start') {
           const toolCallId = String(event.toolCallId || '')
@@ -2242,83 +2264,86 @@ export class PiService {
             }
           }
         } else if (event.type === 'agent_end') {
-          agentEnded = true
-          push({ type: 'done' })
+          // Pi can emit agent_end before an automatic retry. Keep consuming
+          // the session until the final agent_end or prompt settlement.
+          if (!event.willRetry) pushDone()
         } else if (event.type === 'message_end') {
-          // Phase 2: Track assistant entry ID for Pi ↔ YARC message mapping.
-          // After Pi writes the assistant message to the session JSONL,
-          // the leaf ID is the assistant entry. Emit a mapping event so the
-          // caller can write it to Message.metadata.pi.entryId.
+          // AgentSession persists message_end after notifying subscribers.
+          // Defer the mapping lookup to a microtask so getLeafId() points at
+          // the entry just written, not the previous fork leaf.
           const msg = event.message
-          if (
-            msg?.role === 'assistant' &&
-            options.conversationId &&
-            options.assistantMessageId &&
-            session.sessionFile
-          ) {
-            try {
-              const entryId = session.sessionManager?.getLeafId?.()
-              if (entryId) {
-                push({
-                  type: 'pi_assistant_entry',
-                  conversationId: options.conversationId,
-                  messageId: options.assistantMessageId,
-                  entryId,
-                  sessionFile: session.sessionFile,
-                })
-              }
-            } catch { /* non-fatal */ }
+          if (msg?.role === 'user' && options.conversationId && options.userMessageId && session.sessionFile) {
+            queueMicrotask(() => {
+              try {
+                const entryId = session.sessionManager?.getLeafId?.()
+                if (entryId) {
+                  push({
+                    type: 'pi_user_entry',
+                    conversationId: options.conversationId!,
+                    messageId: options.userMessageId!,
+                    entryId,
+                    sessionFile: session.sessionFile!,
+                  })
+                }
+              } catch { /* non-fatal */ }
+            })
+          }
+          if (msg?.role === 'assistant' && options.conversationId && options.assistantMessageId && session.sessionFile) {
+            queueMicrotask(() => {
+              try {
+                const entryId = session.sessionManager?.getLeafId?.()
+                if (entryId) {
+                  push({
+                    type: 'pi_assistant_entry',
+                    conversationId: options.conversationId!,
+                    messageId: options.assistantMessageId!,
+                    entryId,
+                    sessionFile: session.sessionFile!,
+                  })
+                }
+              } catch { /* non-fatal */ }
+            })
+          }
+          if (msg?.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
+            pushError(msg.errorMessage || (msg.stopReason === 'aborted' ? 'Request aborted' : 'Pi error'))
           }
         }
       })
 
       // Fire the prompt (non-blocking for the yield loop below).
-      // The SDK appends the user message to the session JSONL synchronously
-      // at the start of prompt(), so getLeafId() returns the user entry ID
-      // immediately after the call begins.
       console.log('[PiService] Sending prompt to agent:', options.prompt.slice(0, 200) + (options.prompt.length > 200 ? '...' : ''))
       const promptPromise = session.prompt(options.prompt)
         .then(() => {
           // Registered extension slash commands may finish without starting an
           // agent turn, so they do not emit agent_end. Close the web stream once
           // the SDK command handler itself has completed.
-          if (!agentEnded) push({ type: 'done' })
+          pushDone()
         })
         .catch((err: Error) => {
-          push({ type: 'error', message: err.message })
-          push({ type: 'done' })
+          pushError(err.message)
+          pushDone()
         })
-
-      // Phase 2: Emit user entry ID mapping right after prompt starts.
-      // At this point the SDK has already written the user message to JSONL.
-      if (
-        options.conversationId &&
-        options.userMessageId &&
-        session.sessionFile
-      ) {
-        try {
-          const entryId = session.sessionManager?.getLeafId?.()
-          if (entryId) {
-            push({
-              type: 'pi_user_entry',
-              conversationId: options.conversationId,
-              messageId: options.userMessageId,
-              entryId,
-              sessionFile: session.sessionFile,
-            })
-          }
-        } catch { /* non-fatal */ }
-      }
 
       // Yield events as they arrive
       while (true) {
-        // Check for cancellation at the start of each loop iteration
+        // Cancellation is terminal, but still drain the Pi events generated by
+        // abort(). Otherwise the persisted `Request aborted` message never
+        // reaches the client until the next page refresh.
         if (options._cancelled && chatStreamControl.isCancelled(options._cancelled)) {
-          session.abort()
+          await requestAbort()
           unregisterAbortHandler?.()
           unregisterAbortHandler = null
-          unsubscribe()
           await promptPromise
+          unsubscribe()
+
+          const pending = queue.splice(0)
+          let sawError = errorQueued
+          for (const evt of pending) {
+            if (evt.type === 'error') sawError = true
+            if (evt.type !== 'done') yield evt
+          }
+          if (!sawError) yield { type: 'error', message: 'Request aborted' }
+          yield { type: 'done' }
           return
         }
 
