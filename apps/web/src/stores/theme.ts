@@ -100,6 +100,11 @@ const backgroundCssValue = (value: string) => {
   return 'none'
 }
 
+const pickRandomBackground = (images: string[]) => {
+  const uniqueImages = [...new Set(images.filter(Boolean))]
+  return uniqueImages[Math.floor(Math.random() * uniqueImages.length)] || ''
+}
+
 export const useThemeStore = defineStore('theme', () => {
   const mode = ref<ThemeMode>(DEFAULT_THEME.mode)
   const primaryColor = ref(DEFAULT_THEME.primaryColor)
@@ -114,6 +119,8 @@ export const useThemeStore = defineStore('theme', () => {
   const syncError = ref('')
   const syncing = ref(false)
   let rotationTimer: ReturnType<typeof setInterval> | null = null
+  let remoteLoadPromise: Promise<void> | null = null
+  let remoteLoaded = false
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -249,22 +256,53 @@ export const useThemeStore = defineStore('theme', () => {
     if (saved) {
       try { applyThemeObject(JSON.parse(saved)) } catch {}
     }
+
+    // The active image is runtime state. Pick a random image immediately from
+    // the locally cached rotation list when the page opens or reloads. It is
+    // intentionally allowed to pick the same image again; avoiding repeats is
+    // handled by the running rotation timer instead.
+    if (backgroundRotation.value.length >= 2) {
+      backgroundImage.value = pickRandomBackground(backgroundRotation.value)
+      persistLocal()
+    }
+
     applyTheme()
     window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', applyTheme)
   }
 
-  const loadRemote = async () => {
-    try {
-      const res = await useApi().getTheme()
-      if (res.theme && typeof res.theme === 'object') {
-        applyThemeObject(res.theme)
-        applyTheme()
-        persistLocal()
-        startRotation()
+  const loadRemote = () => {
+    if (remoteLoaded) return Promise.resolve()
+    if (remoteLoadPromise) return remoteLoadPromise
+
+    remoteLoadPromise = (async () => {
+      try {
+        const localImage = backgroundImage.value
+        const res = await useApi().getTheme()
+        if (res.theme && typeof res.theme === 'object') {
+          applyThemeObject(res.theme)
+
+          // The server stores the rotation configuration, not every client
+          // side tick. Keep the random image selected during startup when it
+          // still belongs to the remote rotation; otherwise choose one now.
+          if (backgroundRotation.value.length >= 2) {
+            backgroundImage.value = backgroundRotation.value.includes(localImage)
+              ? localImage
+              : pickRandomBackground(backgroundRotation.value)
+          }
+
+          applyTheme()
+          persistLocal()
+          startRotation()
+          remoteLoaded = true
+        }
+      } catch {
+        // 未登录或后端不可用时保留本地主题。
+      } finally {
+        remoteLoadPromise = null
       }
-    } catch {
-      // 未登录或后端不可用时保留本地主题。
-    }
+    })()
+
+    return remoteLoadPromise
   }
 
   const setMode = (value: ThemeMode) => {
