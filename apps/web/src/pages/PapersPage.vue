@@ -268,7 +268,7 @@ const markdownPreviewRef = ref<HTMLElement | null>(null)
 const workspaceEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
 const markdownSplitLayoutRef = ref<HTMLElement | null>(null)
 const markdownSplitDividerRef = ref<HTMLElement | null>(null)
-const markdownPreviewContent = computed(() => workspaceContent.value)
+const markdownPreviewContent = ref('')
 const markdownPreviewPending = computed(() => !!currentLiveClient.value
   && !currentLiveClient.value.ready.value
   && !markdownPreviewContent.value)
@@ -282,6 +282,8 @@ const markdownSplitRatio = ref(50)
 const markdownSplitEditorOnLeft = ref(true)
 const markdownSplitResizeActive = ref(false)
 const pendingMarkdownScroll = new Map<MarkdownScrollPane, number>()
+let markdownScrollRestoreTimer: number | null = null
+let markdownPreviewContentTimer: number | null = null
 const markdownLineCount = computed(() => Math.max(1, workspaceContent.value.split(/\r?\n/).length))
 const markdownSplitLayoutStyle = computed<Record<string, string>>(() => ({
   '--markdown-editor-flex': String(markdownSplitRatio.value),
@@ -487,10 +489,37 @@ const swapMarkdownSplitPanes = () => {
   markdownSplitEditorOnLeft.value = !markdownSplitEditorOnLeft.value
 }
 
-watch(workspaceContent, () => {
-  void nextTick(() => {
-    if (markdownPreviewVisible.value) restoreMarkdownScrollPosition(markdownScrollLine.value)
-  })
+const syncMarkdownPreviewContent = (content: string, immediate = false) => {
+  if (markdownPreviewContentTimer !== null) window.clearTimeout(markdownPreviewContentTimer)
+  if (immediate || !markdownPreviewVisible.value) {
+    markdownPreviewContentTimer = null
+    markdownPreviewContent.value = content
+    return
+  }
+  markdownPreviewContentTimer = window.setTimeout(() => {
+    markdownPreviewContentTimer = null
+    markdownPreviewContent.value = content
+  }, 80)
+}
+
+const scheduleMarkdownScrollRestore = () => {
+  if (!markdownPreviewVisible.value) return
+  if (markdownScrollRestoreTimer !== null) window.clearTimeout(markdownScrollRestoreTimer)
+  markdownScrollRestoreTimer = window.setTimeout(() => {
+    markdownScrollRestoreTimer = null
+    void nextTick(() => {
+      if (markdownPreviewVisible.value) restoreMarkdownScrollPosition(markdownScrollLine.value)
+    })
+  }, 120)
+}
+
+watch(workspaceContent, (content) => {
+  syncMarkdownPreviewContent(content)
+  scheduleMarkdownScrollRestore()
+})
+watch(markdownPreviewVisible, (visible) => {
+  syncMarkdownPreviewContent(workspaceContent.value, true)
+  if (visible) void nextTick(() => restoreMarkdownScrollPosition(markdownScrollLine.value))
 })
 
 const markdownPreviewHeadings = computed(() => {
@@ -2069,6 +2098,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (markdownScrollRestoreTimer !== null) window.clearTimeout(markdownScrollRestoreTimer)
+  if (markdownPreviewContentTimer !== null) window.clearTimeout(markdownPreviewContentTimer)
+  markdownScrollRestoreTimer = null
+  markdownPreviewContentTimer = null
   void liveFiles.releaseAll()
   for (const paperId of temporaryPdfPollTimers.keys()) clearTemporaryPdfPoll(paperId)
   window.removeEventListener('resize', onResize)

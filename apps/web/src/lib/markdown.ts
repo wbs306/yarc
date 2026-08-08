@@ -398,6 +398,18 @@ const buildMarkdownSourceRanges = (tokens: Token[], source: string) => {
     return high + 1
   }
 
+  const mappedBlockTypes = new Set([
+    'heading',
+    'paragraph',
+    'code',
+    'blockquote',
+    'list',
+    'list_item',
+    'hr',
+    'table',
+    'blockKatex',
+  ])
+
   const visit = (items: Token[], from: number, limit: number) => {
     let cursor = from
     for (const token of items) {
@@ -406,7 +418,7 @@ const buildMarkdownSourceRanges = (tokens: Token[], source: string) => {
       if (start < cursor || start >= limit) start = cursor
       const end = raw ? Math.min(limit, start + raw.length) : start
 
-      if (raw) {
+      if (raw && mappedBlockTypes.has(token.type)) {
         const range = {
           startLine: lineAt(start),
           endLine: lineAt(Math.max(start, end - 1)),
@@ -416,8 +428,11 @@ const buildMarkdownSourceRanges = (tokens: Token[], source: string) => {
       }
 
       const nested = token as TokenWithChildren
-      if (nested.tokens?.length) visit(nested.tokens, start, Math.max(start, end))
-      if (nested.items?.length) visit(nested.items, start, Math.max(start, end))
+      if (token.type === 'list' && nested.items?.length) {
+        visit(nested.items, start, Math.max(start, end))
+      } else if ((token.type === 'blockquote' || token.type === 'list_item') && nested.tokens?.length) {
+        visit(nested.tokens, start, Math.max(start, end))
+      }
       cursor = Math.max(cursor, end)
     }
   }
