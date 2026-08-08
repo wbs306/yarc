@@ -183,13 +183,28 @@ interface FileNode {
   readonly?: boolean
 }
 
+type MarkdownViewMode = 'edit' | 'preview' | 'split'
+
+type MarkdownScrollPane = 'editor' | 'preview'
+
+interface MarkdownPreviewSourceAnchor {
+  element: HTMLElement
+  startLine: number
+  endLine: number
+  top: number
+  height: number
+}
+
 interface WorkspaceFileTab {
   file: FileNode
   content: string
   savedContent: string
   language: string
   modified: string
-  markdownPreview: boolean
+  markdownViewMode: MarkdownViewMode
+  markdownScrollLine: number
+  markdownSplitRatio: number
+  markdownSplitEditorOnLeft: boolean
   lastAccessedAt: number
 }
 
@@ -248,14 +263,235 @@ const workspaceIsOffice = computed(() => isOfficeFile(selectedWorkspaceFile.valu
 const workspaceIsLegacyOffice = computed(() => isLegacyOfficeFile(selectedWorkspaceFile.value))
 const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension === '.pdf')
 const workspaceIsMarkdown = computed(() => workspaceLanguage.value === 'markdown')
-const markdownPreview = ref(false)
+const markdownViewMode = ref<MarkdownViewMode>('edit')
 const markdownPreviewRef = ref<HTMLElement | null>(null)
-const markdownPreviewContent = computed(() => currentLiveClient.value?.content.value ?? workspaceContent.value)
+const workspaceEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
+const markdownSplitLayoutRef = ref<HTMLElement | null>(null)
+const markdownSplitDividerRef = ref<HTMLElement | null>(null)
+const markdownPreviewContent = computed(() => workspaceContent.value)
 const markdownPreviewPending = computed(() => !!currentLiveClient.value
   && !currentLiveClient.value.ready.value
   && !markdownPreviewContent.value)
+const markdownPreviewVisible = computed(() => workspaceIsMarkdown.value && markdownViewMode.value !== 'edit')
+const markdownEditorVisible = computed(() => !workspaceIsMarkdown.value || markdownViewMode.value !== 'preview')
+const markdownIsSplit = computed(() => workspaceIsMarkdown.value && markdownViewMode.value === 'split')
+const markdownScrollLine = ref(1)
 const markdownScrollPercent = ref(0)
 const markdownViewportPercent = ref(100)
+const markdownSplitRatio = ref(50)
+const markdownSplitEditorOnLeft = ref(true)
+const markdownSplitResizeActive = ref(false)
+const pendingMarkdownScroll = new Map<MarkdownScrollPane, number>()
+const markdownLineCount = computed(() => Math.max(1, workspaceContent.value.split(/\r?\n/).length))
+const markdownSplitLayoutStyle = computed<Record<string, string>>(() => ({
+  '--markdown-editor-flex': String(markdownSplitRatio.value),
+  '--markdown-preview-flex': String(100 - markdownSplitRatio.value),
+}))
+
+const clampMarkdownScrollLine = (line: number) => Math.min(markdownLineCount.value, Math.max(1, Math.round(line)))
+const clampMarkdownSplitRatio = (ratio: number) => Math.min(80, Math.max(20, ratio))
+const consumePendingMarkdownScroll = (pane: MarkdownScrollPane, line: number) => {
+  const expected = pendingMarkdownScroll.get(pane)
+  if (expected === undefined) return false
+  pendingMarkdownScroll.delete(pane)
+  return Math.abs(expected - line) <= 1
+}
+
+const getMarkdownPreviewSourceAnchors = (): MarkdownPreviewSourceAnchor[] => {
+  const root = markdownPreviewRef.value
+  if (!root) return []
+  const rootRect = root.getBoundingClientRect()
+  return Array.from(root.querySelectorAll<HTMLElement>('[data-md-source-line]'))
+    .map((element) => {
+      const startLine = Number.parseInt(element.dataset.mdSourceLine || '', 10)
+      const endLine = Number.parseInt(element.dataset.mdSourceLineEnd || '', 10)
+      const rect = element.getBoundingClientRect()
+      return {
+        element,
+        startLine,
+        endLine: Number.isFinite(endLine) ? Math.max(startLine, endLine) : startLine,
+        top: rect.top - rootRect.top + root.scrollTop,
+        height: Math.max(1, rect.height),
+      }
+    })
+    .filter((anchor) => Number.isFinite(anchor.startLine))
+    .sort((a, b) => a.top - b.top || a.startLine - b.startLine)
+}
+
+const readMarkdownPreviewScrollLine = () => {
+  const root = markdownPreviewRef.value
+  if (!root) return markdownScrollLine.value
+  const anchors = getMarkdownPreviewSourceAnchors()
+  if (!anchors.length) {
+    const maxLine = Math.max(1, markdownLineCount.value - 1)
+    const maxScroll = root.scrollHeight - root.clientHeight
+    const percent = maxScroll > 0 ? root.scrollTop / maxScroll : 0
+    return clampMarkdownScrollLine(1 + percent * maxLine)
+  }
+
+  const viewportTop = root.scrollTop + 1
+  const containing = [...anchors].reverse().find((anchor) =>
+    viewportTop >= anchor.top && viewportTop <= anchor.top + anchor.height)
+  if (containing) {
+    const ratio = (viewportTop - containing.top) / containing.height
+    return clampMarkdownScrollLine(containing.startLine + ratio * (containing.endLine - containing.startLine))
+  }
+
+  const previous = [...anchors].reverse().find((anchor) => anchor.top <= viewportTop)
+  const next = anchors.find((anchor) => anchor.top > viewportTop)
+  if (!previous) return clampMarkdownScrollLine(next?.startLine || 1)
+  if (!next || next.top <= previous.top) return clampMarkdownScrollLine(previous.endLine)
+  const ratio = (viewportTop - previous.top) / (next.top - previous.top)
+  return clampMarkdownScrollLine(previous.startLine + ratio * (next.startLine - previous.startLine))
+}
+
+const getMarkdownPreviewTopForLine = (line: number, anchors: MarkdownPreviewSourceAnchor[]) => {
+  const target = clampMarkdownScrollLine(line)
+  const containing = [...anchors].reverse().find((anchor) =>
+    target >= anchor.startLine && target <= anchor.endLine)
+  if (containing) {
+    const ratio = containing.endLine > containing.startLine
+      ? (target - containing.startLine) / (containing.endLine - containing.startLine)
+      : 0
+    return containing.top + ratio * containing.height
+  }
+
+  const previous = [...anchors].reverse().find((anchor) => anchor.startLine <= target)
+  const next = anchors.find((anchor) => anchor.startLine > target)
+  if (!previous) return next?.top || 0
+  if (!next || next.startLine <= previous.startLine) return previous.top
+  const ratio = (target - previous.startLine) / (next.startLine - previous.startLine)
+  return previous.top + ratio * (next.top - previous.top)
+}
+
+const scrollMarkdownEditorToLine = (line: number, behavior: ScrollBehavior = 'auto') => {
+  const target = clampMarkdownScrollLine(line)
+  if (markdownViewMode.value === 'split') pendingMarkdownScroll.set('editor', target)
+  workspaceEditorRef.value?.scrollToLine(target, behavior)
+}
+
+const scrollMarkdownPreviewToLine = (line: number, behavior: ScrollBehavior = 'smooth') => {
+  const root = markdownPreviewRef.value
+  if (!root) return
+  const target = clampMarkdownScrollLine(line)
+  const anchors = getMarkdownPreviewSourceAnchors()
+  const maxScroll = Math.max(0, root.scrollHeight - root.clientHeight)
+  const top = anchors.length
+    ? getMarkdownPreviewTopForLine(target, anchors)
+    : maxScroll * ((target - 1) / Math.max(1, markdownLineCount.value - 1))
+  if (markdownViewMode.value === 'split') pendingMarkdownScroll.set('preview', target)
+  root.scrollTo({
+    top: Math.min(maxScroll, Math.max(0, top)),
+    behavior: markdownViewMode.value === 'split' ? 'auto' : behavior,
+  })
+}
+
+const updateMarkdownPreviewScroll = () => {
+  const root = markdownPreviewRef.value
+  if (!root) return
+  const maxScroll = root.scrollHeight - root.clientHeight
+  markdownScrollPercent.value = maxScroll > 0 ? (root.scrollTop / maxScroll) * 100 : 0
+  markdownViewportPercent.value = root.scrollHeight > 0
+    ? Math.min(100, Math.max(8, (root.clientHeight / root.scrollHeight) * 100))
+    : 100
+  const line = readMarkdownPreviewScrollLine()
+  markdownScrollLine.value = line
+  const programmatic = consumePendingMarkdownScroll('preview', line)
+  if (markdownViewMode.value === 'split' && !programmatic) scrollMarkdownEditorToLine(line)
+}
+
+const onMarkdownEditorScroll = (line: number) => {
+  if (!workspaceIsMarkdown.value) return
+  const normalized = clampMarkdownScrollLine(line)
+  markdownScrollLine.value = normalized
+  const programmatic = consumePendingMarkdownScroll('editor', normalized)
+  if (markdownViewMode.value === 'split' && !programmatic) scrollMarkdownPreviewToLine(normalized, 'auto')
+}
+
+const getActiveMarkdownScrollLine = () => {
+  if (!workspaceIsMarkdown.value) return 1
+  if (markdownViewMode.value === 'preview') return readMarkdownPreviewScrollLine()
+  if (markdownViewMode.value === 'split') return markdownScrollLine.value
+  return workspaceEditorRef.value?.getScrollLine() ?? markdownScrollLine.value
+}
+
+const restoreMarkdownScrollPosition = (line = markdownScrollLine.value) => {
+  const target = clampMarkdownScrollLine(line)
+  markdownScrollLine.value = target
+  pendingMarkdownScroll.clear()
+  if (markdownPreviewVisible.value) scrollMarkdownPreviewToLine(target, 'auto')
+  if (markdownEditorVisible.value) scrollMarkdownEditorToLine(target, 'auto')
+  if (markdownPreviewVisible.value) void nextTick(updateMarkdownPreviewScroll)
+}
+
+const scrollMarkdownPreviewRailTo = (percent: number, behavior: ScrollBehavior = 'smooth') => {
+  const target = Math.min(100, Math.max(0, percent))
+  scrollMarkdownPreviewToLine(1 + (markdownLineCount.value - 1) * target / 100, behavior)
+}
+
+const onMarkdownPreviewRailPointerDown = (event: PointerEvent) => {
+  const rail = event.currentTarget as HTMLElement
+  rail.setPointerCapture(event.pointerId)
+  const rect = rail.getBoundingClientRect()
+  scrollMarkdownPreviewRailTo(((event.clientY - rect.top) / rect.height) * 100)
+}
+
+const onMarkdownPreviewRailPointerMove = (event: PointerEvent) => {
+  const rail = event.currentTarget as HTMLElement
+  if (!rail.hasPointerCapture(event.pointerId)) return
+  const rect = rail.getBoundingClientRect()
+  scrollMarkdownPreviewRailTo(((event.clientY - rect.top) / rect.height) * 100, 'auto')
+}
+
+const markdownSplitIsVertical = () => window.matchMedia('(max-width: 900px)').matches
+const updateMarkdownSplitRatioFromPointer = (event: PointerEvent) => {
+  const layout = markdownSplitLayoutRef.value
+  if (!layout) return
+  const rect = layout.getBoundingClientRect()
+  const dividerSize = markdownSplitDividerRef.value
+    ? (markdownSplitIsVertical() ? markdownSplitDividerRef.value.offsetHeight : markdownSplitDividerRef.value.offsetWidth)
+    : 10
+  const totalSize = Math.max(1, (markdownSplitIsVertical() ? rect.height : rect.width) - dividerSize)
+  const pointerPosition = markdownSplitIsVertical()
+    ? event.clientY - rect.top - dividerSize / 2
+    : event.clientX - rect.left - dividerSize / 2
+  const beforeDivider = Math.min(totalSize, Math.max(0, pointerPosition))
+  const editorSize = markdownSplitEditorOnLeft.value ? beforeDivider : totalSize - beforeDivider
+  markdownSplitRatio.value = clampMarkdownSplitRatio(editorSize / totalSize * 100)
+}
+
+const startMarkdownSplitResize = (event: PointerEvent) => {
+  const divider = event.currentTarget as HTMLElement
+  divider.setPointerCapture(event.pointerId)
+  markdownSplitResizeActive.value = true
+  updateMarkdownSplitRatioFromPointer(event)
+}
+
+const onMarkdownSplitResize = (event: PointerEvent) => {
+  if (!markdownSplitResizeActive.value) return
+  updateMarkdownSplitRatioFromPointer(event)
+}
+
+const endMarkdownSplitResize = (event: PointerEvent) => {
+  markdownSplitResizeActive.value = false
+  const divider = event.currentTarget as HTMLElement
+  if (divider.hasPointerCapture(event.pointerId)) divider.releasePointerCapture(event.pointerId)
+}
+
+const adjustMarkdownSplitRatio = (delta: number) => {
+  const editorDelta = markdownSplitEditorOnLeft.value ? delta : -delta
+  markdownSplitRatio.value = clampMarkdownSplitRatio(markdownSplitRatio.value + editorDelta)
+}
+
+const swapMarkdownSplitPanes = () => {
+  markdownSplitEditorOnLeft.value = !markdownSplitEditorOnLeft.value
+}
+
+watch(workspaceContent, () => {
+  void nextTick(() => {
+    if (markdownPreviewVisible.value) restoreMarkdownScrollPosition(markdownScrollLine.value)
+  })
+})
 
 const markdownPreviewHeadings = computed(() => {
   const lines = workspaceContent.value.split(/\r?\n/)
@@ -267,44 +503,10 @@ const markdownPreviewHeadings = computed(() => {
     return [{
       title: match[2].replace(/[`*_]/g, '').trim(),
       level: match[1].length,
+      line: index + 1,
       percent: (index / lastLine) * 100,
     }]
   })
-})
-
-const updateMarkdownPreviewScroll = () => {
-  const el = markdownPreviewRef.value
-  if (!el) return
-  const maxScroll = el.scrollHeight - el.clientHeight
-  markdownScrollPercent.value = maxScroll > 0 ? (el.scrollTop / maxScroll) * 100 : 0
-  markdownViewportPercent.value = el.scrollHeight > 0
-    ? Math.min(100, Math.max(8, (el.clientHeight / el.scrollHeight) * 100))
-    : 100
-}
-
-const scrollMarkdownPreviewTo = (percent: number, behavior: ScrollBehavior = 'smooth') => {
-  const el = markdownPreviewRef.value
-  if (!el) return
-  const target = Math.min(100, Math.max(0, percent))
-  el.scrollTo({ top: (el.scrollHeight - el.clientHeight) * target / 100, behavior })
-}
-
-const onMarkdownPreviewRailPointerDown = (event: PointerEvent) => {
-  const rail = event.currentTarget as HTMLElement
-  rail.setPointerCapture(event.pointerId)
-  const rect = rail.getBoundingClientRect()
-  scrollMarkdownPreviewTo(((event.clientY - rect.top) / rect.height) * 100)
-}
-
-const onMarkdownPreviewRailPointerMove = (event: PointerEvent) => {
-  const rail = event.currentTarget as HTMLElement
-  if (!rail.hasPointerCapture(event.pointerId)) return
-  const rect = rail.getBoundingClientRect()
-  scrollMarkdownPreviewTo(((event.clientY - rect.top) / rect.height) * 100, 'auto')
-}
-
-watch([markdownPreview, workspaceContent], () => {
-  void nextTick(updateMarkdownPreviewScroll)
 })
 
 // ── Editor / preview status bar ──
@@ -411,17 +613,25 @@ watch(mdSearchQuery, () => {
   applyMarkdownSearchMarks()
 })
 
+const setMarkdownViewMode = (mode: MarkdownViewMode) => {
+  if (!workspaceIsMarkdown.value && mode !== 'edit') return
+  const currentLine = getActiveMarkdownScrollLine()
+  markdownScrollLine.value = currentLine
+  pendingMarkdownScroll.clear()
+  if (mode === 'edit') closeMarkdownSearch()
+  markdownViewMode.value = mode
+  void nextTick(() => restoreMarkdownScrollPosition(currentLine))
+}
+
 // Re-mark after the rendered HTML is replaced, otherwise old marks are lost silently.
-watch([workspaceContent, markdownPreview], () => {
+watch([workspaceContent, markdownPreviewVisible], () => {
   if (!mdSearchOpen.value || !mdSearchQuery.value) return
   void nextTick(applyMarkdownSearchMarks)
 })
 
-watch([selectedWorkspacePath, markdownPreview], () => {
-  if (mdSearchOpen.value) closeMarkdownSearch()
+watch([selectedWorkspacePath, markdownViewMode], ([path, mode], [previousPath]) => {
+  if (mdSearchOpen.value && (path !== previousPath || mode === 'edit')) closeMarkdownSearch()
 })
-
-const workspaceEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
 
 watch(() => currentLiveClient.value?.content.value, (content) => {
   const live = currentLiveClient.value
@@ -467,7 +677,10 @@ const snapshotCurrentWorkspaceTab = () => {
     savedContent: workspaceSavedContent.value,
     language: workspaceLanguage.value,
     modified: workspaceModified.value,
-    markdownPreview: markdownPreview.value,
+    markdownViewMode: workspaceIsMarkdown.value ? markdownViewMode.value : 'edit',
+    markdownScrollLine: workspaceIsMarkdown.value ? getActiveMarkdownScrollLine() : 1,
+    markdownSplitRatio: markdownSplitRatio.value,
+    markdownSplitEditorOnLeft: markdownSplitEditorOnLeft.value,
     lastAccessedAt: Date.now(),
   }
   openWorkspaceTabs.value = [tab, ...openWorkspaceTabs.value.filter((item) => item.file.path !== file.path)].slice(0, 8)
@@ -480,9 +693,14 @@ const restoreWorkspaceTab = (tab: WorkspaceFileTab, node: FileNode) => {
   workspaceSavedContent.value = currentLiveClient.value?.content.value ?? tab.savedContent
   workspaceLanguage.value = currentLiveClient.value?.language.value ?? tab.language
   workspaceModified.value = currentLiveClient.value?.modified.value ?? tab.modified
-  markdownPreview.value = tab.markdownPreview
+  const restoredLine = tab.markdownScrollLine ?? 1
+  markdownViewMode.value = tab.markdownViewMode ?? 'edit'
+  markdownScrollLine.value = restoredLine
+  markdownSplitRatio.value = clampMarkdownSplitRatio(tab.markdownSplitRatio ?? 50)
+  markdownSplitEditorOnLeft.value = tab.markdownSplitEditorOnLeft ?? true
   workspaceContentLoading.value = false
   tab.lastAccessedAt = Date.now()
+  void nextTick(() => restoreMarkdownScrollPosition(restoredLine))
 }
 
 const workspaceSwitcherItems = computed(() => {
@@ -637,7 +855,12 @@ const clearWorkspaceEditor = () => {
   workspaceSavedContent.value = ''
   workspaceLanguage.value = 'plaintext'
   workspaceModified.value = ''
-  markdownPreview.value = false
+  markdownViewMode.value = 'edit'
+  markdownScrollLine.value = 1
+  markdownScrollPercent.value = 0
+  markdownSplitRatio.value = 50
+  markdownSplitEditorOnLeft.value = true
+  pendingMarkdownScroll.clear()
 }
 
 const workspaceParentPath = (path: string) => {
@@ -915,7 +1138,11 @@ const selectWorkspaceFile = async (node: FileNode) => {
   filesError.value = ''
 
   const existingTab = openWorkspaceTabs.value.find((tab) => tab.file.path === node.path && isWorkspaceFile(tab.file))
-  markdownPreview.value = existingTab?.markdownPreview ?? false
+  markdownViewMode.value = existingTab?.markdownViewMode ?? 'edit'
+  markdownScrollLine.value = existingTab?.markdownScrollLine ?? 1
+  markdownSplitRatio.value = clampMarkdownSplitRatio(existingTab?.markdownSplitRatio ?? 50)
+  markdownSplitEditorOnLeft.value = existingTab?.markdownSplitEditorOnLeft ?? true
+  pendingMarkdownScroll.clear()
 
   if (node.type !== 'file' || !node.editable) {
     currentLiveClient.value = null
@@ -936,12 +1163,16 @@ const selectWorkspaceFile = async (node: FileNode) => {
     workspaceSavedContent.value = client.content.value
     workspaceLanguage.value = client.language.value
     workspaceModified.value = client.modified.value
+    // Let the loading branch unmount the previous editor before snapshotting the
+    // new tab; otherwise its scroll position could leak into this file.
+    await nextTick()
     snapshotCurrentWorkspaceTab()
   } catch (err) {
     clearWorkspaceEditor()
     filesError.value = (err as Error).message || '读取文件失败'
   } finally {
     workspaceContentLoading.value = false
+    void nextTick(() => restoreMarkdownScrollPosition(markdownScrollLine.value))
   }
 }
 
@@ -1777,12 +2008,13 @@ const onDocumentKeydown = (event: KeyboardEvent) => {
 
     const wantsReplace = isReplaceShortcut(event)
     event.preventDefault()
-    if (workspaceIsMarkdown.value && markdownPreview.value) {
+    if (workspaceIsMarkdown.value && markdownViewMode.value !== 'edit') {
       // The rendered preview cannot replace; Ctrl+H switches back to the editor.
-      if (wantsReplace) {
-        closeMarkdownSearch()
-        markdownPreview.value = false
+      if (wantsReplace && markdownViewMode.value === 'preview') {
+        setMarkdownViewMode('edit')
         void nextTick(() => workspaceEditorRef.value?.openReplace())
+      } else if (wantsReplace) {
+        workspaceEditorRef.value?.openReplace()
       } else {
         openMarkdownSearch()
       }
@@ -3603,9 +3835,38 @@ const showSearchPaperPopup = (paper: any) => {
                 <span v-if="selectedWorkspaceFile.type === 'file'">{{ formatWorkspaceSize(selectedWorkspaceFile.size) }}</span>
                 <span v-if="selectedWorkspaceFile.type === 'file'">{{ workspaceLanguage }}</span>
                 <template v-if="selectedWorkspaceFile.type === 'file' && selectedWorkspaceFile.editable && !workspaceContentLoading">
-                  <div v-if="workspaceIsMarkdown" class="md-view-toggle">
-                    <button :class="{ active: !markdownPreview }" @click="markdownPreview = false">编辑</button>
-                    <button :class="{ active: markdownPreview }" @click="markdownPreview = true">预览</button>
+                  <div v-if="workspaceIsMarkdown" class="md-view-controls">
+                    <div class="md-view-toggle" role="tablist" aria-label="Markdown 显示模式">
+                      <button
+                        type="button"
+                        role="tab"
+                        :class="{ active: markdownViewMode === 'edit' }"
+                        :aria-selected="markdownViewMode === 'edit'"
+                        @click="setMarkdownViewMode('edit')"
+                      >编辑</button>
+                      <button
+                        type="button"
+                        role="tab"
+                        :class="{ active: markdownViewMode === 'preview' }"
+                        :aria-selected="markdownViewMode === 'preview'"
+                        @click="setMarkdownViewMode('preview')"
+                      >预览</button>
+                      <button
+                        type="button"
+                        role="tab"
+                        :class="{ active: markdownViewMode === 'split' }"
+                        :aria-selected="markdownViewMode === 'split'"
+                        @click="setMarkdownViewMode('split')"
+                      >双栏</button>
+                    </div>
+                    <button
+                      v-if="markdownIsSplit"
+                      type="button"
+                      class="md-view-swap"
+                      title="交换编辑区和预览区位置"
+                      aria-label="交换编辑区和预览区位置"
+                      @click="swapMarkdownSplitPanes"
+                    >↔ 换位</button>
                   </div>
                   <span
                     :class="['dirty-dot', { active: workspaceDirty, conflict: currentLiveClient?.conflict.value }]"
@@ -3638,7 +3899,7 @@ const showSearchPaperPopup = (paper: any) => {
               <div v-if="workspaceIsOfflineCopy" class="workspace-offline-notice">
                 当前显示的是{{ workspaceOfflineCachedAt ? ` ${workspaceOfflineCachedAt} 保存的` : '' }}本地副本；恢复连接后会自动刷新，离线期间仅可阅读。
               </div>
-              <div v-if="mdSearchOpen && workspaceIsMarkdown && markdownPreview" class="md-find-bar">
+              <div v-if="mdSearchOpen && markdownPreviewVisible" class="md-find-bar">
                 <div class="md-find-field">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <circle cx="11" cy="11" r="7" />
@@ -3665,15 +3926,42 @@ const showSearchPaperPopup = (paper: any) => {
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                 </button>
               </div>
-              <div v-show="workspaceIsMarkdown && markdownPreview" class="workspace-md-preview-shell">
-                <div ref="markdownPreviewRef" class="workspace-md-preview" @scroll="updateMarkdownPreviewScroll">
-                  <div v-if="markdownPreviewPending" class="workspace-md-preview-loading">正在同步文件内容…</div>
-                  <MarkdownContent
-                    v-else
-                    :style="{ fontSize: `${theme.editor.markdownFontSize}px` }"
-                    :content="markdownPreviewContent"
-                  />
-                </div>
+              <div v-if="currentLiveClient?.conflict.value" class="workspace-live-conflict">
+                {{ currentLiveClient.error.value || '文件存在外部修改或未同步草稿。' }}
+                <button @click="resolveCurrentLiveConflict('use-live')">保留编辑器版本</button>
+                <button @click="resolveCurrentLiveConflict('use-disk')">使用服务端版本</button>
+              </div>
+              <div
+                ref="markdownSplitLayoutRef"
+                :class="[
+                  'workspace-editor-content',
+                  {
+                    'workspace-editor-content-split': markdownIsSplit,
+                    'workspace-editor-content-editor-right': markdownIsSplit && !markdownSplitEditorOnLeft,
+                  },
+                ]"
+                :style="markdownIsSplit ? markdownSplitLayoutStyle : undefined"
+              >
+                <div v-show="markdownPreviewVisible" class="workspace-md-preview-shell">
+                  <div class="workspace-md-preview-column">
+                    <div ref="markdownPreviewRef" class="workspace-md-preview" @scroll="updateMarkdownPreviewScroll">
+                      <div v-if="markdownPreviewPending" class="workspace-md-preview-loading">正在同步文件内容…</div>
+                      <MarkdownContent
+                        v-else
+                        :style="{ fontSize: `${theme.editor.markdownFontSize}px` }"
+                        :content="markdownPreviewContent"
+                        :source-map="true"
+                      />
+                    </div>
+                    <footer class="workspace-status-bar">
+                      <span>{{ workspaceDocStats.words }} 词</span>
+                      <span>{{ workspaceDocStats.chars }} 字符</span>
+                      <span>{{ workspaceDocStats.lines }} 行</span>
+                      <span class="status-spacer" />
+                      <span>{{ markdownPreviewHeadings.length }} 个标题</span>
+                      <span class="status-hint">Ctrl+F 查找</span>
+                    </footer>
+                  </div>
                 <aside class="markdown-preview-strip" aria-label="Markdown 文档预览条">
                   <div
                     class="markdown-preview-rail"
@@ -3685,10 +3973,10 @@ const showSearchPaperPopup = (paper: any) => {
                     :aria-valuenow="Math.round(markdownScrollPercent)"
                     @pointerdown="onMarkdownPreviewRailPointerDown"
                     @pointermove="onMarkdownPreviewRailPointerMove"
-                    @keydown.up.prevent="scrollMarkdownPreviewTo(markdownScrollPercent - 5)"
-                    @keydown.down.prevent="scrollMarkdownPreviewTo(markdownScrollPercent + 5)"
-                    @keydown.home.prevent="scrollMarkdownPreviewTo(0)"
-                    @keydown.end.prevent="scrollMarkdownPreviewTo(100)"
+                    @keydown.up.prevent="scrollMarkdownPreviewRailTo(markdownScrollPercent - 5)"
+                    @keydown.down.prevent="scrollMarkdownPreviewRailTo(markdownScrollPercent + 5)"
+                    @keydown.home.prevent="scrollMarkdownPreviewRailTo(0)"
+                    @keydown.end.prevent="scrollMarkdownPreviewRailTo(100)"
                   >
                     <span
                       class="markdown-preview-viewport"
@@ -3704,20 +3992,36 @@ const showSearchPaperPopup = (paper: any) => {
                       :title="heading.title"
                       :aria-label="`跳转到标题：${heading.title}`"
                       @pointerdown.stop
-                      @click.stop="scrollMarkdownPreviewTo(heading.percent)"
+                      @click.stop="scrollMarkdownPreviewToLine(heading.line)"
                     />
                   </div>
                 </aside>
-              </div>
-              <div v-if="currentLiveClient?.conflict.value" class="workspace-live-conflict">
-                {{ currentLiveClient.error.value || '文件存在外部修改或未同步草稿。' }}
-                <button @click="resolveCurrentLiveConflict('use-live')">保留编辑器版本</button>
-                <button @click="resolveCurrentLiveConflict('use-disk')">使用服务端版本</button>
+                <div
+                  v-if="markdownIsSplit"
+                  ref="markdownSplitDividerRef"
+                  class="markdown-split-divider"
+                  :class="{ active: markdownSplitResizeActive }"
+                  role="separator"
+                  tabindex="0"
+                  :aria-orientation="markdownSplitIsVertical() ? 'horizontal' : 'vertical'"
+                  aria-label="调整编辑区和预览区宽度"
+                  aria-valuemin="20"
+                  aria-valuemax="80"
+                  :aria-valuenow="Math.round(markdownSplitRatio)"
+                  @pointerdown="startMarkdownSplitResize"
+                  @pointermove="onMarkdownSplitResize"
+                  @pointerup="endMarkdownSplitResize"
+                  @pointercancel="endMarkdownSplitResize"
+                  @keydown.left.prevent="adjustMarkdownSplitRatio(-5)"
+                  @keydown.right.prevent="adjustMarkdownSplitRatio(5)"
+                >
+                  <span class="markdown-split-divider-grip" aria-hidden="true" />
+                </div>
               </div>
               <CodeEditor
                 ref="workspaceEditorRef"
                 :key="selectedWorkspacePath"
-                v-show="!(workspaceIsMarkdown && markdownPreview)"
+                v-show="markdownEditorVisible"
                 v-model="workspaceContent"
                 :language="workspaceLanguage"
                 :readonly="!workspaceCanEdit"
@@ -3728,6 +4032,7 @@ const showSearchPaperPopup = (paper: any) => {
                 :collab-y-text="currentLiveClient?.ytext || null"
                 class="workspace-code-editor"
                 @save="saveWorkspaceFile"
+                @scroll="onMarkdownEditorScroll"
               >
                 <template #statusbar="{ line, column, selected, selectedWords }">
                   <footer class="workspace-status-bar">
@@ -3741,36 +4046,29 @@ const showSearchPaperPopup = (paper: any) => {
                   </footer>
                 </template>
               </CodeEditor>
-              <footer v-if="workspaceIsMarkdown && markdownPreview" class="workspace-status-bar">
-                <span>{{ workspaceDocStats.words }} 词</span>
-                <span>{{ workspaceDocStats.chars }} 字符</span>
-                <span>{{ workspaceDocStats.lines }} 行</span>
-                <span class="status-spacer" />
-                <span>{{ markdownPreviewHeadings.length }} 个标题</span>
-                <span class="status-hint">Ctrl+F 查找</span>
-              </footer>
-            </div>
+                </div>
+              </div>
 
             <div v-else-if="workspaceIsImage" class="workspace-preview-panel">
-              <img :src="api.getFileImageUrl(selectedWorkspaceFile.path)" :alt="selectedWorkspaceFile.name" />
+              <img :src="api.getFileImageUrl(selectedWorkspaceFile?.path || '')" :alt="selectedWorkspaceFile?.name || ''" />
             </div>
 
             <div v-else-if="workspaceIsOffice" class="workspace-office-preview-wrap">
-              <OfficePreview :path="selectedWorkspaceFile.path" :name="selectedWorkspaceFile.name" />
+              <OfficePreview :path="selectedWorkspaceFile?.path || ''" :name="selectedWorkspaceFile?.name || ''" />
             </div>
 
             <div v-else-if="workspaceIsLegacyOffice" class="workspace-empty compact">
               <div class="empty-icon">📝</div>
               <h2>暂不支持预览旧版 Office 格式</h2>
               <p>.doc / .xls / .ppt 是旧版二进制 Office 格式，当前 officecli 预览仅支持 .docx / .xlsx / .pptx。请先转换为新版格式后再预览。</p>
-              <button v-if="selectedWorkspaceFile.type === 'file'" class="primary-btn" @click="downloadWorkspaceFile(selectedWorkspaceFile)">下载文件</button>
+              <button v-if="selectedWorkspaceFile?.type === 'file'" class="primary-btn" @click="selectedWorkspaceFile && downloadWorkspaceFile(selectedWorkspaceFile)">下载文件</button>
             </div>
 
             <div v-else class="workspace-empty compact">
               <div class="empty-icon">{{ workspaceIsPdf ? '📕' : '📄' }}</div>
               <h2>此文件不能直接编辑</h2>
               <p>支持直接编辑常见文本文件。二进制文件、PDF 和超过大小限制的文件请下载后处理。</p>
-              <button v-if="selectedWorkspaceFile.type === 'file'" class="primary-btn" @click="downloadWorkspaceFile(selectedWorkspaceFile)">下载文件</button>
+              <button v-if="selectedWorkspaceFile?.type === 'file'" class="primary-btn" @click="selectedWorkspaceFile && downloadWorkspaceFile(selectedWorkspaceFile)">下载文件</button>
             </div>
           </section>
         </section>
@@ -4704,6 +5002,35 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .workspace-offline-tree-note { color: var(--color-warning); }
 .workspace-text-editor-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
+.workspace-editor-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.workspace-editor-content-split {
+  flex-direction: row;
+  align-items: stretch;
+}
+.workspace-editor-content-split > .workspace-code-editor,
+.workspace-editor-content-split > .workspace-md-preview-shell {
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+}
+.workspace-editor-content-split > .workspace-code-editor {
+  order: 1;
+  flex: var(--markdown-editor-flex) 1 0;
+}
+.workspace-editor-content-split > .markdown-split-divider { order: 2; }
+.workspace-editor-content-split > .workspace-md-preview-shell {
+  order: 3;
+  flex: var(--markdown-preview-flex) 1 0;
+}
+.workspace-editor-content-editor-right > .workspace-code-editor { order: 3; }
+.workspace-editor-content-editor-right > .workspace-md-preview-shell { order: 1; }
 .workspace-status-bar {
   display: flex;
   align-items: center;
@@ -4863,6 +5190,7 @@ const showSearchPaperPopup = (paper: any) => {
 .open-system-btn:hover:not(:disabled) { border-color: rgba(var(--color-primary-rgb), 0.35); color: var(--color-primary); background: rgba(var(--color-primary-rgb), 0.08); }
 .open-system-btn:disabled { opacity: 0.5; cursor: wait; }
 .workspace-code-editor { flex: 1; min-height: 0; }
+.md-view-controls { display: flex; align-items: center; gap: 4px; }
 .md-view-toggle { display: flex; gap: 2px; padding: 2px; border-radius: var(--radius-sm); background: var(--color-bg-muted); }
 .md-view-toggle button {
   padding: 3px 12px;
@@ -4874,7 +5202,56 @@ const showSearchPaperPopup = (paper: any) => {
   cursor: pointer;
 }
 .md-view-toggle button.active { background: var(--color-bg-card); color: var(--color-text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
-.workspace-md-preview-shell { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.md-view-swap {
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.md-view-swap:hover { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-soft); }
+.workspace-md-preview-shell { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: hidden; }
+.markdown-split-divider {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 10px;
+  width: 10px;
+  min-width: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-muted);
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.markdown-split-divider::before {
+  content: '';
+  position: absolute;
+  inset: 0 4px;
+  border-left: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+}
+.markdown-split-divider-grip {
+  position: relative;
+  z-index: 1;
+  width: 3px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--color-text-muted);
+  opacity: 0.45;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.markdown-split-divider:hover .markdown-split-divider-grip,
+.markdown-split-divider.active .markdown-split-divider-grip,
+.markdown-split-divider:focus-visible .markdown-split-divider-grip {
+  opacity: 0.9;
+  background: var(--color-primary);
+}
+.markdown-split-divider:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+.workspace-md-preview-column { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .workspace-md-preview {
   flex: 1;
   min-width: 0;
@@ -4952,6 +5329,31 @@ const showSearchPaperPopup = (paper: any) => {
 .workspace-preview-panel { flex: 1; min-height: 0; overflow: auto; padding: 24px; display: flex; justify-content: center; align-items: flex-start; }
 .workspace-preview-panel img { max-width: 100%; height: auto; border-radius: var(--radius); box-shadow: var(--shadow-lg); background: var(--color-bg-card); }
 .workspace-office-preview-wrap { flex: 1; min-height: 0; padding: 16px; background: var(--color-bg-card); }
+@media (max-width: 900px) {
+  .workspace-editor-content-split { flex-direction: column; }
+  .workspace-editor-content-split > .workspace-md-preview-shell,
+  .workspace-editor-content-split > .workspace-code-editor {
+    width: 100%;
+    min-height: 0;
+    flex-basis: 0;
+  }
+  .workspace-editor-content-split > .markdown-split-divider {
+    flex: 0 0 10px;
+    width: 100%;
+    min-width: 0;
+    height: 10px;
+    min-height: 10px;
+    cursor: row-resize;
+  }
+  .markdown-split-divider::before {
+    inset: 4px 0;
+    border-top: 1px solid var(--color-border);
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    border-left: none;
+  }
+  .markdown-split-divider-grip { width: 34px; height: 3px; }
+}
 .paper-library.settings-workspace-panel {
   overflow-y: auto;
   background:

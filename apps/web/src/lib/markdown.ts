@@ -1,5 +1,5 @@
 import katex, { type KatexOptions } from 'katex'
-import { marked, type MarkedExtension, type Tokens } from 'marked'
+import { marked, Renderer, type MarkedExtension, type Token, type Tokens } from 'marked'
 import { linkifyImplicitPaperReferences } from './paper-reference'
 
 interface KatexToken extends Tokens.Generic {
@@ -8,6 +8,7 @@ interface KatexToken extends Tokens.Generic {
   text: string
   displayMode: boolean
   prefix?: string
+  sourceRange?: MarkdownSourceRange
 }
 
 const inlineRule = /^([\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{P}]?)(\${1,2})(?!\$)((?:\\.|[^\\\n\$])*?(?:\\.|[^\\\n\$]))\2(?=[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{P}]|$)/u
@@ -28,7 +29,14 @@ function createKatexRenderer(options: KatexOptions, newlineAfter: boolean) {
       ...options,
       displayMode: katexToken.displayMode,
     })
-    return `${katexToken.prefix ?? ''}${rendered}${newlineAfter ? '\n' : ''}`
+    const sourceRange = katexToken.displayMode ? katexToken.sourceRange : undefined
+    const sourceAttributes = sourceRange
+      ? ` data-md-source-line="${sourceRange.startLine}" data-md-source-line-end="${sourceRange.endLine}"`
+      : ''
+    const mappedRendered = sourceAttributes
+      ? rendered.replace(/^<([a-z][\w-]*)/, `<$1${sourceAttributes}`)
+      : rendered
+    return `${katexToken.prefix ?? ''}${mappedRendered}${newlineAfter ? '\n' : ''}`
   }
 }
 
@@ -359,12 +367,129 @@ export function renderInlineLatex(text: string): string {
   return html
 }
 
+const prepareMarkdownSource = (text: string) =>
+  linkifyImplicitPaperReferences(normalizeListMathBlocks(normalizeBlockquoteMathBlocks(text)))
+
+type TokenWithChildren = Token & {
+  tokens?: Token[]
+  items?: Token[]
+}
+
+interface MarkdownSourceRange {
+  startLine: number
+  endLine: number
+}
+
+const buildMarkdownSourceRanges = (tokens: Token[], source: string) => {
+  const ranges = new WeakMap<object, MarkdownSourceRange>()
+  const lineStarts = [0]
+  for (let index = 0; index < source.length; index++) {
+    if (source.charAt(index) === '\n') lineStarts.push(index + 1)
+  }
+
+  const lineAt = (offset: number) => {
+    let low = 0
+    let high = lineStarts.length - 1
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2)
+      if (lineStarts[middle] <= offset) low = middle + 1
+      else high = middle - 1
+    }
+    return high + 1
+  }
+
+  const visit = (items: Token[], from: number, limit: number) => {
+    let cursor = from
+    for (const token of items) {
+      const raw = typeof token.raw === 'string' ? token.raw : ''
+      let start = raw ? source.indexOf(raw, cursor) : cursor
+      if (start < cursor || start >= limit) start = cursor
+      const end = raw ? Math.min(limit, start + raw.length) : start
+
+      if (raw) {
+        const range = {
+          startLine: lineAt(start),
+          endLine: lineAt(Math.max(start, end - 1)),
+        }
+        ranges.set(token, range)
+        if (token.type === 'blockKatex') (token as KatexToken).sourceRange = range
+      }
+
+      const nested = token as TokenWithChildren
+      if (nested.tokens?.length) visit(nested.tokens, start, Math.max(start, end))
+      if (nested.items?.length) visit(nested.items, start, Math.max(start, end))
+      cursor = Math.max(cursor, end)
+    }
+  }
+
+  visit(tokens, 0, source.length)
+  return ranges
+}
+
+class MarkdownSourceMapRenderer extends Renderer {
+  constructor(private readonly ranges: WeakMap<object, MarkdownSourceRange>) {
+    super()
+  }
+
+  private addSourceRange(html: string, token: object, tagName: string) {
+    const range = this.ranges.get(token)
+    if (!range) return html
+    const attributes = ` data-md-source-line="${range.startLine}" data-md-source-line-end="${range.endLine}"`
+    return html.replace(new RegExp(`^<${tagName}(?=[ >])`), `<${tagName}${attributes}`)
+  }
+
+  heading(token: Tokens.Heading) {
+    return this.addSourceRange(super.heading(token), token, `h${token.depth}`)
+  }
+
+  paragraph(token: Tokens.Paragraph) {
+    return this.addSourceRange(super.paragraph(token), token, 'p')
+  }
+
+  code(token: Tokens.Code) {
+    return this.addSourceRange(super.code(token), token, 'pre')
+  }
+
+  blockquote(token: Tokens.Blockquote) {
+    return this.addSourceRange(super.blockquote(token), token, 'blockquote')
+  }
+
+  list(token: Tokens.List) {
+    return this.addSourceRange(super.list(token), token, token.ordered ? 'ol' : 'ul')
+  }
+
+  listitem(token: Tokens.ListItem) {
+    return this.addSourceRange(super.listitem(token), token, 'li')
+  }
+
+  hr(token: Tokens.Hr) {
+    return this.addSourceRange(super.hr(token), token, 'hr')
+  }
+
+  table(token: Tokens.Table) {
+    return this.addSourceRange(super.table(token), token, 'table')
+  }
+}
+
 export function renderMarkdown(text: string): string {
   if (!text) return ''
   configureMarked()
   try {
-    return marked.parse(linkifyImplicitPaperReferences(normalizeListMathBlocks(normalizeBlockquoteMathBlocks(text)))) as string
+    return marked.parse(prepareMarkdownSource(text)) as string
   } catch {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')
+  }
+}
+
+export function renderMarkdownWithSourceMap(text: string): string {
+  if (!text) return ''
+  configureMarked()
+  try {
+    const source = prepareMarkdownSource(text)
+    const tokens = marked.lexer(source)
+    const renderer = new MarkdownSourceMapRenderer(buildMarkdownSourceRanges(tokens, source))
+    return marked.parser(tokens, { ...marked.defaults, renderer }) as string
+  } catch {
+    return renderMarkdown(text)
   }
 }

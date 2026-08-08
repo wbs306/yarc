@@ -1,18 +1,22 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { renderMarkdown } from '@/lib/markdown'
+import { renderMarkdown, renderMarkdownWithSourceMap } from '@/lib/markdown'
 import { isPaperReferenceUrl, parsePaperReference } from '@/lib/paper-reference'
 import { usePaperReferenceStore } from '@/stores/paperReference'
 
 const props = withDefaults(defineProps<{
   content: string
   inline?: boolean
+  sourceMap?: boolean
 }>(), {
   inline: false,
+  sourceMap: false,
 })
 
 const paperReferences = usePaperReferenceStore()
-const html = computed(() => renderMarkdown(props.content || ''))
+const html = computed(() => props.sourceMap
+  ? renderMarkdownWithSourceMap(props.content || '')
+  : renderMarkdown(props.content || ''))
 
 const onClick = (event: MouseEvent) => {
   const target = event.target as HTMLElement | null

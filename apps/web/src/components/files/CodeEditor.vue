@@ -45,6 +45,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   save: []
+  scroll: [line: number]
 }>()
 
 // Cursor position and selection size for the status bar. Doc-level counts are
@@ -575,6 +576,29 @@ function updateMinimapViewport() {
   minimapViewportStyle.value = { top: `${top}px`, height: `${handleHeight}px` }
 }
 
+function getScrollLine() {
+  const v = view.value
+  const scroller = v?.scrollDOM
+  if (!v || !scroller) return 1
+  const block = v.lineBlockAtHeight(Math.max(0, scroller.scrollTop + 1))
+  return v.state.doc.lineAt(block.from).number
+}
+
+function scrollToLine(line: number, behavior: ScrollBehavior = 'auto') {
+  const v = view.value
+  const scroller = v?.scrollDOM
+  if (!v || !scroller) return
+  const lineNumber = Math.min(v.state.doc.lines, Math.max(1, Math.round(line)))
+  const block = v.lineBlockAt(v.state.doc.line(lineNumber).from)
+  scroller.scrollTo({ top: Math.max(0, block.top), behavior })
+  updateMinimapViewport()
+}
+
+function handleEditorScroll() {
+  updateMinimapViewport()
+  emit('scroll', getScrollLine())
+}
+
 function scrollFromMinimap(clientY: number) {
   const scroller = view.value?.scrollDOM
   const rail = minimap.value
@@ -605,7 +629,7 @@ onMounted(() => {
     parent: host.value!,
     state: EditorState.create({ doc: props.collabYText?.toString() ?? props.modelValue, extensions: buildExtensions() }),
   })
-  view.value.scrollDOM.addEventListener('scroll', updateMinimapViewport, { passive: true })
+  view.value.scrollDOM.addEventListener('scroll', handleEditorScroll, { passive: true })
   minimapResizeObserver = new ResizeObserver(scheduleMinimapDraw)
   if (minimap.value) minimapResizeObserver.observe(minimap.value)
   scheduleMinimapDraw()
@@ -685,6 +709,8 @@ watch(() => props.lineNumbers, (on) => {
 defineExpose({
   openSearch: () => openFindPanel(false),
   openReplace: () => openFindPanel(true),
+  getScrollLine,
+  scrollToLine,
 })
 
 onBeforeUnmount(() => {
@@ -693,7 +719,7 @@ onBeforeUnmount(() => {
   if (minimapFrame !== undefined) window.cancelAnimationFrame(minimapFrame)
   window.removeEventListener('pointermove', onMinimapPointerMove)
   window.removeEventListener('pointerup', onMinimapPointerUp)
-  view.value?.scrollDOM.removeEventListener('scroll', updateMinimapViewport)
+  view.value?.scrollDOM.removeEventListener('scroll', handleEditorScroll)
   view.value?.destroy()
 })
 </script>
