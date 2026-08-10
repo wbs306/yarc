@@ -227,6 +227,8 @@ const loadRecentWorkspaceFiles = (): FileNode[] => {
 }
 
 const workspaceFiles = ref<FileNode[]>([])
+let workspaceFilesRefreshTimer: number | null = null
+let workspaceFilesStale = false
 const selectedWorkspaceFile = ref<FileNode | null>(null)
 const recentWorkspaceFiles = ref<FileNode[]>(loadRecentWorkspaceFiles())
 const openWorkspaceTabs = ref<WorkspaceFileTab[]>([])
@@ -934,6 +936,7 @@ const loadWorkspaceFiles = async (silent = false) => {
   try {
     const res = await api.getFileTree()
     workspaceFiles.value = res.files
+    workspaceFilesStale = false
     workspaceTreeFromCache.value = false
     void putOfflineWorkspaceTree(res.files)
     if (selectedWorkspacePath.value) {
@@ -1129,7 +1132,7 @@ const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee') => {
   if (route.fullPath !== router.resolve(target).fullPath) {
     router.replace(target).catch(() => {})
   }
-  if (mode === 'files' && !workspaceFiles.value.length) void loadWorkspaceFiles()
+  if (mode === 'files' && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFiles()
   if (mode === 'ieee' && !ieeeJournalPreferences.value.journals.length && !ieeeJournalLoading.value) {
     void loadIeeeJournalPreferences()
   }
@@ -2282,6 +2285,16 @@ const refreshSearchCategoriesSoon = () => {
   }, 200)
 }
 
+const refreshWorkspaceFilesSoon = () => {
+  workspaceFilesStale = true
+  if (sidebarMode.value !== 'files') return
+  if (workspaceFilesRefreshTimer !== null) window.clearTimeout(workspaceFilesRefreshTimer)
+  workspaceFilesRefreshTimer = window.setTimeout(() => {
+    workspaceFilesRefreshTimer = null
+    void loadWorkspaceFiles(true)
+  }, 200)
+}
+
 const onRealtimeLibraryChanged = () => refreshLibrarySoon()
 const onRealtimeCategoriesChanged = () => refreshLibrarySoon()
 const onRealtimeSearchCategoriesChanged = () => refreshSearchCategoriesSoon()
@@ -2361,12 +2374,10 @@ const onRealtimeFilesChanged = (event: Event) => {
   const action = typeof detail.action === 'string' ? detail.action : ''
   const changedPath = typeof detail.path === 'string' ? detail.path : ''
 
-  if (sidebarMode.value === 'files' && action !== 'live-save') {
-    void loadWorkspaceFiles(true)
-  }
+  if (action !== 'live-save') refreshWorkspaceFilesSoon()
 
   if (action === 'external-change') {
-    void refreshOpenWorkspaceFileContent()
+    void refreshOpenWorkspaceFileContent(changedPath || undefined)
   } else if (changedPath && ['save', 'create-file'].includes(action)) {
     void refreshOpenWorkspaceFileContent(changedPath)
   }
@@ -2390,6 +2401,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('yarc-files-changed', onRealtimeFilesChanged)
   if (libraryRefreshTimer !== null) window.clearTimeout(libraryRefreshTimer)
   if (searchCategoryRefreshTimer !== null) window.clearTimeout(searchCategoryRefreshTimer)
+  if (workspaceFilesRefreshTimer !== null) window.clearTimeout(workspaceFilesRefreshTimer)
 })
 
 const openContextMenu = (e: Event, cat?: { id: string; name: string; parentId?: string | null }) => {

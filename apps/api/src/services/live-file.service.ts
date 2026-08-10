@@ -7,12 +7,15 @@ import { atomicWriteTextFile } from '../lib/atomic-file.js'
 import { config } from '../lib/config.js'
 import { AppError } from '../lib/errors.js'
 import { sseHub } from '../lib/sse.js'
+import { getDataChangeWatcher } from './data-change-watcher.js'
 
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.csv', '.tsv',
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.css', '.scss', '.html', '.xml',
   '.py', '.sh', '.sql', '.log', '.bib', '.tex', '.ini', '.conf', '.env.example',
 ])
+
+const workspaceDataChangeWatcher = getDataChangeWatcher(config.filesDir)
 
 const MAX_TEXT_FILE_SIZE = 2 * 1024 * 1024
 const AUTOSAVE_DELAY_MS = 800
@@ -672,6 +675,9 @@ export class LiveFileService {
     }
     this.logPersistence(session, 'save-complete', { targetRevision: revision })
     this.broadcastStatus(session)
+    await workspaceDataChangeWatcher.publish({ path: session.path, source: 'live-file' }).catch((error) => {
+      console.warn('[LiveFile] failed to publish data change:', (error as Error).message)
+    })
     sseHub.emit({ type: 'files-changed', action: 'live-save', path: session.path, at: new Date().toISOString() })
     return { revision, hash, savedAt: new Date(session.lastFlushAt).toISOString(), conflict: false }
   }
@@ -820,6 +826,9 @@ export class LiveFileService {
       await this.withWorkspaceMutationLock(async () => {
         await atomicWriteTextFile(absolutePath, content)
         if (relPath) {
+          await workspaceDataChangeWatcher.publish({ path: relPath, source: 'live-file' }).catch((error) => {
+            console.warn('[LiveFile] failed to publish data change:', (error as Error).message)
+          })
           sseHub.emit({ type: 'files-changed', action: 'write', path: relPath, at: new Date().toISOString() })
         }
       })

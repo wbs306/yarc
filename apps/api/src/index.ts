@@ -679,7 +679,8 @@ const server = serve(
     console.log(`   Environment: ${config.nodeEnv}`)
     console.log(`   Database: ${config.databaseUrl.replace(/\/\/.*@/, '//***@')}`)
 
-    // Recover pending jobs and watch editable workspace files for external changes.
+    // Recover pending jobs and start the shared data watcher used by the
+    // editable workspace and WebDAV local-change synchronization.
     recoverJobs()
     fileService.startWatcher()
     webDavSyncService.start().catch((err) => {

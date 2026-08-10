@@ -6,6 +6,7 @@ import { AppError } from '../lib/errors.js'
 import { sseHub } from '../lib/sse.js'
 import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
 import { liveFileService } from './live-file.service.js'
+import { getDataChangeWatcher, type DataChangeWatcher } from './data-change-watcher.js'
 import type { FileNode } from '@yarc/shared'
 
 const TEXT_EXTENSIONS = new Set([
@@ -26,12 +27,12 @@ const EXCLUDED_NAMES = new Set(['backgrounds', 'model-catalog.json', 'temporary-
 
 export class FileService {
   private rootDir: string
-  private watcherTimer: ReturnType<typeof setInterval> | null = null
-  private lastSnapshot: Map<string, string> | null = null
-  private scanning = false
+  private changeWatcher: DataChangeWatcher
+  private unsubscribeDataChanges: (() => void) | null = null
 
   constructor() {
     this.rootDir = resolve(config.filesDir)
+    this.changeWatcher = getDataChangeWatcher(this.rootDir)
   }
 
   private async ensureRootReady() {
@@ -167,6 +168,16 @@ export class FileService {
   }
 
   private async emitFilesChanged(action: string, path?: string) {
+    if (action !== 'external-change' && path) {
+      await this.changeWatcher.publish({
+        path,
+        kind: action === 'delete' ? 'delete' : 'change',
+        source: 'file-service',
+      }).catch((error) => {
+        console.warn('[FileService] failed to publish data change:', (error as Error).message)
+      })
+    }
+
     if (action === 'external-change' && path) {
       try {
         const result = await liveFileService.handleDiskChange(path)
@@ -194,81 +205,36 @@ export class FileService {
     }
   }
 
-  private async collectSnapshot(dir: string, prefix = '', snapshot = new Map<string, string>(), state = { count: 0 }): Promise<Map<string, string>> {
-    if (state.count > 5000) return snapshot
-    let entries
-    try {
-      entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      return snapshot
-    }
-
-    for (const entry of entries) {
-      const relPath = prefix ? `${prefix}/${entry.name}` : entry.name
-      if (this.isHiddenPath(relPath) || this.isSensitivePath(relPath) || this.isExcludedPath(relPath) || entry.name === 'node_modules') continue
-      const fullPath = resolve(dir, entry.name)
-      try {
-        const entryStat = await stat(fullPath)
-        const type = entryStat.isDirectory() ? 'directory' : 'file'
-        // Only track mtime/size for files. Directory mtime changes when
-        // children are created/deleted (e.g. auth.json.lock), causing false
-        // positives in the snapshot diff.
-        snapshot.set(relPath, type === 'file' ? `${type}:${entryStat.mtimeMs}:${entryStat.size}` : type)
-        state.count += 1
-        if (entryStat.isDirectory() && !this.isPapersPath(relPath)) {
-          await this.collectSnapshot(fullPath, relPath, snapshot, state)
-        }
-      } catch {
-        // File may have changed between readdir and stat; next poll will catch it.
+  startWatcher(): void {
+    if (this.unsubscribeDataChanges) return
+    this.unsubscribeDataChanges = this.changeWatcher.subscribe(async (event) => {
+      if (event.source !== 'filesystem') return
+      const path = this.normalizeRelativePath(event.path)
+      if (!path) return
+      if (this.isHiddenPath(path) || this.isSensitivePath(path) || this.isExcludedPath(path)) return
+      if (this.isPapersPath(path)) {
+        sseHub.emit({ type: 'files-changed', action: 'external-change', path, live: false, at: new Date().toISOString() })
+        return
       }
-      if (state.count > 5000) break
-    }
-    return snapshot
-  }
-
-  private snapshotDiffs(previous: Map<string, string>, next: Map<string, string>): string[] {
-    const changed = new Set<string>()
-    for (const [path, value] of next.entries()) {
-      if (previous.get(path) !== value) changed.add(path)
-    }
-    for (const path of previous.keys()) {
-      if (!next.has(path)) changed.add(path)
-    }
-    return [...changed].sort()
-  }
-
-  startWatcher(intervalMs = 1000): void {
-    if (this.watcherTimer) return
-    void mkdir(this.rootDir, { recursive: true }).then(async () => {
-      this.lastSnapshot = await this.collectSnapshot(this.rootDir)
-    }).catch(() => {})
-
-    this.watcherTimer = setInterval(() => {
-      if (this.scanning) return
-      this.scanning = true
-      void (async () => {
-        try {
-          await mkdir(this.rootDir, { recursive: true })
-          const next = await this.collectSnapshot(this.rootDir)
-          const changedPaths = this.lastSnapshot ? this.snapshotDiffs(this.lastSnapshot, next) : []
-          // Publish the snapshot before processing so changes made while the
-          // bridge is waiting are observed by the next scan. Await every bridge
-          // operation to avoid re-entering handleDiskChange for the same file.
-          this.lastSnapshot = next
-          for (const changedPath of changedPaths) {
-            await this.emitFilesChanged('external-change', changedPath)
-          }
-        } finally {
-          this.scanning = false
+      if (event.signature === 'directory') {
+        sseHub.emit({ type: 'files-changed', action: 'external-change', path, live: false, at: new Date().toISOString() })
+        if (this.isPiConfigPath(path)) {
+          void import('./pi.service.js')
+            .then(({ piService }) => piService.reload('files:external-change'))
+            .catch((error) => console.warn('[FileService] Pi reload failed:', error.message))
         }
-      })().catch(() => { this.scanning = false })
-    }, intervalMs)
+        return
+      }
+      await this.emitFilesChanged('external-change', path)
+    })
+    void this.changeWatcher.start().catch((error) => {
+      console.warn('[FileService] data watcher failed to start:', (error as Error).message)
+    })
   }
 
   stopWatcher(): void {
-    if (!this.watcherTimer) return
-    clearInterval(this.watcherTimer)
-    this.watcherTimer = null
+    this.unsubscribeDataChanges?.()
+    this.unsubscribeDataChanges = null
   }
 
   private async buildNode(fullPath: string, depth: number): Promise<FileNode | null> {
