@@ -58,6 +58,7 @@ import subagentRoutes from './routes/subagents.js'
 import subagentRunsRoutes from './routes/subagent-runs.js'
 import extensionsRoutes from './routes/extensions.js'
 import wechatRoutes from './routes/wechat.js'
+import webdavRoutes from './routes/webdav.js'
 import { getWechatStorageDir } from './lib/wechat-storage.js'
 import { chatService } from './services/chat.service.js'
 import { piService } from './services/pi.service.js'
@@ -75,6 +76,7 @@ import { streamBuffer } from './lib/stream-buffer-singleton.js'
 import { chatStreamControl } from './lib/chat-stream-control.js'
 import { agentInteractionRegistry } from './lib/agent-interaction-registry.js'
 import { subagentWatcher } from './lib/subagent-watcher.js'
+import { webDavSyncService } from './services/webdav-sync.service.js'
 import type { ChatRequest } from '@yarc/shared'
 
 const app = new Hono()
@@ -202,6 +204,7 @@ app.route('/api/subagents', subagentRoutes)
 app.route('/api/subagent-runs', subagentRunsRoutes)
 app.route('/api/extensions', extensionsRoutes)
 app.route('/api/settings/wechat', wechatRoutes)
+app.route('/api/webdav', webdavRoutes)
 app.get('/api/pi/models', async (c) => c.json(await piService.listModels(c.req.query('refresh') === '1')))
 
 // ── SSE: real-time paper/task status ─────────────────────────────────────────
@@ -679,6 +682,9 @@ const server = serve(
     // Recover pending jobs and watch editable workspace files for external changes.
     recoverJobs()
     fileService.startWatcher()
+    webDavSyncService.start().catch((err) => {
+      console.warn('[Startup] WebDAV sync scheduler failed to start:', err)
+    })
 
     // Seed the agent workspace filesystem from DB once at startup.
     // This replaces the per-request ensureAgentWorkspace() in GET /api/settings

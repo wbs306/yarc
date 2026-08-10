@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "pretypecheck": "pnpm --filter @yarc/db generate",
     "typecheck": "tsc --rootDir ../.. --noEmit",
-    "test": "tsx --test src/services/live-file.service.test.ts",
+    "test": "tsx --test src/services/*.test.ts",
     "prebuild": "pnpm --filter @yarc/db generate",
     "build": "tsc --rootDir ../.. --noEmit",
     "start": "tsx src/index.ts"

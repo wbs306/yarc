@@ -8,6 +8,10 @@ import type {
   PaperReferenceResolution,
   ReparseAction,
   ReparsePaperInfo,
+  WebDavSyncConfig,
+  WebDavSyncResult,
+  WebDavSyncStatus,
+  WebDavSyncTreeNode,
 } from '@yarc/shared'
 
 const API_BASE = '/api'
@@ -499,6 +503,31 @@ export function useApi() {
         method: 'PUT',
         body: JSON.stringify({ value }),
       }),
+
+    // WebDAV sync
+    getWebDavConfig: () =>
+      request<{ config: WebDavSyncConfig; hasPassword: boolean; protectedPatterns: string[] }>('/webdav/config'),
+
+    updateWebDavConfig: (data: { config: WebDavSyncConfig; password?: string; clearPassword?: boolean }) =>
+      request<{ config: WebDavSyncConfig; hasPassword: boolean; protectedPatterns: string[] }>('/webdav/config', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    getWebDavStatus: () =>
+      request<{ status: WebDavSyncStatus }>('/webdav/status'),
+
+    getWebDavFiles: () =>
+      request<{ files: WebDavSyncTreeNode[] }>('/webdav/files'),
+
+    testWebDavConnection: (data: { config: WebDavSyncConfig; password?: string }) =>
+      request<{ ok: boolean; latencyMs: number; message: string }>('/webdav/test', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    runWebDavSync: () =>
+      request<{ result: WebDavSyncResult }>('/webdav/sync', { method: 'POST' }),
 
     getModels: (refresh = false) =>
       request<{ models: any[]; source?: string; error?: string }>('/settings/models', {

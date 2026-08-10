@@ -5,6 +5,7 @@ import { usePaperStore, type Paper } from '@/stores/paper'
 import { useChatStore } from '@/stores/chat'
 import { useNoteStore, type Note } from '@/stores/note'
 import { useThemeStore } from '@/stores/theme'
+import { useWebDavSyncStore } from '@/stores/webdavSync'
 import { useApi, useTemporaryPdfUrl } from '@/composables/useApi'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
@@ -37,6 +38,7 @@ const paperStore = usePaperStore()
 const chatStore = useChatStore()
 const noteStore = useNoteStore()
 const theme = useThemeStore()
+const webDavSyncStore = useWebDavSyncStore()
 const prefs = usePrefsStore()
 
 const sidebarOpen = ref(true)
@@ -862,10 +864,28 @@ const settingsSections = [
   { id: 'general', label: '通用', icon: '⚙️' },
   { id: 'ai', label: 'AI', icon: '🤖' },
   { id: 'appearance', label: '外观', icon: '🎨' },
+  { id: 'sync', label: '同步', icon: '☁️' },
   { id: 'integrations', label: '集成', icon: '🔌' },
   { id: 'data', label: '数据', icon: '📊' },
   { id: 'system', label: '系统', icon: '🔧' },
 ]
+
+const webDavStatusText = computed(() => {
+  const status = webDavSyncStore.status
+  if (status.phase === 'syncing') return status.total ? `${status.processed}/${status.total}` : '同步中'
+  if (status.phase === 'testing') return '测试中'
+  if (status.phase === 'error') return '同步异常'
+  if (status.phase === 'success') return '已同步'
+  if (status.phase === 'disabled') return '同步关闭'
+  return status.scheduled ? '等待同步' : '同步就绪'
+})
+
+const openSettingsSection = (section: string) => {
+  settingsSection.value = section
+  sidebarMode.value = 'settings'
+  if (isMobile.value) mobileSidebar.value = false
+  void router.push({ name: 'settings', query: { section } }).catch(() => {})
+}
 
 const findWorkspaceNode = (nodes: FileNode[], path: string): FileNode | null => {
   for (const node of nodes) {
@@ -1103,7 +1123,9 @@ const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee') => {
   localStorage.setItem('yarc_sidebar_mode', mode)
   // Like the existing library category, the active IEEE workspace and
   // journal are restored from localStorage rather than encoded in the URL.
-  const target = { path: mode === 'files' ? '/files' : mode === 'settings' ? '/settings' : '/' }
+  const target = mode === 'settings'
+    ? { path: '/settings', query: { section: settingsSection.value } }
+    : { path: mode === 'files' ? '/files' : '/' }
   if (route.fullPath !== router.resolve(target).fullPath) {
     router.replace(target).catch(() => {})
   }
@@ -2064,6 +2086,7 @@ const onDocumentKeydown = (event: KeyboardEvent) => {
 }
 
 onMounted(async () => {
+  webDavSyncStore.initialize()
   window.addEventListener('resize', onResize)
   window.addEventListener('yarc-open-chat', openChatPanel)
   window.addEventListener('yarc-open-temporary-pdf', onOpenTemporaryPdf)
@@ -3177,6 +3200,15 @@ const showSearchPaperPopup = (paper: any) => {
       </div>
 
       <div class="header-right">
+        <button
+          class="sync-status-btn"
+          :class="`phase-${webDavSyncStore.status.phase}`"
+          :title="webDavSyncStore.status.message"
+          @click="openSettingsSection('sync')"
+        >
+          <span class="sync-status-dot" />
+          <span class="sync-status-text">{{ webDavStatusText }}</span>
+        </button>
         <button v-if="hasPaper" class="icon-btn" @click="backToLibrary" title="返回文献列表">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
         </button>
@@ -3439,7 +3471,7 @@ const showSearchPaperPopup = (paper: any) => {
               :key="section.id"
               class="category-item"
               :class="{ active: settingsSection === section.id }"
-              @click="settingsSection = section.id"
+              @click="openSettingsSection(section.id)"
             >
               <span class="settings-item-icon" aria-hidden="true">{{ section.icon }}</span>
               <span class="cat-name">{{ section.label }}</span>
@@ -4477,6 +4509,31 @@ const showSearchPaperPopup = (paper: any) => {
   color: var(--color-primary);
   background: var(--color-primary-soft);
 }
+
+.sync-status-btn {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  margin-right: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--transition), color var(--transition), background var(--transition);
+}
+.sync-status-btn:hover { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-soft); }
+.sync-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-text-muted); flex: 0 0 auto; }
+.sync-status-btn.phase-syncing .sync-status-dot,
+.sync-status-btn.phase-testing .sync-status-dot { background: var(--color-primary); animation: sync-status-pulse 1s ease-in-out infinite; }
+.sync-status-btn.phase-success .sync-status-dot { background: #22c55e; }
+.sync-status-btn.phase-error { border-color: color-mix(in srgb, #ef4444 35%, var(--color-border)); color: #dc2626; }
+.sync-status-btn.phase-error .sync-status-dot { background: #ef4444; }
+@keyframes sync-status-pulse { 50% { opacity: .35; transform: scale(.8); } }
 
 .chat-toggle.active {
   color: var(--color-primary);
@@ -6291,6 +6348,8 @@ const showSearchPaperPopup = (paper: any) => {
 @media (max-width: 480px) {
   .app-header { padding: 0 8px; }
   .primary-btn { padding: 7px 10px; }
+  .sync-status-btn { width: 28px; padding: 0; justify-content: center; }
+  .sync-status-text { display: none; }
 }
 
 /* ── Installed PWA title-bar integration ───────────────────────────────────

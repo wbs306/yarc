@@ -7,6 +7,7 @@ import { confirm } from '@/composables/useConfirm'
 import Select from '@/components/ui/Select.vue'
 import WechatSettings from './WechatSettings.vue'
 import ExtensionsSettings from './ExtensionsSettings.vue'
+import WebDavSettings from './WebDavSettings.vue'
 
 const theme = useThemeStore()
 const prefs = usePrefsStore()
@@ -2487,7 +2488,14 @@ onBeforeUnmount(() => {
     </section>
 
     <!-- ================================================================
-         数据
+         同步
+         ================================================================ -->
+    <section v-if="activeTab === 'sync'">
+      <WebDavSettings />
+    </section>
+
+    <!-- ================================================================
+         集成
          ================================================================ -->
     <section v-if="activeTab === 'integrations'">
       <div class="settings-card">

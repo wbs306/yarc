@@ -402,3 +402,65 @@ export interface FileNode {
   legacyOffice?: boolean
   readonly?: boolean
 }
+
+// ── WebDAV Sync ──────────────────────────────────────────────────────────────
+
+export type WebDavSyncDirection = 'upload' | 'download' | 'bidirectional'
+export type WebDavSyncPhase = 'disabled' | 'idle' | 'testing' | 'syncing' | 'success' | 'error'
+
+export interface WebDavSyncConfig {
+  enabled: boolean
+  url: string
+  username: string
+  remotePath: string
+  direction: WebDavSyncDirection
+  syncAll: boolean
+  selectedPaths: string[]
+  excludePatterns: string[]
+  scheduleEnabled: boolean
+  intervalMinutes: number
+  timeoutSeconds: number
+}
+
+export interface WebDavSyncTreeNode {
+  name: string
+  path: string
+  type: 'file' | 'directory'
+  size?: number
+  modified?: string
+  children?: WebDavSyncTreeNode[]
+}
+
+export interface WebDavSyncErrorItem {
+  path: string
+  action: 'upload' | 'download' | 'conflict' | 'scan'
+  message: string
+}
+
+export interface WebDavSyncResult {
+  trigger: 'manual' | 'schedule'
+  startedAt: string
+  finishedAt: string
+  uploaded: number
+  downloaded: number
+  skipped: number
+  conflicts: number
+  failed: number
+  errors: WebDavSyncErrorItem[]
+}
+
+export interface WebDavSyncStatus {
+  enabled: boolean
+  scheduled: boolean
+  phase: WebDavSyncPhase
+  running: boolean
+  message: string
+  currentPath: string | null
+  processed: number
+  total: number
+  lastSyncAt: string | null
+  lastSuccessAt: string | null
+  nextSyncAt: string | null
+  lastError: string | null
+  lastResult: WebDavSyncResult | null
+}

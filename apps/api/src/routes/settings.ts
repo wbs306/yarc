@@ -29,6 +29,7 @@ import {
   normalizeIeeeJournalBrowserPreferences,
   readIeeeJournalBrowserPreferences,
 } from '../services/ieee-xplore.service.js'
+import { WEB_DAV_PRIVATE_SETTING_KEYS } from '../services/webdav-sync.service.js'
 
 const settings = new Hono()
 
@@ -134,7 +135,7 @@ settings.get('/', async (c) => {
   const all = await prisma.setting.findMany()
   const result: Record<string, unknown> = {}
   for (const s of all) {
-    if (s.key === 'password_hash') continue
+    if (s.key === 'password_hash' || WEB_DAV_PRIVATE_SETTING_KEYS.has(s.key)) continue
     result[s.key] = s.value
   }
   // Read from filesystem (seeded at startup, kept in sync by PUT handlers).
@@ -853,6 +854,9 @@ settings.put('/ieee-journal-browser', async (c) => {
 // PUT /api/settings/:key — generic setting update (MUST be after all specific PUT routes)
 settings.put('/:key', async (c) => {
   const key = c.req.param('key')
+  if (WEB_DAV_PRIVATE_SETTING_KEYS.has(key)) {
+    return c.json({ error: { code: 'RESERVED_SETTING', message: '该设置只能通过 WebDAV 同步接口修改' } }, 400)
+  }
   const { value } = await c.req.json()
 
   if (key === 'summary_prompt') await writeAgentSummaryPrompt(typeof value === 'string' ? value : '')
