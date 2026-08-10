@@ -12,9 +12,12 @@ import type {
   WebDavSyncResult,
   WebDavSyncStatus,
   WebDavSyncTreeNode,
+  WebDavSyncTrigger,
 } from '@yarc/shared'
 import { config as appConfig } from '../lib/config.js'
+import { DEFAULT_DATA_SYNC_EXCLUDE_PATTERNS, isDefaultIgnoredDataPath } from '../lib/data-sync-policy.js'
 import { sseHub } from '../lib/sse.js'
+import { dataChangeWatcher, type DataChangeEvent } from './data-change-watcher.js'
 
 const CONFIG_KEY = 'webdav_sync_config'
 const SECRET_KEY = 'webdav_sync_secret'
@@ -22,15 +25,8 @@ const MANIFEST_KEY = 'webdav_sync_manifest'
 const RUNTIME_KEY = 'webdav_sync_runtime'
 const CLOCK_TOLERANCE_MS = 2_000
 const MAX_RECORDED_ERRORS = 100
+const LOCAL_CHANGE_MAX_WAIT_MS = 60_000
 const SYNC_TEMP_PREFIX = '.yarc-webdav-'
-const PROTECTED_EXCLUDE_PATTERNS = [
-  '.pi',
-  'node_modules',
-  '.git',
-  '.venv',
-  'venv',
-  '__pycache__',
-] as const
 
 export const WEB_DAV_PRIVATE_SETTING_KEYS = new Set([
   CONFIG_KEY,
@@ -41,6 +37,7 @@ export const WEB_DAV_PRIVATE_SETTING_KEYS = new Set([
 
 export const DEFAULT_WEB_DAV_SYNC_CONFIG: WebDavSyncConfig = {
   enabled: false,
+  paused: false,
   url: '',
   username: '',
   remotePath: 'yarc-data',
@@ -50,6 +47,8 @@ export const DEFAULT_WEB_DAV_SYNC_CONFIG: WebDavSyncConfig = {
   excludePatterns: [],
   scheduleEnabled: false,
   intervalMinutes: 60,
+  syncOnLocalChange: false,
+  localChangeDebounceSeconds: 10,
   timeoutSeconds: 30,
 }
 
@@ -85,6 +84,7 @@ type SecretEnvelope = {
 const initialStatus = (): WebDavSyncStatus => ({
   enabled: false,
   scheduled: false,
+  watchingLocalChanges: false,
   phase: 'disabled',
   running: false,
   message: 'WebDAV 同步未启用',
@@ -94,6 +94,8 @@ const initialStatus = (): WebDavSyncStatus => ({
   lastSyncAt: null,
   lastSuccessAt: null,
   nextSyncAt: null,
+  pendingLocalChanges: 0,
+  pendingSyncAt: null,
   lastError: null,
   lastResult: null,
 })
@@ -148,8 +150,12 @@ export const normalizeWebDavConfig = (
       .filter(item => item && !item.startsWith('#')))]
     : [...base.excludePatterns]
 
+  const enabled = typeof source.enabled === 'boolean' ? source.enabled : base.enabled
+  const paused = enabled && (typeof source.paused === 'boolean' ? source.paused : base.paused)
+
   return {
-    enabled: typeof source.enabled === 'boolean' ? source.enabled : base.enabled,
+    enabled,
+    paused,
     url,
     username: typeof source.username === 'string' ? source.username.trim() : base.username,
     remotePath: typeof source.remotePath === 'string' ? normalizeRelativePath(source.remotePath.trim()) : base.remotePath,
@@ -159,6 +165,10 @@ export const normalizeWebDavConfig = (
     excludePatterns,
     scheduleEnabled: typeof source.scheduleEnabled === 'boolean' ? source.scheduleEnabled : base.scheduleEnabled,
     intervalMinutes: clampInteger(source.intervalMinutes, base.intervalMinutes, 5, 7 * 24 * 60),
+    syncOnLocalChange: direction !== 'download' && (typeof source.syncOnLocalChange === 'boolean'
+      ? source.syncOnLocalChange
+      : base.syncOnLocalChange),
+    localChangeDebounceSeconds: clampInteger(source.localChangeDebounceSeconds, base.localChangeDebounceSeconds, 2, 300),
     timeoutSeconds: clampInteger(source.timeoutSeconds, base.timeoutSeconds, 5, 300),
   }
 }
@@ -215,7 +225,7 @@ export const isSelectedPath = (rawPath: string, syncAll: boolean, selectedPaths:
   })
 }
 
-const isProtectedSyncPath = (path: string) => isExcludedPath(path, PROTECTED_EXCLUDE_PATTERNS)
+const isProtectedSyncPath = (path: string) => isDefaultIgnoredDataPath(path)
 
 const isWebDavExcludedPath = (path: string, patterns: string[]) => (
   isProtectedSyncPath(path) || isExcludedPath(path, patterns)
@@ -641,6 +651,12 @@ export class WebDavSyncService {
   private status: WebDavSyncStatus = initialStatus()
   private hasPassword = false
   private timer: ReturnType<typeof setTimeout> | null = null
+  private localChangeTimer: ReturnType<typeof setTimeout> | null = null
+  private localChangeFirstAt: number | null = null
+  private pendingLocalPaths = new Set<string>()
+  private localSyncQueued = false
+  private changedWhilePaused = false
+  private unsubscribeDataChanges: (() => void) | null = null
   private runPromise: Promise<WebDavSyncResult> | null = null
   private testing = false
 
@@ -664,12 +680,17 @@ export class WebDavSyncService {
       ...initialStatus(),
       ...(savedRuntime || {}),
       enabled: this.config.enabled,
-      scheduled: this.config.enabled && this.config.scheduleEnabled,
+      scheduled: this.config.enabled && !this.config.paused && this.config.scheduleEnabled,
+      watchingLocalChanges: this.isLocalChangeSyncEnabled(),
       running: false,
       currentPath: null,
-      phase: this.config.enabled ? restoredPhase : 'disabled',
-      message: this.config.enabled ? (savedRuntime?.message || '等待同步') : 'WebDAV 同步未启用',
+      phase: this.config.enabled ? (this.config.paused ? 'paused' : restoredPhase) : 'disabled',
+      message: this.config.enabled
+        ? (this.config.paused ? 'WebDAV 同步已暂停' : savedRuntime?.message || '等待同步')
+        : 'WebDAV 同步未启用',
       nextSyncAt: null,
+      pendingLocalChanges: 0,
+      pendingSyncAt: null,
     }
     if (savedRuntime?.running || savedRuntime?.phase === 'syncing') {
       this.status.lastError = '上次同步未正常完成'
@@ -677,6 +698,7 @@ export class WebDavSyncService {
       this.status.phase = 'error'
     }
     this.initialized = true
+    this.subscribeToLocalChanges()
     this.reschedule()
     this.emitStatus()
   }
@@ -694,10 +716,108 @@ export class WebDavSyncService {
     await writeSetting(RUNTIME_KEY, this.status)
   }
 
+  private isLocalChangeSyncEnabled(syncConfig = this.config) {
+    return syncConfig.enabled && !syncConfig.paused && syncConfig.syncOnLocalChange && syncConfig.direction !== 'download'
+  }
+
+  private subscribeToLocalChanges() {
+    if (this.unsubscribeDataChanges) return
+    this.unsubscribeDataChanges = dataChangeWatcher.subscribe((event) => this.handleLocalChange(event))
+    void dataChangeWatcher.start().catch((error) => {
+      console.warn('[WebDAV] data watcher failed to start:', (error as Error).message)
+    })
+  }
+
+  private isRelevantLocalChange(path: string) {
+    if (!path) return this.config.syncAll || this.config.selectedPaths.length > 0
+    if (isWebDavExcludedPath(path, this.config.excludePatterns)) return false
+    if (isSelectedPath(path, this.config.syncAll, this.config.selectedPaths)) return true
+    return !this.config.syncAll && this.config.selectedPaths.some(selected => selected.startsWith(`${path}/`))
+  }
+
+  private handleLocalChange(event: DataChangeEvent) {
+    if (event.source === 'webdav' || event.kind === 'delete') return
+    if (!this.config.enabled || !this.isRelevantLocalChange(event.path)) return
+    if (this.config.paused) {
+      this.changedWhilePaused = true
+      return
+    }
+    if (!this.isLocalChangeSyncEnabled()) return
+
+    const now = Date.now()
+    this.localChangeFirstAt ??= now
+    this.pendingLocalPaths.add(event.path || 'data/')
+    const debounceMs = this.config.localChangeDebounceSeconds * 1000
+    const maxWaitMs = Math.max(debounceMs, LOCAL_CHANGE_MAX_WAIT_MS)
+    const dueAt = Math.min(now + debounceMs, this.localChangeFirstAt + maxWaitMs)
+    this.armLocalChangeTimer(dueAt)
+  }
+
+  private armLocalChangeTimer(dueAt: number) {
+    if (this.localChangeTimer) clearTimeout(this.localChangeTimer)
+    const pendingSyncAt = new Date(dueAt).toISOString()
+    this.setStatus({
+      watchingLocalChanges: this.isLocalChangeSyncEnabled(),
+      pendingLocalChanges: this.pendingLocalPaths.size,
+      pendingSyncAt,
+      ...(!this.status.running && !this.testing ? {
+        phase: 'pending' as const,
+        message: `检测到 ${this.pendingLocalPaths.size} 个本地变更，等待自动同步`,
+      } : {}),
+    })
+    this.localChangeTimer = setTimeout(() => {
+      this.localChangeTimer = null
+      void this.flushPendingLocalSync()
+    }, Math.max(0, dueAt - Date.now()))
+    this.localChangeTimer.unref?.()
+  }
+
+  private clearPendingLocalSync() {
+    if (this.localChangeTimer) clearTimeout(this.localChangeTimer)
+    this.localChangeTimer = null
+    this.localChangeFirstAt = null
+    this.localSyncQueued = false
+    this.pendingLocalPaths.clear()
+    this.setStatus({ pendingLocalChanges: 0, pendingSyncAt: null })
+  }
+
+  private async flushPendingLocalSync() {
+    if (!this.isLocalChangeSyncEnabled()) {
+      this.clearPendingLocalSync()
+      return
+    }
+    if (!this.pendingLocalPaths.size) return
+    if (this.runPromise || this.testing) {
+      this.localSyncQueued = true
+      this.setStatus({ pendingSyncAt: null })
+      return
+    }
+
+    this.pendingLocalPaths.clear()
+    this.localChangeFirstAt = null
+    this.localSyncQueued = false
+    this.setStatus({ pendingLocalChanges: 0, pendingSyncAt: null })
+    try {
+      await this.sync('local-change')
+    } catch (error) {
+      console.warn('[WebDAV] Local-change sync failed:', (error as Error).message)
+    }
+  }
+
+  private resumePendingLocalSync() {
+    if (!this.isLocalChangeSyncEnabled()) {
+      if (this.pendingLocalPaths.size || this.localChangeTimer) this.clearPendingLocalSync()
+      return
+    }
+    if (!this.pendingLocalPaths.size || (!this.localSyncQueued && this.localChangeTimer)) return
+    this.localSyncQueued = false
+    this.armLocalChangeTimer(Date.now())
+  }
+
   private reschedule() {
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
-    const scheduled = this.config.enabled && this.config.scheduleEnabled
+    const scheduled = this.config.enabled && !this.config.paused && this.config.scheduleEnabled
     if (!scheduled) {
       this.setStatus({ scheduled: false, nextSyncAt: null })
       return
@@ -713,7 +833,7 @@ export class WebDavSyncService {
           console.warn('[WebDAV] Scheduled sync failed:', (error as Error).message)
         })
         .finally(() => {
-          if (!this.timer && this.config.enabled && this.config.scheduleEnabled) this.reschedule()
+          if (!this.timer && this.config.enabled && !this.config.paused && this.config.scheduleEnabled) this.reschedule()
         })
     }, intervalMs)
     this.timer.unref?.()
@@ -728,7 +848,7 @@ export class WebDavSyncService {
         excludePatterns: [...this.config.excludePatterns],
       },
       hasPassword: this.hasPassword,
-      protectedPatterns: [...PROTECTED_EXCLUDE_PATTERNS],
+      protectedPatterns: [...DEFAULT_DATA_SYNC_EXCLUDE_PATTERNS],
     }
   }
 
@@ -773,10 +893,21 @@ export class WebDavSyncService {
     if (clearPassword) this.hasPassword = false
     else if (encryptedPassword) this.hasPassword = true
     this.config = nextConfig
+    const localChangeEnabled = this.isLocalChangeSyncEnabled(nextConfig)
+    if (!localChangeEnabled) this.clearPendingLocalSync()
     this.setStatus({
       enabled: nextConfig.enabled,
-      phase: nextConfig.enabled ? 'idle' : 'disabled',
-      message: nextConfig.enabled ? '设置已保存，等待同步' : 'WebDAV 同步未启用',
+      watchingLocalChanges: localChangeEnabled,
+      phase: nextConfig.enabled
+        ? nextConfig.paused
+          ? 'paused'
+          : this.pendingLocalPaths.size ? 'pending' : 'idle'
+        : 'disabled',
+      message: nextConfig.enabled
+        ? nextConfig.paused
+          ? 'WebDAV 同步已暂停'
+          : this.pendingLocalPaths.size ? `检测到 ${this.pendingLocalPaths.size} 个本地变更，等待自动同步` : '设置已保存，等待同步'
+        : 'WebDAV 同步未启用',
       lastError: null,
       ...(remoteTargetChanged ? {
         lastSyncAt: null,
@@ -786,9 +917,67 @@ export class WebDavSyncService {
         total: 0,
       } : {}),
     })
+    if (localChangeEnabled && this.pendingLocalPaths.size) {
+      const debounceMs = nextConfig.localChangeDebounceSeconds * 1000
+      const maxWaitMs = Math.max(debounceMs, LOCAL_CHANGE_MAX_WAIT_MS)
+      const firstAt = this.localChangeFirstAt || Date.now()
+      this.armLocalChangeTimer(Math.min(Date.now() + debounceMs, firstAt + maxWaitMs))
+    }
     this.reschedule()
     await this.persistStatus()
     return this.getConfig()
+  }
+
+  async setPaused(paused: boolean) {
+    await this.ensureInitialized()
+    if (this.runPromise || this.testing) throw new WebDavSyncBusyError()
+    if (paused && !this.config.enabled) throw new Error('请先启用 WebDAV 同步')
+    const nextPaused = this.config.enabled ? paused : false
+    if (nextPaused === this.config.paused) {
+      return { ...(await this.getConfig()), status: await this.getStatus() }
+    }
+
+    const nextConfig = { ...this.config, paused: nextPaused }
+    await writeSetting(CONFIG_KEY, nextConfig)
+    this.config = nextConfig
+
+    if (nextPaused) {
+      this.changedWhilePaused = false
+      if (this.timer) clearTimeout(this.timer)
+      this.timer = null
+      this.clearPendingLocalSync()
+      this.setStatus({
+        enabled: true,
+        scheduled: false,
+        watchingLocalChanges: false,
+        phase: 'paused',
+        running: false,
+        message: 'WebDAV 同步已暂停',
+        currentPath: null,
+        nextSyncAt: null,
+        pendingLocalChanges: 0,
+        pendingSyncAt: null,
+      })
+    } else {
+      const shouldSyncPausedChanges = this.changedWhilePaused && this.isLocalChangeSyncEnabled()
+      this.changedWhilePaused = false
+      this.setStatus({
+        enabled: this.config.enabled,
+        watchingLocalChanges: this.isLocalChangeSyncEnabled(),
+        phase: this.config.enabled ? 'idle' : 'disabled',
+        message: shouldSyncPausedChanges ? 'WebDAV 同步已恢复，等待同步暂停期间的本地变更' : this.config.enabled ? 'WebDAV 同步已恢复' : 'WebDAV 同步未启用',
+        lastError: null,
+      })
+      this.reschedule()
+      if (shouldSyncPausedChanges) {
+        this.localChangeFirstAt = Date.now()
+        this.pendingLocalPaths.add('data/')
+        this.armLocalChangeTimer(Date.now() + this.config.localChangeDebounceSeconds * 1000)
+      }
+    }
+
+    await this.persistStatus()
+    return { ...(await this.getConfig()), status: await this.getStatus() }
   }
 
   private async readPassword(explicitPassword?: string) {
@@ -812,21 +1001,29 @@ export class WebDavSyncService {
       await client.test()
       const latencyMs = Date.now() - started
       this.setStatus({
-        phase: this.config.enabled ? 'idle' : 'disabled',
+        phase: this.config.enabled ? (this.config.paused ? 'paused' : 'idle') : 'disabled',
         running: false,
-        message: `WebDAV 连接成功（${latencyMs} ms）`,
+        message: this.config.paused
+          ? `WebDAV 连接成功（${latencyMs} ms），同步仍处于暂停状态`
+          : `WebDAV 连接成功（${latencyMs} ms）`,
         lastError: null,
       })
       await this.persistStatus()
       return { ok: true, latencyMs, message: 'WebDAV 连接成功' }
     } catch (error) {
       const message = (error as Error).message || 'WebDAV 连接失败'
-      this.setStatus({ phase: 'error', running: false, message, lastError: message })
+      this.setStatus({
+        phase: this.config.paused ? 'paused' : 'error',
+        running: false,
+        message: this.config.paused ? `WebDAV 同步已暂停；连接测试失败：${message}` : message,
+        lastError: message,
+      })
       await this.persistStatus().catch(() => {})
       throw error
     } finally {
       this.testing = false
       if (this.status.phase === 'testing') this.setStatus({ phase: previousPhase, running: false })
+      this.resumePendingLocalSync()
     }
   }
 
@@ -896,10 +1093,11 @@ export class WebDavSyncService {
     return files
   }
 
-  async sync(trigger: 'manual' | 'schedule' = 'manual') {
+  async sync(trigger: WebDavSyncTrigger = 'manual') {
     await this.ensureInitialized()
     if (this.runPromise || this.testing) throw new WebDavSyncBusyError()
-    if (this.timer) {
+    if (trigger !== 'local-change' && this.pendingLocalPaths.size) this.clearPendingLocalSync()
+    if (trigger !== 'local-change' && this.timer) {
       clearTimeout(this.timer)
       this.timer = null
       this.setStatus({ nextSyncAt: null })
@@ -909,13 +1107,15 @@ export class WebDavSyncService {
       return await this.runPromise
     } finally {
       this.runPromise = null
-      if (this.config.enabled && this.config.scheduleEnabled) this.reschedule()
+      if (trigger !== 'local-change' && this.config.enabled && !this.config.paused && this.config.scheduleEnabled) this.reschedule()
+      this.resumePendingLocalSync()
     }
   }
 
-  private async performSync(trigger: 'manual' | 'schedule'): Promise<WebDavSyncResult> {
+  private async performSync(trigger: WebDavSyncTrigger): Promise<WebDavSyncResult> {
     const syncConfig = { ...this.config, selectedPaths: [...this.config.selectedPaths], excludePatterns: [...this.config.excludePatterns] }
     if (!syncConfig.enabled) throw new Error('WebDAV 同步未启用')
+    if (syncConfig.paused) throw new Error('WebDAV 同步已暂停，请先恢复同步')
     if (!syncConfig.url) throw new Error('请填写 WebDAV 地址')
 
     const startedAt = new Date().toISOString()
@@ -923,7 +1123,11 @@ export class WebDavSyncService {
       enabled: true,
       phase: 'syncing',
       running: true,
-      message: trigger === 'schedule' ? '定时同步进行中…' : '正在同步…',
+      message: trigger === 'schedule'
+        ? '定时同步进行中…'
+        : trigger === 'local-change'
+          ? '正在同步本地变更…'
+          : '正在同步…',
       currentPath: null,
       processed: 0,
       total: 0,
@@ -997,6 +1201,9 @@ export class WebDavSyncService {
         )
         const local = await makeLocalFile(appConfig.dataDir, destination)
         localFiles.set(path, local)
+        await dataChangeWatcher.publish({ path, source: 'webdav' }).catch((error) => {
+          console.warn('[WebDAV] failed to mark downloaded file:', (error as Error).message)
+        })
         recordManifest(path, local, remote)
         result.downloaded++
         downloadedAny = true
@@ -1085,8 +1292,10 @@ export class WebDavSyncService {
       const message = problemCount
         ? `同步完成：上传 ${result.uploaded}，下载 ${result.downloaded}，冲突 ${result.conflicts}，失败 ${result.failed}`
         : `同步完成：上传 ${result.uploaded}，下载 ${result.downloaded}，跳过 ${result.skipped}`
-      const nextSyncAt = this.config.enabled && this.config.scheduleEnabled
-        ? new Date(Date.now() + this.config.intervalMinutes * 60_000).toISOString()
+      const nextSyncAt = this.config.enabled && !this.config.paused && this.config.scheduleEnabled
+        ? trigger === 'local-change'
+          ? this.status.nextSyncAt
+          : new Date(Date.now() + this.config.intervalMinutes * 60_000).toISOString()
         : null
       const lastError = result.failed
         ? result.errors.find(item => item.action !== 'conflict')?.message || '部分文件同步失败'

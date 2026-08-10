@@ -526,6 +526,17 @@ export function useApi() {
         body: JSON.stringify(data),
       }),
 
+    setWebDavPaused: (paused: boolean) =>
+      request<{
+        config: WebDavSyncConfig
+        hasPassword: boolean
+        protectedPatterns: string[]
+        status: WebDavSyncStatus
+      }>('/webdav/pause', {
+        method: 'POST',
+        body: JSON.stringify({ paused }),
+      }),
+
     runWebDavSync: () =>
       request<{ result: WebDavSyncResult }>('/webdav/sync', { method: 'POST' }),
 

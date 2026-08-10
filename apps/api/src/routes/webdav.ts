@@ -86,6 +86,19 @@ webdav.post('/test', async (c) => {
   }
 })
 
+// POST /api/webdav/pause
+webdav.post('/pause', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => null) as { paused?: boolean } | null
+    if (!body || typeof body.paused !== 'boolean') {
+      return c.json({ error: { code: 'INVALID_BODY', message: 'paused must be a boolean' } }, 400)
+    }
+    return c.json(await webDavSyncService.setPaused(body.paused))
+  } catch (error) {
+    return errorResponse(c, error, 'WEBDAV_PAUSE_FAILED')
+  }
+})
+
 // POST /api/webdav/sync
 webdav.post('/sync', async (c) => {
   try {

@@ -406,10 +406,12 @@ export interface FileNode {
 // ── WebDAV Sync ──────────────────────────────────────────────────────────────
 
 export type WebDavSyncDirection = 'upload' | 'download' | 'bidirectional'
-export type WebDavSyncPhase = 'disabled' | 'idle' | 'testing' | 'syncing' | 'success' | 'error'
+export type WebDavSyncTrigger = 'manual' | 'schedule' | 'local-change'
+export type WebDavSyncPhase = 'disabled' | 'paused' | 'idle' | 'pending' | 'testing' | 'syncing' | 'success' | 'error'
 
 export interface WebDavSyncConfig {
   enabled: boolean
+  paused: boolean
   url: string
   username: string
   remotePath: string
@@ -419,6 +421,8 @@ export interface WebDavSyncConfig {
   excludePatterns: string[]
   scheduleEnabled: boolean
   intervalMinutes: number
+  syncOnLocalChange: boolean
+  localChangeDebounceSeconds: number
   timeoutSeconds: number
 }
 
@@ -438,7 +442,7 @@ export interface WebDavSyncErrorItem {
 }
 
 export interface WebDavSyncResult {
-  trigger: 'manual' | 'schedule'
+  trigger: WebDavSyncTrigger
   startedAt: string
   finishedAt: string
   uploaded: number
@@ -452,6 +456,7 @@ export interface WebDavSyncResult {
 export interface WebDavSyncStatus {
   enabled: boolean
   scheduled: boolean
+  watchingLocalChanges: boolean
   phase: WebDavSyncPhase
   running: boolean
   message: string
@@ -461,6 +466,8 @@ export interface WebDavSyncStatus {
   lastSyncAt: string | null
   lastSuccessAt: string | null
   nextSyncAt: string | null
+  pendingLocalChanges: number
+  pendingSyncAt: string | null
   lastError: string | null
   lastResult: WebDavSyncResult | null
 }

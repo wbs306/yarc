@@ -875,6 +875,8 @@ const settingsSections = [
 const webDavStatusText = computed(() => {
   const status = webDavSyncStore.status
   if (status.phase === 'syncing') return status.total ? `${status.processed}/${status.total}` : '同步中'
+  if (status.phase === 'paused') return '同步暂停'
+  if (status.phase === 'pending') return status.pendingLocalChanges ? `待同步 ${status.pendingLocalChanges}` : '待同步'
   if (status.phase === 'testing') return '测试中'
   if (status.phase === 'error') return '同步异常'
   if (status.phase === 'success') return '已同步'
@@ -4542,6 +4544,10 @@ const showSearchPaperPopup = (paper: any) => {
 .sync-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-text-muted); flex: 0 0 auto; }
 .sync-status-btn.phase-syncing .sync-status-dot,
 .sync-status-btn.phase-testing .sync-status-dot { background: var(--color-primary); animation: sync-status-pulse 1s ease-in-out infinite; }
+.sync-status-btn.phase-pending,
+.sync-status-btn.phase-paused { border-color: color-mix(in srgb, #f59e0b 35%, var(--color-border)); color: #d97706; }
+.sync-status-btn.phase-pending .sync-status-dot { background: #f59e0b; animation: sync-status-pulse 1.4s ease-in-out infinite; }
+.sync-status-btn.phase-paused .sync-status-dot { background: #f59e0b; }
 .sync-status-btn.phase-success .sync-status-dot { background: #22c55e; }
 .sync-status-btn.phase-error { border-color: color-mix(in srgb, #ef4444 35%, var(--color-border)); color: #dc2626; }
 .sync-status-btn.phase-error .sync-status-dot { background: #ef4444; }

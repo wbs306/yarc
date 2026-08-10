@@ -6,6 +6,7 @@ import { useApi } from '@/composables/useApi'
 const defaultStatus = (): WebDavSyncStatus => ({
   enabled: false,
   scheduled: false,
+  watchingLocalChanges: false,
   phase: 'disabled',
   running: false,
   message: 'WebDAV 同步未启用',
@@ -15,6 +16,8 @@ const defaultStatus = (): WebDavSyncStatus => ({
   lastSyncAt: null,
   lastSuccessAt: null,
   nextSyncAt: null,
+  pendingLocalChanges: 0,
+  pendingSyncAt: null,
   lastError: null,
   lastResult: null,
 })
@@ -60,6 +63,12 @@ export const useWebDavSyncStore = defineStore('webdav-sync', () => {
     void refreshStatus().catch(() => {})
   }
 
+  const setPaused = async (paused: boolean) => {
+    const result = await api.setWebDavPaused(paused)
+    applyStatus(result.status)
+    return result
+  }
+
   const syncNow = async (): Promise<WebDavSyncResult> => {
     const result = await api.runWebDavSync()
     status.value = { ...status.value, lastResult: result.result }
@@ -73,6 +82,7 @@ export const useWebDavSyncStore = defineStore('webdav-sync', () => {
     initialize,
     refreshStatus,
     applyStatus,
+    setPaused,
     syncNow,
   }
 })

@@ -153,6 +153,16 @@ describe('WebDAV path selection and exclusions', () => {
       selectedPaths: [],
       excludePatterns: [],
     }), false)
+    assert.equal(shouldSyncPath('.pi/agent/sessions/run.jsonl', {
+      syncAll: true,
+      selectedPaths: [],
+      excludePatterns: [],
+    }), false)
+    assert.equal(shouldSyncPath('.pi/agent/settings.json', {
+      syncAll: true,
+      selectedPaths: [],
+      excludePatterns: [],
+    }), true)
     assert.equal(shouldSyncPath('works/demo/node_modules/pkg/index.js', {
       syncAll: true,
       selectedPaths: [],
@@ -166,6 +176,17 @@ describe('WebDAV path selection and exclusions', () => {
     assert.deepEqual(normalizeWebDavConfig({
       selectedPaths: ['papers/a/file.pdf', 'papers/a', 'notes/todo.md'],
     }).selectedPaths, ['notes/todo.md', 'papers/a'])
+    assert.equal(normalizeWebDavConfig({ enabled: false, paused: true }).paused, false)
+    assert.equal(normalizeWebDavConfig({ enabled: true, paused: true }).paused, true)
+    assert.equal(normalizeWebDavConfig({
+      direction: 'download',
+      syncOnLocalChange: true,
+    }).syncOnLocalChange, false)
+    assert.equal(normalizeWebDavConfig({
+      direction: 'upload',
+      syncOnLocalChange: true,
+      localChangeDebounceSeconds: 1,
+    }).localChangeDebounceSeconds, 2)
     assert.throws(
       () => normalizeWebDavConfig({ url: 'https://user:secret@example.com/dav' }),
       /不要把凭据写在 WebDAV 地址中/,

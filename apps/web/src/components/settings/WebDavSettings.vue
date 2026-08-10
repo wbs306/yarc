@@ -14,6 +14,7 @@ const syncStore = useWebDavSyncStore()
 
 const defaultConfig = (): WebDavSyncConfig => ({
   enabled: false,
+  paused: false,
   url: '',
   username: '',
   remotePath: 'yarc-data',
@@ -23,6 +24,8 @@ const defaultConfig = (): WebDavSyncConfig => ({
   excludePatterns: [],
   scheduleEnabled: false,
   intervalMinutes: 60,
+  syncOnLocalChange: false,
+  localChangeDebounceSeconds: 10,
   timeoutSeconds: 30,
 })
 
@@ -38,6 +41,7 @@ const filesLoading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
 const syncing = ref(false)
+const pausing = ref(false)
 const message = ref('')
 const error = ref('')
 
@@ -56,6 +60,8 @@ const progressPercent = computed(() => status.value.total > 0
 
 const statusLabel = computed(() => {
   if (status.value.phase === 'syncing') return '同步中'
+  if (status.value.phase === 'paused') return '已暂停'
+  if (status.value.phase === 'pending') return '等待自动同步'
   if (status.value.phase === 'testing') return '测试连接中'
   if (status.value.phase === 'error') return '同步异常'
   if (status.value.phase === 'success') return '同步完成'
@@ -177,6 +183,32 @@ const testConnection = async () => {
   }
 }
 
+const togglePaused = async () => {
+  pausing.value = true
+  message.value = ''
+  error.value = ''
+  try {
+    const resuming = status.value.phase === 'paused'
+    if (resuming) {
+      // Resume only after persisting the latest selection and exclusion rules,
+      // so files changed while paused cannot be synced with stale settings.
+      if (!await saveSettings(true)) return
+      if (!config.value.enabled) {
+        message.value = '设置已保存，WebDAV 同步已关闭'
+        return
+      }
+    }
+    const result = await syncStore.setPaused(!resuming)
+    config.value.paused = result.config.paused
+    protectedPatterns.value = [...result.protectedPatterns]
+    message.value = result.config.paused ? 'WebDAV 同步已暂停' : 'WebDAV 同步已恢复'
+  } catch (err) {
+    error.value = (err as Error).message || '同步暂停状态修改失败'
+  } finally {
+    pausing.value = false
+  }
+}
+
 const syncNow = async () => {
   syncing.value = true
   message.value = ''
@@ -196,6 +228,15 @@ watch(() => config.value.syncAll, (syncAll) => {
   if (!syncAll && !files.value.length && !filesLoading.value) void loadFiles()
 })
 
+watch(() => config.value.direction, (direction) => {
+  if (direction === 'download') config.value.syncOnLocalChange = false
+})
+
+watch(() => status.value.phase, (phase) => {
+  if (phase === 'paused') config.value.paused = true
+  else if (['idle', 'pending', 'success', 'error'].includes(phase)) config.value.paused = false
+})
+
 onMounted(() => {
   void load()
 })
@@ -212,7 +253,18 @@ onMounted(() => {
             <h3>同步状态</h3>
             <p>{{ status.message }}</p>
           </div>
-          <span class="status-badge"><span class="status-dot" />{{ statusLabel }}</span>
+          <div class="status-actions">
+            <span class="status-badge"><span class="status-dot" />{{ statusLabel }}</span>
+            <button
+              v-if="status.enabled"
+              class="pause-btn"
+              :class="{ resume: status.phase === 'paused' }"
+              :disabled="pausing || saving || testing || syncing || status.running"
+              @click="togglePaused"
+            >
+              {{ pausing ? '处理中…' : status.phase === 'paused' ? '恢复同步' : '暂停同步' }}
+            </button>
+          </div>
         </div>
         <div class="card-body">
           <div v-if="status.running" class="progress-track">
@@ -220,7 +272,8 @@ onMounted(() => {
           </div>
           <div class="status-grid">
             <div><span>上次同步</span><strong>{{ formatDateTime(status.lastSyncAt) }}</strong></div>
-            <div><span>下次同步</span><strong>{{ status.scheduled ? formatDateTime(status.nextSyncAt) : '未计划' }}</strong></div>
+            <div><span>下次定时同步</span><strong>{{ status.scheduled ? formatDateTime(status.nextSyncAt) : '未计划' }}</strong></div>
+            <div><span>本地变化</span><strong>{{ status.watchingLocalChanges ? (status.pendingLocalChanges ? `${status.pendingLocalChanges} 项待同步` : '监听中') : '未监听' }}</strong></div>
             <div><span>进度</span><strong>{{ status.running ? `${status.processed} / ${status.total}` : '—' }}</strong></div>
           </div>
           <div v-if="status.lastResult" class="result-summary">
@@ -242,7 +295,7 @@ onMounted(() => {
         </div>
         <div class="card-body form-grid">
           <label class="switch-row full-width">
-            <span><strong>启用 WebDAV 同步</strong><small>启用后可手动同步，也可设置定时同步。</small></span>
+            <span><strong>启用 WebDAV 同步</strong><small>启用后可手动同步，也可按间隔或本地文件变化自动同步。</small></span>
             <input v-model="config.enabled" type="checkbox" />
           </label>
 
@@ -277,7 +330,7 @@ onMounted(() => {
             <div class="number-with-unit"><input v-model.number="config.timeoutSeconds" type="number" min="5" max="300" /><span>秒</span></div>
           </label>
           <div class="connection-actions full-width">
-            <button class="btn secondary" :disabled="saving || syncing || testing || status.running" @click="testConnection">
+            <button class="btn secondary" :disabled="saving || syncing || testing || pausing || status.running" @click="testConnection">
               {{ testing ? '测试中…' : '测试连接' }}
             </button>
           </div>
@@ -304,34 +357,36 @@ onMounted(() => {
           </div>
           <p class="selection-note">当前模式：{{ selectedDirection.label }}。双向首次遇到同名且内容不同的文件时，会根据修改时间判断；无法安全判断时报告冲突并跳过。</p>
 
-          <label class="switch-row scope-switch">
-            <span><strong>同步整个 data/</strong><small>关闭后，仅同步下方选中的文件或目录。</small></span>
-            <input v-model="config.syncAll" type="checkbox" />
-          </label>
+          <div class="scope-panel" :class="{ expanded: !config.syncAll }">
+            <label class="switch-row scope-switch">
+              <span><strong>同步整个 data/</strong><small>关闭后，仅同步下方选中的文件或目录。</small></span>
+              <input v-model="config.syncAll" type="checkbox" />
+            </label>
 
-          <div v-if="!config.syncAll" class="file-selection">
-            <div class="selection-toolbar">
-              <div><strong>选择文件</strong><span>已选择 {{ selectedCount }} 项；选择目录会包含全部后代。</span></div>
-              <div>
-                <button class="link-btn" :disabled="filesLoading" @click="loadFiles">刷新</button>
-                <button class="link-btn" :disabled="!selectedCount" @click="config.selectedPaths = []">清空</button>
+            <div v-if="!config.syncAll" class="file-selection">
+              <div class="webdav-selection-toolbar">
+                <div><strong>选择文件或目录</strong><span>已选择 {{ selectedCount }} 项；选择目录会包含全部后代。</span></div>
+                <div class="selection-actions">
+                  <button class="link-btn" :disabled="filesLoading" @click="loadFiles">刷新</button>
+                  <button class="link-btn" :disabled="!selectedCount" @click="config.selectedPaths = []">清空</button>
+                </div>
               </div>
-            </div>
-            <div v-if="config.selectedPaths.length" class="selected-paths">
-              <span v-for="path in config.selectedPaths" :key="path"><code>{{ path }}</code><button @click="togglePath(path, false)">×</button></span>
-            </div>
-            <div class="file-tree">
-              <div v-if="filesLoading" class="loading-state compact">正在扫描 data/…</div>
-              <div v-else-if="!files.length" class="empty-state">data/ 下没有可选择的文件。</div>
-              <template v-else>
-                <WebDavTreeNode
-                  v-for="node in files"
-                  :key="node.path"
-                  :node="node"
-                  :selected-paths="config.selectedPaths"
-                  @toggle="togglePath"
-                />
-              </template>
+              <div v-if="config.selectedPaths.length" class="selected-paths">
+                <span v-for="path in config.selectedPaths" :key="path"><code>{{ path }}</code><button @click="togglePath(path, false)">×</button></span>
+              </div>
+              <div class="file-tree">
+                <div v-if="filesLoading" class="loading-state compact">正在扫描 data/…</div>
+                <div v-else-if="!files.length" class="empty-state">data/ 下没有可选择的文件。</div>
+                <template v-else>
+                  <WebDavTreeNode
+                    v-for="node in files"
+                    :key="node.path"
+                    :node="node"
+                    :selected-paths="config.selectedPaths"
+                    @toggle="togglePath"
+                  />
+                </template>
+              </div>
             </div>
           </div>
         </div>
@@ -346,7 +401,7 @@ onMounted(() => {
           <div v-if="protectedPatterns.length" class="protected-patterns">
             <strong>系统始终排除</strong>
             <span v-for="pattern in protectedPatterns" :key="pattern"><code>{{ pattern }}</code></span>
-            <small>这些目录包含运行状态、认证信息或可重新生成的依赖，不会出现在选择树中，也不能通过自定义规则启用。</small>
+            <small>这些路径包含运行状态、认证信息或可重新生成的依赖，不会出现在选择树中，也不能通过自定义规则启用；其余 .pi 配置仍可监听和同步。</small>
           </div>
           <textarea
             v-model="excludeText"
@@ -365,18 +420,32 @@ onMounted(() => {
 
       <section class="settings-card">
         <div class="card-header">
-          <h3>定时同步</h3>
-          <p>服务运行期间按固定间隔执行；修改间隔后从保存时重新计时。</p>
+          <h3>自动同步</h3>
+          <p>可以同时启用固定间隔同步和本地文件变化同步，两种方式共用同一个同步队列。</p>
         </div>
-        <div class="card-body schedule-row">
-          <label class="switch-row">
-            <span><strong>启用定时同步</strong><small>仅在 WebDAV 同步总开关启用时生效。</small></span>
-            <input v-model="config.scheduleEnabled" type="checkbox" />
-          </label>
-          <label class="field interval-field">
-            <span>同步间隔</span>
-            <div class="number-with-unit"><input v-model.number="config.intervalMinutes" type="number" min="5" max="10080" /><span>分钟</span></div>
-          </label>
+        <div class="card-body auto-sync-options">
+          <div class="auto-sync-row">
+            <label class="switch-row">
+              <span><strong>启用定时同步</strong><small>服务运行期间按固定间隔执行；手动同步后重新计时。</small></span>
+              <input v-model="config.scheduleEnabled" type="checkbox" />
+            </label>
+            <label class="field interval-field">
+              <span>同步间隔</span>
+              <div class="number-with-unit"><input v-model.number="config.intervalMinutes" type="number" min="5" max="10080" /><span>分钟</span></div>
+            </label>
+          </div>
+          <div class="auto-sync-row">
+            <label class="switch-row">
+              <span><strong>本地变化后同步</strong><small>监听选中范围内的新建和修改；连续变化会合并，删除操作不会上传。</small></span>
+              <input v-model="config.syncOnLocalChange" type="checkbox" :disabled="config.direction === 'download'" />
+            </label>
+            <label class="field interval-field" :class="{ disabled: config.direction === 'download' }">
+              <span>静默等待</span>
+              <div class="number-with-unit"><input v-model.number="config.localChangeDebounceSeconds" type="number" min="2" max="300" :disabled="config.direction === 'download'" /><span>秒</span></div>
+            </label>
+          </div>
+          <p v-if="config.direction === 'download'" class="auto-sync-note">仅下载模式不会启用本地变化同步，避免本地编辑触发远端覆盖。</p>
+          <p v-else class="auto-sync-note">连续写入会合并且不会无限推迟；WebDAV 自身下载产生的文件事件会被忽略，避免循环同步。</p>
         </div>
       </section>
 
@@ -386,10 +455,10 @@ onMounted(() => {
       <div class="footer-actions">
         <span>“立即同步”会先保存当前表单。同步过程不传播删除操作。</span>
         <div>
-          <button class="btn secondary" :disabled="saving || syncing || testing || status.running" @click="saveSettings(false)">
+          <button class="btn secondary" :disabled="saving || syncing || testing || pausing || status.running" @click="saveSettings(false)">
             {{ saving && !syncing ? '保存中…' : '保存设置' }}
           </button>
-          <button class="btn primary" :disabled="saving || syncing || testing || status.running || !config.enabled" @click="syncNow">
+          <button class="btn primary" :disabled="saving || syncing || testing || pausing || status.running || !config.enabled || status.phase === 'paused'" @click="syncNow">
             {{ syncing || status.phase === 'syncing' ? '同步中…' : '立即同步' }}
           </button>
         </div>
@@ -408,15 +477,23 @@ onMounted(() => {
 .card-body code { padding: 1px 5px; border-radius: 4px; background: var(--color-bg-muted); color: var(--color-text-secondary); font-size: 11px; }
 .card-body { padding: 18px 20px; }
 .status-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.status-actions { display: flex; align-items: center; gap: 8px; }
 .status-badge { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border-radius: 999px; background: var(--color-bg-muted); color: var(--color-text-secondary); font-size: 12px; white-space: nowrap; }
+.pause-btn { min-height: 28px; padding: 0 10px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg-card); color: var(--color-text-secondary); font-size: 11px; font-weight: 600; cursor: pointer; }
+.pause-btn:hover:not(:disabled) { border-color: #f59e0b; color: #d97706; }
+.pause-btn.resume { border-color: color-mix(in srgb, #22c55e 35%, var(--color-border)); color: #16a34a; }
+.pause-btn.resume:hover:not(:disabled) { border-color: #22c55e; color: #15803d; }
+.pause-btn:disabled { opacity: .5; cursor: not-allowed; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-muted); }
 .phase-syncing .status-dot,
 .phase-testing .status-dot { background: var(--color-primary); animation: pulse 1s ease-in-out infinite; }
+.phase-pending .status-dot { background: #f59e0b; animation: pulse 1.4s ease-in-out infinite; }
+.phase-paused .status-dot { background: #f59e0b; }
 .phase-success .status-dot { background: #22c55e; }
 .phase-error .status-dot { background: #ef4444; }
 .progress-track { height: 5px; overflow: hidden; border-radius: 99px; background: var(--color-bg-muted); margin-bottom: 16px; }
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--color-primary); transition: width 180ms ease; }
-.status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .status-grid > div { display: grid; gap: 4px; padding: 10px 12px; border-radius: 8px; background: var(--color-bg-muted); }
 .status-grid span { color: var(--color-text-muted); font-size: 11px; }
 .status-grid strong { color: var(--color-text-secondary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
@@ -454,12 +531,15 @@ onMounted(() => {
 .direction-option span { font-size: 11px; line-height: 1.5; color: var(--color-text-muted); }
 .direction-option.active { border-color: var(--color-primary); background: var(--color-primary-soft); }
 .selection-note { margin: 10px 0 16px; color: var(--color-text-muted); font-size: 11px; line-height: 1.55; }
-.scope-switch { padding-top: 14px; border-top: 1px solid var(--color-border); }
-.file-selection { margin-top: 14px; border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; }
-.selection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
-.selection-toolbar > div:first-child { display: grid; gap: 2px; }
-.selection-toolbar strong { color: var(--color-text); font-size: 12px; }
-.selection-toolbar span { color: var(--color-text-muted); font-size: 10px; }
+.scope-panel { overflow: hidden; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg); }
+.scope-panel.expanded { border-color: color-mix(in srgb, var(--color-primary) 28%, var(--color-border)); }
+.scope-switch { min-height: 62px; padding: 11px 13px; }
+.file-selection { border-top: 1px solid var(--color-border); background: var(--color-bg-card); }
+.webdav-selection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--color-border); background: var(--color-bg-muted); }
+.selection-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.webdav-selection-toolbar > div:first-child { display: grid; gap: 2px; }
+.webdav-selection-toolbar strong { color: var(--color-text); font-size: 12px; }
+.webdav-selection-toolbar span { color: var(--color-text-muted); font-size: 10px; }
 .link-btn { border: none; background: transparent; color: var(--color-primary); font-size: 11px; cursor: pointer; }
 .link-btn:disabled { opacity: .5; cursor: not-allowed; }
 .selected-paths { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 12px; border-bottom: 1px solid var(--color-border); background: var(--color-bg-muted); }
@@ -475,7 +555,11 @@ onMounted(() => {
 .protected-patterns small { flex-basis: 100%; color: var(--color-text-muted); font-size: 10px; line-height: 1.5; }
 .pattern-input { resize: vertical; min-height: 130px; padding: 10px 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; }
 .pattern-help { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 9px; color: var(--color-text-muted); font-size: 10px; }
-.schedule-row { display: grid; grid-template-columns: minmax(0, 1fr) 180px; align-items: end; gap: 20px; }
+.auto-sync-options { display: grid; gap: 16px; }
+.auto-sync-row { display: grid; grid-template-columns: minmax(0, 1fr) 180px; align-items: end; gap: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--color-border); }
+.auto-sync-row:last-of-type { padding-bottom: 0; border-bottom: none; }
+.auto-sync-note { margin: 0; color: var(--color-text-muted); font-size: 10px; line-height: 1.55; }
+.field.disabled { opacity: .55; }
 .feedback { padding: 10px 12px; border-radius: 7px; font-size: 12px; }
 .feedback.success { background: color-mix(in srgb, #22c55e 10%, transparent); color: #16a34a; }
 .feedback.error { background: color-mix(in srgb, #ef4444 10%, transparent); color: #dc2626; }
@@ -487,8 +571,10 @@ onMounted(() => {
   .form-grid,
   .direction-grid,
   .status-grid,
-  .schedule-row { grid-template-columns: 1fr; }
+  .auto-sync-row { grid-template-columns: 1fr; }
   .full-width { grid-column: auto; }
+  .status-header { align-items: flex-start; }
+  .status-actions { align-items: flex-end; flex-direction: column; }
   .footer-actions { align-items: flex-start; flex-direction: column; }
   .footer-actions > div { width: 100%; }
   .footer-actions .btn { flex: 1; }
