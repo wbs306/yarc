@@ -271,7 +271,9 @@ files.get('/image', async (c) => {
 
   c.header('Content-Type', mimeTypes[ext] || 'application/octet-stream')
   c.header('Content-Length', fileStat.size.toString())
-  c.header('Cache-Control', 'public, max-age=86400')
+  // Workspace images are mutable user files. Do not let the browser or a
+  // shared cache reuse an older response after the file is replaced.
+  c.header('Cache-Control', 'private, no-store')
 
   return c.body(buffer)
 })

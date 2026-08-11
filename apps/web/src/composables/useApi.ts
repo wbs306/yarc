@@ -473,7 +473,12 @@ export function useApi() {
     },
 
     getFileDownloadUrl: (path: string) => `${API_BASE}/files/download?path=${encodeURIComponent(path)}`,
-    getFileImageUrl: (path: string) => `${API_BASE}/files/image?path=${encodeURIComponent(path)}`,
+    getFileImageUrl: (path: string, version?: string | number) => {
+      const versionParam = version === undefined || version === ''
+        ? ''
+        : `&v=${encodeURIComponent(String(version))}`
+      return `${API_BASE}/files/image?path=${encodeURIComponent(path)}${versionParam}`
+    },
 
     getOfficeView: (path: string, mode: OfficeViewMode) =>
       request<{ mode: OfficeViewMode; content: string }>('/files/office/view', { params: { path, mode } }),

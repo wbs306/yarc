@@ -263,6 +263,11 @@ const workspaceOfflineCachedAt = computed(() => {
   return cachedAt ? new Date(cachedAt).toLocaleString() : ''
 })
 const workspaceIsImage = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.mime?.startsWith('image/'))
+const workspaceImageVersion = computed(() => {
+  const file = selectedWorkspaceFile.value
+  if (!file) return ''
+  return `${file.modified || ''}:${file.size ?? ''}`
+})
 const workspaceIsOffice = computed(() => isOfficeFile(selectedWorkspaceFile.value))
 const workspaceIsLegacyOffice = computed(() => isLegacyOfficeFile(selectedWorkspaceFile.value))
 const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension === '.pdf')
@@ -4129,7 +4134,7 @@ const showSearchPaperPopup = (paper: any) => {
               </div>
 
             <div v-else-if="workspaceIsImage" class="workspace-preview-panel">
-              <img :src="api.getFileImageUrl(selectedWorkspaceFile?.path || '')" :alt="selectedWorkspaceFile?.name || ''" />
+              <img :src="api.getFileImageUrl(selectedWorkspaceFile?.path || '', workspaceImageVersion)" :alt="selectedWorkspaceFile?.name || ''" />
             </div>
 
             <div v-else-if="workspaceIsOffice" class="workspace-office-preview-wrap">
