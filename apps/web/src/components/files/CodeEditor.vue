@@ -23,6 +23,7 @@ import { xml } from '@codemirror/lang-xml'
 import { yaml } from '@codemirror/lang-yaml'
 import { sql } from '@codemirror/lang-sql'
 import { vue } from '@codemirror/lang-vue'
+import { relaxedStrongRule } from '@/lib/markdown-strong'
 
 const props = withDefaults(defineProps<{
   modelValue: string
@@ -100,13 +101,43 @@ const mdCodeLanguages = [
   LanguageDescription.of({ name: 'vue', load: async () => vue() }),
 ]
 
+type MarkdownOptions = NonNullable<Parameters<typeof markdown>[0]>
+type MarkdownExtension = NonNullable<MarkdownOptions['extensions']>
+
+// Keep editor highlighting consistent with the preview's relaxed strong-emphasis
+// handling for Chinese punctuation followed immediately by text or list numbers.
+const relaxedStrongEditorExtension: MarkdownExtension = {
+  parseInline: [{
+    name: 'RelaxedStrong',
+    before: 'Emphasis',
+    parse(cx, next, pos) {
+      if (next !== 42 || cx.char(pos + 1) !== 42 || cx.char(pos + 2) === 42) return -1
+
+      const match = cx.slice(pos, cx.end).match(relaxedStrongRule)
+      if (!match) return -1
+
+      const contentFrom = pos + 2
+      const contentTo = contentFrom + match[1].length
+      const end = pos + match[0].length
+      return cx.addElement(cx.elt('StrongEmphasis', pos, end, [
+        cx.elt('EmphasisMark', pos, contentFrom),
+        ...cx.parser.parseInline(match[1], contentFrom),
+        cx.elt('EmphasisMark', contentTo, end),
+      ]))
+    },
+  }],
+}
+
 function languageExtension(lang: string) {
   switch (lang) {
     case 'typescript': return javascript({ typescript: true, jsx: true })
     case 'javascript': return javascript({ jsx: true })
     case 'vue': return vue()
     case 'json': return json()
-    case 'markdown': return markdown({ codeLanguages: mdCodeLanguages })
+    case 'markdown': return markdown({
+      codeLanguages: mdCodeLanguages,
+      extensions: relaxedStrongEditorExtension,
+    })
     case 'python': return python()
     case 'css':
     case 'scss': return css()

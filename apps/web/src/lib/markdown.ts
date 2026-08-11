@@ -1,6 +1,7 @@
 import katex, { type KatexOptions } from 'katex'
 import { marked, Renderer, type MarkedExtension, type Token, type Tokens } from 'marked'
 import { linkifyImplicitPaperReferences } from './paper-reference'
+import { relaxedStrongRule } from './markdown-strong'
 
 interface KatexToken extends Tokens.Generic {
   type: 'inlineKatex' | 'blockKatex'
@@ -11,7 +12,15 @@ interface KatexToken extends Tokens.Generic {
   sourceRange?: MarkdownSourceRange
 }
 
+interface RelaxedStrongToken extends Tokens.Generic {
+  type: 'relaxedStrong'
+  raw: string
+  text: string
+  tokens: Token[]
+}
+
 const inlineRule = /^([\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{P}]?)(\${1,2})(?!\$)((?:\\.|[^\\\n\$])*?(?:\\.|[^\\\n\$]))\2(?=[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{P}]|$)/u
+const cjkStrongStartRule = /\*\*(?=\S)/u
 // Allow trailing spaces on $$ lines — common with Markdown hard breaks (two trailing spaces).
 const blockRule = /^(\${1,2})[ \t]*\n((?:\\[^]|[^\\])+?)\n\1[ \t]*(?:\n|$)/
 const displayMathLineRule = /^[ \t]*\$\$[ \t]*$/
@@ -246,9 +255,31 @@ function normalizeListMathBlocks(markdown: string): string {
   return normalized.join('\n')
 }
 
-function createCjkAwareKatexExtension(options: KatexOptions): MarkedExtension {
+function createCjkAwareMarkdownExtension(options: KatexOptions): MarkedExtension {
   return {
     extensions: [
+      {
+        name: 'relaxedStrong',
+        level: 'inline',
+        start(src) {
+          return src.match(cjkStrongStartRule)?.index
+        },
+        tokenizer(src) {
+          const match = src.match(relaxedStrongRule)
+          if (!match) return undefined
+
+          return {
+            type: 'relaxedStrong',
+            raw: match[0],
+            text: match[1],
+            tokens: this.lexer.inlineTokens(match[1]),
+          }
+        },
+        renderer(token) {
+          const strongToken = token as RelaxedStrongToken
+          return `<strong>${this.parser.parseInline(strongToken.tokens)}</strong>`
+        },
+      },
       {
         name: 'inlineKatex',
         level: 'inline',
@@ -292,7 +323,7 @@ export function configureMarked() {
   if (configured) return
   configured = true
 
-  marked.use(createCjkAwareKatexExtension({ throwOnError: false }))
+  marked.use(createCjkAwareMarkdownExtension({ throwOnError: false }))
   marked.use({ breaks: true })
 }
 
@@ -367,6 +398,12 @@ export function renderInlineLatex(text: string): string {
   return html
 }
 
+/**
+ * CommonMark rejects forms such as `**文字，**继续` and `**第 2 项；**3）...`
+ * because the closing delimiter is between punctuation and a non-punctuation
+ * character. Chinese prose normally has no space there, so handle this common
+ * form as a dedicated inline token.
+ */
 const prepareMarkdownSource = (text: string) =>
   linkifyImplicitPaperReferences(normalizeListMathBlocks(normalizeBlockquoteMathBlocks(text)))
 
