@@ -23,7 +23,7 @@ import { xml } from '@codemirror/lang-xml'
 import { yaml } from '@codemirror/lang-yaml'
 import { sql } from '@codemirror/lang-sql'
 import { vue } from '@codemirror/lang-vue'
-import { relaxedStrongRule } from '@/lib/markdown-strong'
+import { pairedStrongRule } from '@/lib/markdown-strong'
 
 const props = withDefaults(defineProps<{
   modelValue: string
@@ -104,16 +104,17 @@ const mdCodeLanguages = [
 type MarkdownOptions = NonNullable<Parameters<typeof markdown>[0]>
 type MarkdownExtension = NonNullable<MarkdownOptions['extensions']>
 
-// Keep editor highlighting consistent with the preview's relaxed strong-emphasis
-// handling for Chinese punctuation followed immediately by text or list numbers.
-const relaxedStrongEditorExtension: MarkdownExtension = {
+// CodeMirror's CommonMark delimiter resolution can pair distant `**` markers
+// across long CJK passages. Resolve each explicit pair directly so editor
+// highlighting follows the same nearest-pair behavior as the preview.
+const pairedStrongEditorExtension: MarkdownExtension = {
   parseInline: [{
-    name: 'RelaxedStrong',
+    name: 'PairedStrong',
     before: 'Emphasis',
     parse(cx, next, pos) {
       if (next !== 42 || cx.char(pos + 1) !== 42 || cx.char(pos + 2) === 42) return -1
 
-      const match = cx.slice(pos, cx.end).match(relaxedStrongRule)
+      const match = cx.slice(pos, cx.end).match(pairedStrongRule)
       if (!match) return -1
 
       const contentFrom = pos + 2
@@ -136,7 +137,7 @@ function languageExtension(lang: string) {
     case 'json': return json()
     case 'markdown': return markdown({
       codeLanguages: mdCodeLanguages,
-      extensions: relaxedStrongEditorExtension,
+      extensions: pairedStrongEditorExtension,
     })
     case 'python': return python()
     case 'css':
