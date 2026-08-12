@@ -741,6 +741,12 @@ const messageSegments = (msg: any) => {
 }
 
 const toolForSegment = (msg: any, seg: any) => (msg.toolCalls || []).find((tc: any) => tc.id === seg.toolCallId)
+const toolSearchResults = (tc: any) => tc?.searchResults || null
+const openToolSearchResults = (tc: any) => {
+  const searchResults = toolSearchResults(tc)
+  if (!searchResults) return
+  window.dispatchEvent(new CustomEvent('yarc-open-agent-search-results', { detail: searchResults }))
+}
 // The provider does not expose its tokenizer here; use a conservative
 // character-based estimate while tool JSON is still being streamed.
 const toolInputTokens = (tc: any) => Math.max(1, Math.ceil(Array.from(String(tc?.inputText || '')).length / 4))
@@ -1067,7 +1073,19 @@ const sessionState = computed(() => {
 
         <template v-for="(seg, i) in messageSegments(msg)" :key="`${msg.id}-${i}`">
           <details v-if="seg.type === 'tool' && toolForSegment(msg, seg)" class="msg-tool" :class="{ subagent: isSubagentTool(toolForSegment(msg, seg)) }" :open="isSubagentTool(toolForSegment(msg, seg)) || chatStore.toolsExpanded">
-            <summary>🔧 {{ formatToolName(toolForSegment(msg, seg)) }}<span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress"> · {{ formatToolInputTokens(toolForSegment(msg, seg)) }}</span></summary>
+            <summary class="tool-summary">
+              <span>🔧 {{ formatToolName(toolForSegment(msg, seg)) }}<span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress"> · {{ formatToolInputTokens(toolForSegment(msg, seg)) }}</span></span>
+              <button
+                v-if="toolSearchResults(toolForSegment(msg, seg))"
+                type="button"
+                class="tool-search-results-btn"
+                title="查看搜索结果"
+                @click.stop="openToolSearchResults(toolForSegment(msg, seg))"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
+                <span>查看搜索结果</span>
+              </button>
+            </summary>
             <template v-if="isSubagentTool(toolForSegment(msg, seg))">
               <div class="subagent-card">
                 <div class="subagent-meta">
@@ -1350,6 +1368,10 @@ const sessionState = computed(() => {
 .ctx-item-icon { flex: 0 0 auto; }
 .msg-thinking, .msg-tool, .msg-compaction { font-size: 12px; margin-bottom: 6px; }
 .msg-thinking summary, .msg-tool summary, .msg-compaction summary { cursor: pointer; color: var(--color-text-muted); font-size: 12px; }
+.msg-tool .tool-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tool-search-results-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-bg-card); color: var(--color-primary); font: inherit; font-size: 11px; line-height: 1.2; cursor: pointer; flex-shrink: 0; }
+.tool-search-results-btn:hover { border-color: var(--color-primary); background: var(--color-primary-soft); }
+.tool-search-results-btn svg { flex: 0 0 auto; }
 .msg-tool .tool-progress { color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
 .msg-thinking > div, .msg-tool > div, .msg-compaction > div { margin-top: 4px; padding: 8px 10px; background: var(--color-bg-muted); border-radius: var(--radius-sm); font-size: 12px; color: var(--color-text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .msg-tool .tool-result { border-left: 2px solid var(--color-primary); opacity: 0.9; }

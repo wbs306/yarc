@@ -961,7 +961,15 @@ export const useChatStore = defineStore('chat', () => {
       }
       case 'tool_call': { if (!m.toolCalls) m.toolCalls = []; let inp = d.input; if (typeof inp === 'string') try { inp = JSON.parse(inp) } catch {}; const ex = m.toolCalls.find((t: any) => t.id === d.toolCallId); if (ex) { ex.name = d.toolName; ex.input = inp; delete ex.inputText } else m.toolCalls.push({ id: d.toolCallId, name: d.toolName, input: inp }); pushTool(m, d.toolCallId); break }
       case 'tool_result': if (m.toolCalls) { const tc = m.toolCalls.find((t: any) => t.id === d.toolCallId); if (tc) tc.result = d.result }; break
-      case 'search_results': window.dispatchEvent(new CustomEvent('yarc-agent-search-results', { detail: d })); break
+      case 'search_results': {
+        const searchTool = d.toolCallId && m.toolCalls?.find((tc: any) => tc.id === d.toolCallId)
+        if (searchTool) searchTool.searchResults = d
+        else {
+          const fallbackTool = m.toolCalls?.find((tc: any) => tc.name === 'yarc_search_papers' && !tc.searchResults)
+          if (fallbackTool) fallbackTool.searchResults = d
+        }
+        break
+      }
       case 'citation': if (!m.metadata.citations) m.metadata.citations = []; m.metadata.citations.push({ pageNumber: d.pageNumber, text: d.text }); break
       case 'session_state':
         m.metadata.sessionState = { model: d.model, thinkingLevel: d.thinkingLevel };

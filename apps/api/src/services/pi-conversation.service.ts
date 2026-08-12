@@ -31,6 +31,7 @@ export interface ConversationMessage {
     input: Record<string, any>
     result?: string
     isError?: boolean
+    searchResults?: Record<string, unknown>
   }>
   segments?: Array<{
     type: 'text' | 'tool' | 'error' | 'thinking' | 'compaction'
@@ -331,7 +332,7 @@ export class PiConversationService {
    */
   private entriesToMessages(entries: SessionEntry[], branchMeta?: any): ConversationMessage[] {
     const messages: ConversationMessage[] = []
-    const toolResultMap = new Map<string, string>() // toolCallId -> result
+    const toolResultMap = new Map<string, { text: string; details?: unknown }>() // toolCallId -> result
 
     // First pass: collect tool results
     for (const entry of entries) {
@@ -340,7 +341,7 @@ export class PiConversationService {
         if (msg.role === 'toolResult') {
           const toolResult = msg as any
           const resultText = this.extractToolResultContent(toolResult)
-          toolResultMap.set(toolResult.toolCallId, resultText)
+          toolResultMap.set(toolResult.toolCallId, { text: resultText, details: toolResult.details })
         }
       }
     }
@@ -370,7 +371,7 @@ export class PiConversationService {
    */
   private entryToMessage(
     entry: SessionEntry,
-    toolResultMap: Map<string, string>
+    toolResultMap: Map<string, { text: string; details?: unknown }>
   ): ConversationMessage | null {
     // Handle compaction entries
     if (entry.type === 'compaction') {
@@ -432,7 +433,7 @@ export class PiConversationService {
    */
   private convertAssistantMessage(
     msgEntry: SessionMessageEntry,
-    toolResultMap: Map<string, string>
+    toolResultMap: Map<string, { text: string; details?: unknown }>
   ): ConversationMessage {
     const msg = msgEntry.message as any
 
@@ -449,11 +450,29 @@ export class PiConversationService {
         thinkingContent += block.thinking
         segments.push({ type: 'thinking', text: block.thinking })
       } else if (block.type === 'toolCall') {
-        const toolCall = {
+        const toolCall: NonNullable<ConversationMessage['toolCalls']>[number] = {
           id: block.id,
           name: block.name,
           input: block.arguments,
-          result: toolResultMap.get(block.id),
+          result: toolResultMap.get(block.id)?.text,
+        }
+        if (block.name === 'yarc_search_papers') {
+          const details = toolResultMap.get(block.id)?.details as Record<string, any> | undefined
+          if (Array.isArray(details?.papers)) toolCall.searchResults = {
+            toolCallId: block.id,
+            query: String(details.query || block.arguments?.query || ''),
+            source: details.source || block.arguments?.source || 'semantic_scholar',
+            field: details.field || block.arguments?.field || 'all',
+            page: Number(details.page || block.arguments?.page || 1),
+            limit: Number(details.limit || block.arguments?.limit || details.papers.length || 20),
+            total: Number(details.total || details.papers.length || 0),
+            totalPages: Number(details.totalPages || 0),
+            hasNextPage: Boolean(details.hasNextPage || false),
+            nextPage: details.nextPage ?? null,
+            papers: details.papers,
+            earlyAccess: Boolean(details.earlyAccess || block.arguments?.earlyAccess || false),
+            publication: details.publication || block.arguments?.publication,
+          }
         }
         toolCalls.push(toolCall)
         segments.push({ type: 'tool', toolCallId: block.id })

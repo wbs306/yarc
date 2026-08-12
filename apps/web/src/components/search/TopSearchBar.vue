@@ -480,7 +480,7 @@ watch(isExpanded, (val) => {
 })
 
 onMounted(() => {
-  window.addEventListener('yarc-agent-search-results', applyAgentSearchResults)
+  window.addEventListener('yarc-open-agent-search-results', applyAgentSearchResults)
   window.addEventListener('yarc-import-job-queued', applyImportJobEvent)
   window.addEventListener('yarc-import-job-started', applyImportJobEvent)
   window.addEventListener('yarc-import-job-progress', applyImportJobEvent)
@@ -495,7 +495,7 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('mousedown', handleClickOutside)
   window.removeEventListener('resize', updateDropdownStyle)
-  window.removeEventListener('yarc-agent-search-results', applyAgentSearchResults)
+  window.removeEventListener('yarc-open-agent-search-results', applyAgentSearchResults)
   window.removeEventListener('yarc-import-job-queued', applyImportJobEvent)
   window.removeEventListener('yarc-import-job-started', applyImportJobEvent)
   window.removeEventListener('yarc-import-job-progress', applyImportJobEvent)

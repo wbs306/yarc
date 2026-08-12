@@ -234,6 +234,7 @@ export type ChatEvent =
   | { type: 'tool_result'; toolCallId: string; result: string }
   | {
       type: 'search_results'
+      toolCallId?: string
       query: string
       source: 'local' | 'ieee' | 'semantic_scholar'
       field?: string

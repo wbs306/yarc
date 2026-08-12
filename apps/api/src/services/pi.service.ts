@@ -2248,6 +2248,7 @@ export class PiService {
             if (Array.isArray(details.papers)) {
               push({
                 type: 'search_results',
+                toolCallId,
                 query: String(details.query || ctx.args?.query || ''),
                 source: details.source || ctx.args?.source || 'semantic_scholar',
                 field: details.field || ctx.args?.field || 'all',

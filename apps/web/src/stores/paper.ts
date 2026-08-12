@@ -97,9 +97,8 @@ export const usePaperStore = defineStore('paper', () => {
         const evt = JSON.parse(e.data)
         window.dispatchEvent(new CustomEvent('yarc-sse-event', { detail: evt }))
         if (evt.type) window.dispatchEvent(new CustomEvent(`yarc-${evt.type}`, { detail: evt }))
-        if (evt.type === 'search-results') {
-          window.dispatchEvent(new CustomEvent('yarc-agent-search-results', { detail: evt }))
-        }
+        // Search results are rendered with the originating tool call in the chat;
+        // the SSE event only carries the library-wide realtime notification.
         if (evt.type === 'paper-status' && evt.paperId) {
           refreshPaperStatus(evt.paperId)
         }
