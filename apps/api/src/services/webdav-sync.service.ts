@@ -231,9 +231,27 @@ const isWebDavExcludedPath = (path: string, patterns: string[]) => (
   isProtectedSyncPath(path) || isExcludedPath(path, patterns)
 )
 
-export const shouldSyncPath = (path: string, config: Pick<WebDavSyncConfig, 'syncAll' | 'selectedPaths' | 'excludePatterns'>) => (
+type WebDavSyncScope = Pick<WebDavSyncConfig, 'syncAll' | 'selectedPaths' | 'excludePatterns'>
+
+export const shouldSyncPath = (path: string, config: WebDavSyncScope) => (
   isSelectedPath(path, config.syncAll, config.selectedPaths) && !isWebDavExcludedPath(path, config.excludePatterns)
 )
+
+export const shouldTraverseSyncDirectory = (
+  rawPath: string,
+  syncAll: boolean,
+  selectedPaths: string[],
+) => {
+  if (syncAll) return true
+  const path = normalizeRelativePath(rawPath)
+  if (!path) return selectedPaths.length > 0
+  return selectedPaths.some(rawSelected => {
+    const selected = normalizeRelativePath(rawSelected)
+    return selected === path
+      || selected.startsWith(`${path}/`)
+      || path.startsWith(`${selected}/`)
+  })
+}
 
 const decodeXml = (value: string) => value
   .replace(/&lt;/g, '<')
@@ -402,7 +420,7 @@ export class WebDavClient {
     return entries
   }
 
-  async list() {
+  async list(scope?: WebDavSyncScope) {
     await this.ensureRoot()
     const files = new Map<string, RemoteFile>()
     const pending: Array<{ path: string; url: URL }> = [{ path: '', url: this.rootUrl }]
@@ -423,8 +441,14 @@ export class WebDavClient {
         const relativePath = normalizeRelativePath(entryPathname.slice(rootPath.length + 1))
         if (!relativePath) continue
         if (entry.directory) {
-          if (!visited.has(relativePath)) pending.push({ path: relativePath, url: appendUrlPath(this.rootUrl, relativePath, true) })
-        } else {
+          const shouldTraverse = !scope || (
+            !isWebDavExcludedPath(relativePath, scope.excludePatterns)
+            && shouldTraverseSyncDirectory(relativePath, scope.syncAll, scope.selectedPaths)
+          )
+          if (shouldTraverse && !visited.has(relativePath)) {
+            pending.push({ path: relativePath, url: appendUrlPath(this.rootUrl, relativePath, true) })
+          }
+        } else if (!scope || shouldSyncPath(relativePath, scope)) {
           files.set(relativePath, {
             path: relativePath,
             size: entry.size,
@@ -659,6 +683,8 @@ export class WebDavSyncService {
   private unsubscribeDataChanges: (() => void) | null = null
   private runPromise: Promise<WebDavSyncResult> | null = null
   private testing = false
+  private statusEmitTimer: ReturnType<typeof setTimeout> | null = null
+  private lastStatusEmitAt = 0
 
   async start() {
     await this.ensureInitialized()
@@ -704,12 +730,27 @@ export class WebDavSyncService {
   }
 
   private emitStatus() {
+    if (this.statusEmitTimer) clearTimeout(this.statusEmitTimer)
+    this.statusEmitTimer = null
+    this.lastStatusEmitAt = Date.now()
     sseHub.emit({ type: 'webdav-sync-status', status: this.status })
   }
 
-  private setStatus(patch: Partial<WebDavSyncStatus>) {
+  private emitStatusThrottled() {
+    const delay = Math.max(0, 250 - (Date.now() - this.lastStatusEmitAt))
+    if (delay === 0) {
+      this.emitStatus()
+      return
+    }
+    if (this.statusEmitTimer) return
+    this.statusEmitTimer = setTimeout(() => this.emitStatus(), delay)
+    this.statusEmitTimer.unref?.()
+  }
+
+  private setStatus(patch: Partial<WebDavSyncStatus>, throttle = false) {
     this.status = { ...this.status, ...patch }
-    this.emitStatus()
+    if (throttle) this.emitStatusThrottled()
+    else this.emitStatus()
   }
 
   private async persistStatus() {
@@ -1079,8 +1120,9 @@ export class WebDavSyncService {
         const absolutePath = join(directory, entry.name)
         const path = relative(appConfig.dataDir, absolutePath).split(sep).join('/')
         if (isWebDavExcludedPath(path, syncConfig.excludePatterns)) continue
-        if (entry.isDirectory()) await walk(absolutePath)
-        else if (entry.isFile() && isSelectedPath(path, syncConfig.syncAll, syncConfig.selectedPaths)) {
+        if (entry.isDirectory()) {
+          if (shouldTraverseSyncDirectory(path, syncConfig.syncAll, syncConfig.selectedPaths)) await walk(absolutePath)
+        } else if (entry.isFile() && shouldSyncPath(path, syncConfig)) {
           try {
             files.set(path, await makeLocalFile(appConfig.dataDir, absolutePath))
           } catch (error) {
@@ -1139,7 +1181,7 @@ export class WebDavSyncService {
       const client = new WebDavClient(syncConfig, await this.readPassword())
       const [localFiles, remoteFiles, savedManifest] = await Promise.all([
         this.scanLocalFiles(syncConfig),
-        client.list(),
+        client.list(syncConfig),
         readSetting<SyncManifest>(MANIFEST_KEY),
       ])
       const manifest: SyncManifest = savedManifest && typeof savedManifest === 'object' ? { ...savedManifest } : {}
@@ -1217,7 +1259,7 @@ export class WebDavSyncService {
       for (let index = 0; index < sortedPaths.length; index++) {
         const path = sortedPaths[index]
         currentAction = 'scan'
-        this.setStatus({ currentPath: path, processed: index, message: `正在同步 ${path}` })
+        this.setStatus({ currentPath: path, processed: index, message: `正在同步 ${path}` }, true)
         try {
           const local = localFiles.get(path)
           const remote = remoteCandidates.get(path)
@@ -1281,7 +1323,7 @@ export class WebDavSyncService {
             message: (error as Error).message || '同步失败',
           })
         }
-        this.setStatus({ processed: index + 1 })
+        this.setStatus({ processed: index + 1 }, true)
       }
 
       result.finishedAt = new Date().toISOString()

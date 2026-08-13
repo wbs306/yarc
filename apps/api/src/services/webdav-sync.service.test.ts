@@ -11,10 +11,12 @@ import {
   isSelectedPath,
   normalizeWebDavConfig,
   shouldSyncPath,
+  shouldTraverseSyncDirectory,
 } from './webdav-sync.service.js'
 
 const directories = new Set(['/dav/'])
 const files = new Map<string, { data: Buffer; modified: number }>()
+const propfindRequests: string[] = []
 let server: ReturnType<typeof createServer>
 let baseUrl = ''
 
@@ -64,6 +66,7 @@ before(async () => {
     }
 
     if (request.method === 'PROPFIND') {
+      propfindRequests.push(path)
       const directoryPath = path.endsWith('/') ? path : `${path}/`
       if (!directories.has(directoryPath) && !files.has(path)) {
         response.writeHead(404)
@@ -173,6 +176,12 @@ describe('WebDAV path selection and exclusions', () => {
       selectedPaths: [],
       excludePatterns: [],
     }), true)
+    assert.equal(shouldTraverseSyncDirectory('papers', false, ['works/demo', 'generated/result.md']), false)
+    assert.equal(shouldTraverseSyncDirectory('works', false, ['works/demo', 'generated/result.md']), true)
+    assert.equal(shouldTraverseSyncDirectory('works/demo', false, ['works/demo', 'generated/result.md']), true)
+    assert.equal(shouldTraverseSyncDirectory('works/demo/src', false, ['works/demo', 'generated/result.md']), true)
+    assert.equal(shouldTraverseSyncDirectory('generated', false, ['works/demo', 'generated/result.md']), true)
+    assert.equal(shouldTraverseSyncDirectory('generated/other', false, ['works/demo', 'generated/result.md']), false)
     assert.deepEqual(normalizeWebDavConfig({
       selectedPaths: ['papers/a/file.pdf', 'papers/a', 'notes/todo.md'],
     }).selectedPaths, ['notes/todo.md', 'papers/a'])
@@ -218,6 +227,29 @@ describe('WebDavClient', () => {
 
     const downloaded = await client.download('notes/example.md')
     assert.equal(new TextDecoder().decode(downloaded), '# synced\n')
+  })
+
+  it('only traverses selected remote directory branches', async () => {
+    const client = new WebDavClient({
+      url: baseUrl,
+      username: 'tester',
+      remotePath: 'sync-root',
+      timeoutSeconds: 5,
+    }, 'secret')
+
+    await client.upload('selected/inside.md', new TextEncoder().encode('selected'), Date.now())
+    await client.upload('unselected/outside.md', new TextEncoder().encode('unselected'), Date.now())
+    propfindRequests.length = 0
+
+    const remoteFiles = await client.list({
+      syncAll: false,
+      selectedPaths: ['selected'],
+      excludePatterns: [],
+    })
+
+    assert.deepEqual([...remoteFiles.keys()], ['selected/inside.md'])
+    assert.equal(propfindRequests.some(path => path.endsWith('/selected/')), true)
+    assert.equal(propfindRequests.some(path => path.endsWith('/unselected/')), false)
   })
 
   it('streams file uploads, hashes, and downloads without buffering the whole file', async () => {

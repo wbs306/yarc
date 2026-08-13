@@ -907,6 +907,27 @@ const findWorkspaceNode = (nodes: FileNode[], path: string): FileNode | null => 
   return null
 }
 
+const removeWorkspaceTreePath = (nodes: FileNode[], path: string): FileNode[] => nodes
+  .filter(node => node.path !== path)
+  .map(node => node.children && path.startsWith(`${node.path}/`)
+    ? { ...node, children: removeWorkspaceTreePath(node.children, path) }
+    : node)
+
+const removeWorkspacePathLocally = (path: string) => {
+  const normalizedPath = normalizeWorkspaceFilePath(path)
+  if (!normalizedPath) return
+  workspaceFiles.value = removeWorkspaceTreePath(workspaceFiles.value, normalizedPath)
+  workspaceFilesStale = false
+  void putOfflineWorkspaceTree(workspaceFiles.value)
+
+  if (selectedWorkspacePath.value === normalizedPath || selectedWorkspacePath.value.startsWith(`${normalizedPath}/`)) {
+    selectedWorkspaceFile.value = null
+    localStorage.removeItem('yarc_workspace_file')
+    clearWorkspaceEditor()
+  }
+  removeRecentWorkspacePath(normalizedPath)
+}
+
 const clearWorkspaceEditor = () => {
   currentLiveClient.value = null
   workspaceContent.value = ''
@@ -1532,13 +1553,7 @@ const deleteWorkspaceNode = async (node: FileNode) => {
   filesError.value = ''
   try {
     await api.deletePath(node.path)
-    if (selectedWorkspacePath.value === node.path || selectedWorkspacePath.value.startsWith(`${node.path}/`)) {
-      selectedWorkspaceFile.value = null
-      localStorage.removeItem('yarc_workspace_file')
-      clearWorkspaceEditor()
-    }
-    removeRecentWorkspacePath(node.path)
-    await loadWorkspaceFiles(true)
+    removeWorkspacePathLocally(node.path)
   } catch (err) {
     filesError.value = (err as Error).message || '删除失败'
   }
@@ -2380,6 +2395,11 @@ const onRealtimeFilesChanged = (event: Event) => {
   const detail = (event as CustomEvent)?.detail || {}
   const action = typeof detail.action === 'string' ? detail.action : ''
   const changedPath = typeof detail.path === 'string' ? detail.path : ''
+
+  if (action === 'delete' && changedPath) {
+    removeWorkspacePathLocally(changedPath)
+    return
+  }
 
   if (action !== 'live-save') refreshWorkspaceFilesSoon()
 
