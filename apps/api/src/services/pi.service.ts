@@ -892,7 +892,11 @@ export class PiService {
               const authors = p.authors?.slice(0, 3).join(', ') || 'Unknown'
               const venue = p.venue || p.journal || ''
               text += `**${p.title}**\nAuthors: ${authors}\nYear: ${p.year || 'N/A'}${venue ? ` | Venue: ${venue}` : ''}\n`
-              if (p.abstract) text += `Abstract: ${p.abstract.slice(0, 180)}...\n`
+              if (p.abstract) {
+                text += source === 'semantic_scholar'
+                  ? `Abstract: ${p.abstract}\n`
+                  : `Abstract: ${p.abstract.slice(0, 180)}...\n`
+              }
               text += `ID: ${p.id || p.paperId || 'N/A'}\n\n`
             }
             return { content: [{ type: 'text' as const, text }], details: { papers, total, page: effectivePage, limit: effectiveLimit, totalPages, hasNextPage, nextPage, query, source, field, earlyAccess, publication } }
