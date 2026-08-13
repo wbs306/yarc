@@ -835,7 +835,7 @@ export class PiService {
       defineTool({
         name: 'yarc_search_papers',
         label: 'Search Papers',
-        description: 'Search for academic papers in the YARC library (local vector database), IEEE Xplore, or Semantic Scholar. Use paperId parameter to limit local search to a specific paper. Results are pushed to the UI search list.',
+        description: 'Search for academic papers in the YARC library (local vector database), IEEE Xplore, or Semantic Scholar. Use paperId parameter to limit local search to a specific paper.',
         parameters: Type.Object({
           query: Type.String({ description: 'Search query (keywords, title, author name, etc.)' }),
           source: Type.Optional(Type.Union([
@@ -878,7 +878,7 @@ export class PiService {
             const totalPages = effectiveLimit > 0 ? Math.ceil(total / effectiveLimit) : 0
             const hasNextPage = totalPages > 0 && effectivePage < totalPages
             const nextPage = hasNextPage ? effectivePage + 1 : null
-            let text = `Found ${total} papers. Showing page ${effectivePage} of ${totalPages}, ${papers.length} result(s) on this page. These results have been sent to the UI search list.\n`
+            let text = `Found ${total} papers. Showing page ${effectivePage} of ${totalPages}, ${papers.length} result(s) on this page.\n`
             if (hasNextPage) {
               text += `More results are available: call yarc_search_papers again with the same query/source/field and page=${nextPage}, limit=${effectiveLimit}. You can also increase limit if the source allows it.\n`
             } else {
