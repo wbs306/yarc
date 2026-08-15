@@ -329,6 +329,8 @@ export interface IeeeSearchResponse {
 
 export interface SearchPaper {
   id: string
+  /** Semantic Scholar paperId when the source provides one. */
+  paperId?: string | null
   title: string
   abstract?: string | null
   authors: string[]

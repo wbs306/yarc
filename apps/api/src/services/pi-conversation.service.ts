@@ -458,7 +458,7 @@ export class PiConversationService {
         }
         if (block.name === 'yarc_search_papers') {
           const details = toolResultMap.get(block.id)?.details as Record<string, any> | undefined
-          if (Array.isArray(details?.papers)) toolCall.searchResults = {
+          if ((details?.action === 'search' || !details?.action) && Array.isArray(details?.papers)) toolCall.searchResults = {
             toolCallId: block.id,
             query: String(details.query || block.arguments?.query || ''),
             source: details.source || block.arguments?.source || 'semantic_scholar',

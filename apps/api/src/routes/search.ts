@@ -170,7 +170,7 @@ search.post('/temporary-pdfs', async (c) => {
     return c.json({ error: { code: 'MISSING_URL', message: 'URL is required' } }, 400)
   }
 
-  const document = await temporaryPdfService.create(url, body?.title)
+  const document = await temporaryPdfService.create(url, body?.title, { retryFailed: true })
   return c.json({ document }, 202)
 })
 

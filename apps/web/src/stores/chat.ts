@@ -965,7 +965,7 @@ export const useChatStore = defineStore('chat', () => {
         const searchTool = d.toolCallId && m.toolCalls?.find((tc: any) => tc.id === d.toolCallId)
         if (searchTool) searchTool.searchResults = d
         else {
-          const fallbackTool = m.toolCalls?.find((tc: any) => tc.name === 'yarc_search_papers' && !tc.searchResults)
+          const fallbackTool = m.toolCalls?.find((tc: any) => tc.name === 'yarc_search_papers' && (!tc.input?.action || tc.input.action === 'search') && !tc.searchResults)
           if (fallbackTool) fallbackTool.searchResults = d
         }
         break

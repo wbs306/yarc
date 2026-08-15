@@ -6,6 +6,7 @@ import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
 import { paperService } from './paper.service.js'
 import { searchService } from './search.service.js'
 import { ieeeXploreService } from './ieee-xplore.service.js'
+import { searchCategoryService } from './search-category.service.js'
 
 export type ImportJobStatus = 'queued' | 'running' | 'completed' | 'failed'
 
@@ -20,6 +21,10 @@ export interface ImportJob {
   categoryId?: string
   requirePdf: boolean
   extractMetadata: boolean
+  removeFromSearchCategory?: {
+    categoryId: string
+    paperIds: string[]
+  }
   results: any[]
   errors: Array<{ id?: string; title?: string; message: string }>
   warnings: Array<{ id?: string; title?: string; message: string }>
@@ -36,6 +41,10 @@ class ImportJobService {
     categoryId?: string
     requirePdf?: boolean
     extractMetadata?: boolean
+    removeFromSearchCategory?: {
+      categoryId: string
+      paperIds: string[]
+    }
   }) {
     const job: ImportJob = {
       id: crypto.randomUUID(),
@@ -48,6 +57,7 @@ class ImportJobService {
       categoryId: params.categoryId,
       requirePdf: params.requirePdf !== false,
       extractMetadata: params.extractMetadata === true,
+      removeFromSearchCategory: params.removeFromSearchCategory,
       results: [],
       errors: [],
       warnings: [],
@@ -100,6 +110,7 @@ class ImportJobService {
           job.extractMetadata
         )
         job.results.push(imported)
+        this.removeImportedSearchPaper(job, paper.id || importPaper.id)
         job.completed += 1
         this.emit(job, 'import-job-item-completed', {
           paper: this.paperSummary(importPaper),
@@ -129,6 +140,7 @@ class ImportJobService {
               },
             })
             job.results.push(fallback)
+            this.removeImportedSearchPaper(job, paper.id || importPaper.id)
             job.completed += 1
             job.metadataOnly += 1
             job.warnings.push({ id: importPaper.id, title: importPaper.title, message: `PDF download failed; saved metadata only: ${message}` })
@@ -167,20 +179,49 @@ class ImportJobService {
   }
 
   private async resolveImportPaper(paper: any): Promise<{ paper: any; warning?: string }> {
-    if (paper?.source !== 'ieee') return { paper }
-
-    const articleNumber = this.ieeeArticleNumber(paper)
-    if (!articleNumber) {
-      return { paper, warning: 'IEEE 文章编号不可用，已使用搜索结果中的摘要导入。' }
-    }
-
-    try {
-      const details = await ieeeXploreService.fetchArticleAbstract(articleNumber)
-      const detailedPaper = details.papers[0]
-      if (!detailedPaper?.abstract) {
-        return { paper, warning: 'IEEE 文章详情未提供完整摘要，已使用搜索结果中的摘要导入。' }
+    if (paper?.source === 'ieee') {
+      const articleNumber = this.ieeeArticleNumber(paper)
+      if (!articleNumber) {
+        return { paper, warning: 'IEEE 文章编号不可用，已使用搜索结果中的摘要导入。' }
       }
 
+      try {
+        const details = await ieeeXploreService.fetchArticleAbstract(articleNumber)
+        const detailedPaper = details.papers[0]
+        if (!detailedPaper?.abstract) {
+          return { paper, warning: 'IEEE 文章详情未提供完整摘要，已使用搜索结果中的摘要导入。' }
+        }
+
+        return {
+          paper: {
+            ...paper,
+            ...detailedPaper,
+            title: detailedPaper.title || paper.title,
+            authors: detailedPaper.authors.length ? detailedPaper.authors : paper.authors,
+            year: detailedPaper.year ?? paper.year,
+            abstract: detailedPaper.abstract,
+            url: detailedPaper.url || paper.url,
+            pdfUrl: detailedPaper.pdfUrl || paper.pdfUrl,
+            doi: detailedPaper.doi || paper.doi,
+            journal: detailedPaper.journal || paper.journal,
+            venue: detailedPaper.venue || paper.venue,
+            articleNumber,
+          },
+        }
+      } catch (err) {
+        return { paper, warning: `无法加载 IEEE 文章详情的完整摘要，已使用搜索结果中的摘要导入：${(err as Error).message}` }
+      }
+    }
+
+    if (paper?.source !== 'semantic_scholar') return { paper }
+
+    const rawPaperId = String(paper.paperId || paper.id || '').trim()
+    if (!rawPaperId) return { paper }
+    const paperId = rawPaperId.replace(/^S2:/i, '')
+    if (!paperId) return { paper }
+
+    try {
+      const detailedPaper = await searchService.fetchSemanticScholarPaper(paperId)
       return {
         paper: {
           ...paper,
@@ -188,17 +229,18 @@ class ImportJobService {
           title: detailedPaper.title || paper.title,
           authors: detailedPaper.authors.length ? detailedPaper.authors : paper.authors,
           year: detailedPaper.year ?? paper.year,
-          abstract: detailedPaper.abstract,
+          abstract: detailedPaper.abstract ?? paper.abstract,
           url: detailedPaper.url || paper.url,
           pdfUrl: detailedPaper.pdfUrl || paper.pdfUrl,
           doi: detailedPaper.doi || paper.doi,
+          arxivId: detailedPaper.arxivId || paper.arxivId,
           journal: detailedPaper.journal || paper.journal,
           venue: detailedPaper.venue || paper.venue,
-          articleNumber,
+          paperId,
         },
       }
     } catch (err) {
-      return { paper, warning: `无法加载 IEEE 文章详情的完整摘要，已使用搜索结果中的摘要导入：${(err as Error).message}` }
+      return { paper, warning: `无法加载 Semantic Scholar 文章详情，已使用搜索结果中的元数据导入：${(err as Error).message}` }
     }
   }
 
@@ -221,7 +263,9 @@ class ImportJobService {
       return buffer
     }
 
-    const source = paper?.pdfUrl || paper?.openAccessPdf?.url || paper?.pdfPath || paper?.url
+    const source = paper?.pdfUrl || paper?.openAccessPdf?.url || paper?.pdfPath || (
+      typeof paper?.url === 'string' && /\.pdf(?:[?#]|$)/i.test(paper.url) ? paper.url : undefined
+    )
     if (!source || typeof source !== 'string') throw new Error('No PDF source available')
 
     const localBuffer = await this.tryReadLocalPdfSource(source)
@@ -255,6 +299,17 @@ class ImportJobService {
     if (!info.isFile()) throw new Error('Local PDF path is not a file')
     if (info.size > this.maxPdfBytes) throw new Error('File exceeds 50MB limit')
     return readFile(resolvedPath)
+  }
+
+  private removeImportedSearchPaper(job: ImportJob, paperId: unknown) {
+    const categoryId = job.removeFromSearchCategory?.categoryId
+    const sourcePaperId = String(paperId || '').trim()
+    if (!categoryId || !sourcePaperId || !job.removeFromSearchCategory?.paperIds.includes(sourcePaperId)) return
+    try {
+      searchCategoryService.removePaper(categoryId, sourcePaperId)
+    } catch (err) {
+      job.warnings.push({ id: sourcePaperId, message: `导入成功，但无法从搜索收藏移除：${(err as Error).message}` })
+    }
   }
 
   private paperSummary(paper: any) {

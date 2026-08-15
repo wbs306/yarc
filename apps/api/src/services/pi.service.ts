@@ -4,6 +4,8 @@ import { access, mkdir } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import { searchService } from './search.service.js'
 import { searchCategoryService } from './search-category.service.js'
+import { ieeeXploreService } from './ieee-xplore.service.js'
+import { temporaryPdfService } from './temporary-pdf.service.js'
 import { categoryService } from './category.service.js'
 import { paperService } from './paper.service.js'
 import { jobQueue } from './job-queue.service.js'
@@ -455,6 +457,7 @@ export class PiService {
       fieldsOfStudy: Type.Optional(Type.Array(Type.String())),
       openAccessPdf: Type.Optional(Type.Any()),
       tldr: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      paperId: Type.Optional(Type.String({ description: 'Semantic Scholar paperId' })),
       // Local search specific fields
       similarity: Type.Optional(Type.Number()),
       pageNumber: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
@@ -462,11 +465,13 @@ export class PiService {
 
     const normalizeSearchPaper = (paper: any, fallbackSource: 'ieee' | 'semantic_scholar' | 'local' = 'semantic_scholar') => ({
       id: String(paper.id || paper.paperId || paper.doi || paper.url || paper.title),
+      paperId: paper.paperId || (paper.source === 'semantic_scholar' ? paper.id : undefined),
       title: String(paper.title || 'Untitled'),
       abstract: paper.abstract || undefined,
       authors: Array.isArray(paper.authors) ? paper.authors : [],
       year: typeof paper.year === 'number' ? paper.year : undefined,
       url: paper.url || undefined,
+      pdfUrl: paper.pdfUrl || paper.openAccessPdf?.url || undefined,
       doi: paper.doi || undefined,
       arxivId: paper.arxivId || undefined,
       journal: paper.journal || undefined,
@@ -476,6 +481,9 @@ export class PiService {
       articleNumber: paper.articleNumber,
       publicationNumber: paper.publicationNumber,
       contentType: paper.contentType,
+      provider: paper.provider,
+      isEarlyAccess: paper.isEarlyAccess,
+      fileName: paper.fileName,
       citationCount: paper.citationCount,
       referenceCount: paper.referenceCount,
       publicationDate: paper.publicationDate,
@@ -834,16 +842,27 @@ export class PiService {
       // ============================================================================
       defineTool({
         name: 'yarc_search_papers',
-        label: 'Search Papers',
-        description: 'Search for academic papers in the YARC library (local vector database), IEEE Xplore, or Semantic Scholar. Use paperId parameter to limit local search to a specific paper.',
+        label: 'Search and Process Papers',
+        description: 'Search papers and process external results. action=search finds papers; action=abstract gets a complete external abstract; action=preview temporarily downloads and MinerU-parses a PDF, returning a readable Markdown path only when ready; action=import queues a formal library import. action defaults to search. Use import only when the user explicitly asks to save/import a paper.',
         parameters: Type.Object({
-          query: Type.String({ description: 'Search query (keywords, title, author name, etc.)' }),
+          action: Type.Optional(Type.Union([
+            Type.Literal('search'),
+            Type.Literal('abstract'),
+            Type.Literal('preview'),
+            Type.Literal('import'),
+          ], { description: 'Action: search, abstract, preview, or import. Defaults to search.' })),
+          query: Type.Optional(Type.String({ description: 'Search query for action=search' })),
           source: Type.Optional(Type.Union([
             Type.Literal('local'),
             Type.Literal('ieee'),
             Type.Literal('semantic_scholar')
-          ], { description: 'Search source: "local" for vector search in uploaded PDFs, "ieee" for IEEE Xplore, "semantic_scholar" for Semantic Scholar (default)' })),
-          paperId: Type.Optional(Type.String({ description: 'Limit search to a specific paper (local source only)' })),
+          ], { description: 'Search/source provider. Defaults to semantic_scholar.' })),
+          paperId: Type.Optional(Type.String({ description: 'Local paper ID for local search, or Semantic Scholar paperId for abstract/preview/import' })),
+          articleNumber: Type.Optional(Type.String({ description: 'IEEE article number for abstract/preview/import' })),
+          doi: Type.Optional(Type.String({ description: 'DOI used to identify an external paper' })),
+          arxivId: Type.Optional(Type.String({ description: 'arXiv identifier used to identify an external paper' })),
+          url: Type.Optional(Type.String({ description: 'External landing page or direct PDF URL when supplied by a search result' })),
+          pdfUrl: Type.Optional(Type.String({ description: 'Direct PDF URL for action=preview or action=import' })),
           field: Type.Optional(Type.Union([
             Type.Literal('all'),
             Type.Literal('title'),
@@ -858,50 +877,184 @@ export class PiService {
           yearFrom: Type.Optional(Type.Number()),
           yearTo: Type.Optional(Type.Number()),
           earlyAccess: Type.Optional(Type.Boolean({ description: 'IEEE only: return Early Access Articles' })),
-          publication: Type.Optional(Type.String({ description: 'IEEE only: top venue alias or exact publication title, e.g. tmc, tpds, twc, ton, jsac' })),
+          publication: Type.Optional(Type.String({ description: 'IEEE only: top venue alias or exact publication title' })),
+          paper: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: 'A single paper object copied from action=search' })),
+          papers: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: 'Papers for action=import (batch supported)' })),
+          temporaryId: Type.Optional(Type.String({ description: 'Temporary preview ID returned by an earlier preview call' })),
+          async: Type.Optional(Type.Boolean({ description: 'For preview: return parsing status immediately instead of waiting; parsing status never includes a readable path' })),
+          retryFailed: Type.Optional(Type.Boolean({ description: 'For preview: restart a previously failed temporary parse' })),
+          mode: Type.Optional(Type.Union([
+            Type.Literal('metadata'),
+            Type.Literal('abstract'),
+            Type.Literal('pages'),
+            Type.Literal('full_text'),
+          ], { description: 'For preview: metadata, abstract, pages, or full_text. The path is read with the built-in read tool.' })),
+          startPage: Type.Optional(Type.Number()),
+          endPage: Type.Optional(Type.Number()),
+          maxChars: Type.Optional(Type.Number()),
+          category: Type.Optional(Type.String({ description: 'Library category for action=import' })),
+          parentCategory: Type.Optional(Type.String({ description: 'Parent library category for action=import' })),
+          categoryId: Type.Optional(Type.String({ description: 'Existing library category ID for action=import' })),
+          requirePdf: Type.Optional(Type.Boolean({ description: 'For import: default true; fail items without a usable PDF instead of saving metadata only' })),
+          extractMetadata: Type.Optional(Type.Boolean({ description: 'For import: extract/enrich metadata from PDF; default false' })),
+          removeFromSearchCategory: Type.Optional(Type.Object({
+            categoryId: Type.String(),
+            paperIds: Type.Array(Type.String()),
+          })),
         }),
         async execute(_toolCallId: string, params: any) {
           try {
-            const { query, source = 'semantic_scholar', field = 'all', page = 1, limit = 20, yearFrom, yearTo, earlyAccess, publication, paperId } = params
-            let results
-            if (source === 'local') {
-              results = await searchService.searchLocalHybrid(query, field, limit, (page - 1) * limit, 0.5, paperId)
-            } else if (source === 'ieee') {
-              results = await searchService.searchIEEE(query, field, page, limit, yearFrom, yearTo, { earlyAccess, publication })
-            } else {
-              results = await searchService.searchSemanticScholar(query, field, page, limit, yearFrom, yearTo)
-            }
-            const papers = results.papers || []
-            const total = Number(results.total || papers.length || 0)
-            const effectivePage = Number(results.page || page || 1)
-            const effectiveLimit = Number(results.limit || limit || papers.length || 20)
-            const totalPages = effectiveLimit > 0 ? Math.ceil(total / effectiveLimit) : 0
-            const hasNextPage = totalPages > 0 && effectivePage < totalPages
-            const nextPage = hasNextPage ? effectivePage + 1 : null
-            let text = `Found ${total} papers. Showing page ${effectivePage} of ${totalPages}, ${papers.length} result(s) on this page.\n`
-            if (hasNextPage) {
-              text += `More results are available: call yarc_search_papers again with the same query/source/field and page=${nextPage}, limit=${effectiveLimit}. You can also increase limit if the source allows it.\n`
-            } else {
-              text += 'No next page is available for this search.\n'
-            }
-            if (papers.length > 10) {
-              text += `The tool returned ${papers.length} result(s) for this page; the summary below lists the first 10.\n`
-            }
-            text += '\n'
-            for (const p of papers.slice(0, 10)) {
-              const authors = p.authors?.slice(0, 3).join(', ') || 'Unknown'
-              const venue = p.venue || p.journal || ''
-              text += `**${p.title}**\nAuthors: ${authors}\nYear: ${p.year || 'N/A'}${venue ? ` | Venue: ${venue}` : ''}\n`
-              if (p.abstract) {
-                text += source === 'semantic_scholar'
-                  ? `Abstract: ${p.abstract}\n`
-                  : `Abstract: ${p.abstract.slice(0, 180)}...\n`
+            const action = params.action || 'search'
+            if (action === 'search') {
+              if (typeof params.query !== 'string' || !params.query.trim()) {
+                return { content: [{ type: 'text' as const, text: 'query is required for action=search' }], isError: true, details: {} }
               }
-              text += `ID: ${p.id || p.paperId || 'N/A'}\n\n`
+              const source = params.source || 'semantic_scholar'
+              const field = params.field || 'all'
+              const page = Number(params.page || 1)
+              const limit = Number(params.limit || 20)
+              let results
+              if (source === 'local') {
+                results = await searchService.searchLocalHybrid(params.query, field, limit, (page - 1) * limit, 0.5, params.paperId)
+              } else if (source === 'ieee') {
+                results = await searchService.searchIEEE(params.query, field, page, limit, params.yearFrom, params.yearTo, { earlyAccess: params.earlyAccess, publication: params.publication })
+              } else {
+                results = await searchService.searchSemanticScholar(params.query, field, page, limit, params.yearFrom, params.yearTo)
+              }
+              const papers = results.papers || []
+              const total = Number(results.total || papers.length || 0)
+              const effectivePage = Number(results.page || page || 1)
+              const effectiveLimit = Number(results.limit || limit || papers.length || 20)
+              const totalPages = effectiveLimit > 0 ? Math.ceil(total / effectiveLimit) : 0
+              const hasNextPage = totalPages > 0 && effectivePage < totalPages
+              const nextPage = hasNextPage ? effectivePage + 1 : null
+              let text = `Found ${total} papers. Showing page ${effectivePage} of ${totalPages}, ${papers.length} result(s) on this page.\n`
+              text += hasNextPage
+                ? `More results are available: call yarc_search_papers with action=search and page=${nextPage}, limit=${effectiveLimit}.\n`
+                : 'No next page is available for this search.\n'
+              if (papers.length > 10) text += `The tool returned ${papers.length} result(s); this text summary lists the first 10, while details contains all results.\n`
+              text += '\n'
+              for (const p of papers.slice(0, 10)) {
+                const authors = p.authors?.slice(0, 3).join(', ') || 'Unknown'
+                const venue = p.venue || p.journal || ''
+                text += `**${p.title}**\nAuthors: ${authors}\nYear: ${p.year || 'N/A'}${venue ? ` | Venue: ${venue}` : ''}\n`
+                if (p.abstract) text += source === 'semantic_scholar' ? `Abstract: ${p.abstract}\n` : `Abstract: ${p.abstract.slice(0, 180)}...\n`
+                text += `ID: ${p.id || p.paperId || 'N/A'}\n\n`
+              }
+              return { content: [{ type: 'text' as const, text }], details: { papers, total, page: effectivePage, limit: effectiveLimit, totalPages, hasNextPage, nextPage, query: params.query, source, field, earlyAccess: params.earlyAccess, publication: params.publication, action } }
             }
-            return { content: [{ type: 'text' as const, text }], details: { papers, total, page: effectivePage, limit: effectiveLimit, totalPages, hasNextPage, nextPage, query, source, field, earlyAccess, publication } }
+
+            const sourcePaper = params.paper || (params.papers?.length === 1 ? params.papers[0] : undefined)
+            const source = params.source || sourcePaper?.source || (params.articleNumber ? 'ieee' : 'semantic_scholar')
+            if (!['local', 'ieee', 'semantic_scholar'].includes(source)) {
+              return { content: [{ type: 'text' as const, text: `Unsupported paper source: ${source}` }], isError: true, details: { action, source } }
+            }
+            const sourceId = params.paperId
+              || sourcePaper?.paperId
+              || (source === 'semantic_scholar' && sourcePaper?.id)
+              || (source === 'semantic_scholar' && (params.doi || sourcePaper?.doi) ? `DOI:${params.doi || sourcePaper.doi}` : undefined)
+              || (source === 'semantic_scholar' && (params.arxivId || sourcePaper?.arxivId) ? `ARXIV:${params.arxivId || sourcePaper.arxivId}` : undefined)
+              || (source === 'semantic_scholar' && (params.url || sourcePaper?.url) ? `URL:${params.url || sourcePaper.url}` : undefined)
+            const articleNumber = params.articleNumber || sourcePaper?.articleNumber || (source === 'ieee' ? sourcePaper?.id : undefined)
+
+            if (action === 'abstract') {
+              let paperResult: any
+              if (source === 'ieee') {
+                const number = String(articleNumber || '').match(/(?:arnumber=|\/document\/)(\d{4,20})/i)?.[1] || String(articleNumber || '')
+                if (!/^\d{4,20}$/.test(number)) return { content: [{ type: 'text' as const, text: 'articleNumber is required for IEEE action=abstract' }], isError: true, details: {} }
+                paperResult = (await ieeeXploreService.fetchArticleAbstract(number)).papers[0]
+              } else if (source === 'semantic_scholar') {
+                if (!sourceId) return { content: [{ type: 'text' as const, text: 'paperId is required for Semantic Scholar action=abstract' }], isError: true, details: {} }
+                paperResult = await searchService.fetchSemanticScholarPaper(String(sourceId))
+              } else {
+                return { content: [{ type: 'text' as const, text: 'action=abstract only supports ieee and semantic_scholar' }], isError: true, details: {} }
+              }
+              const complete = Boolean(paperResult?.abstract)
+              const text = `${paperResult?.title || 'Untitled'}\nSource: ${source}\nAbstract complete: ${complete ? 'yes' : 'no'}\n${paperResult?.abstract || 'No abstract was provided by the source.'}`
+              return { content: [{ type: 'text' as const, text }], details: { action, source, abstractComplete: complete, paper: paperResult, papers: paperResult ? [paperResult] : [] } }
+            }
+
+            if (action === 'preview') {
+              let document
+              if (params.temporaryId) {
+                const current = temporaryPdfService.get(params.temporaryId)
+                if (!current) return { content: [{ type: 'text' as const, text: 'Temporary PDF not found or expired' }], isError: true, details: { action, status: 'expired', temporaryId: params.temporaryId } }
+                document = params.async
+                  ? current.status === 'failed' && params.retryFailed
+                    ? await temporaryPdfService.create(current.sourceUrl, current.title, { retryFailed: true })
+                    : current
+                  : await temporaryPdfService.waitForReady(params.temporaryId, { timeoutMs: 180_000, retryFailed: params.retryFailed === true })
+              } else {
+                let previewPaper = sourcePaper || params
+                let pdfUrl = params.pdfUrl || previewPaper.pdfUrl || previewPaper.openAccessPdf?.url
+                if (!pdfUrl && typeof previewPaper.url === 'string' && /\.pdf(?:[?#]|$)/i.test(previewPaper.url)) pdfUrl = previewPaper.url
+                if (!pdfUrl && source === 'semantic_scholar' && sourceId) {
+                  try {
+                    previewPaper = await searchService.fetchSemanticScholarPaper(String(sourceId))
+                    pdfUrl = previewPaper.pdfUrl || previewPaper.openAccessPdf?.url
+                  } catch (err) {
+                    return { content: [{ type: 'text' as const, text: `Unable to resolve a Semantic Scholar PDF: ${(err as Error).message}` }], isError: true, details: { action, status: 'unavailable', source } }
+                  }
+                }
+                if (!pdfUrl && source === 'ieee' && articleNumber) {
+                  pdfUrl = `https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=${articleNumber}`
+                }
+                if (!pdfUrl || typeof pdfUrl !== 'string') return { content: [{ type: 'text' as const, text: 'No usable PDF URL is available for this result. Use action=abstract or provide pdfUrl.' }], isError: true, details: { action, status: 'unavailable', source } }
+                document = params.async
+                  ? await temporaryPdfService.create(pdfUrl, previewPaper.title, { retryFailed: params.retryFailed === true })
+                  : await temporaryPdfService.ensureReady(pdfUrl, previewPaper.title, { timeoutMs: 180_000, retryFailed: params.retryFailed === true })
+              }
+              if (document.status === 'parsing') {
+                const message = document.timedOut
+                  ? 'PDF parsing timed out and is still running; do not read a path yet. Retry preview with the same temporaryId.'
+                  : 'PDF is being parsed by MinerU; no readable path is available yet. Retry preview with the same temporaryId.'
+                return { content: [{ type: 'text' as const, text: message }], details: { action, status: 'parsing', temporaryId: document.id, retryable: true, timedOut: document.timedOut } }
+              }
+              if (document.status === 'failed' || !document.path) {
+                return { content: [{ type: 'text' as const, text: `PDF preview failed: ${document.error || 'MinerU parsing failed'}` }], isError: true, details: { action, status: 'failed', temporaryId: document.id, retryable: true, error: document.error } }
+              }
+              const text = `PDF preview is ready. Read the parsed Markdown with the built-in read tool.\nPath: ${document.path}\nTemporary ID: ${document.id}\nExpires: ${document.expiresAt || 'unknown'}\nMode: ${params.mode || 'full_text'}`
+              return { content: [{ type: 'text' as const, text }], details: { action, status: 'ready', temporaryId: document.id, path: document.path, title: document.title, source, expiresAt: document.expiresAt, mode: params.mode || 'full_text', startPage: params.startPage, endPage: params.endPage, maxChars: params.maxChars } }
+            }
+
+            if (action === 'import') {
+              const importPapers = Array.isArray(params.papers) ? params.papers : (sourcePaper ? [sourcePaper] : [params])
+              const usable = importPapers.filter((paper: any) => paper && (paper.title || paper.paperId || paper.id || paper.articleNumber || params.paperId || params.articleNumber))
+              if (!usable.length) return { content: [{ type: 'text' as const, text: 'paper or papers is required for action=import' }], isError: true, details: {} }
+              let categoryId = params.categoryId
+              if (params.category) {
+                const parent = params.parentCategory ? await findOrCreateCategory(params.parentCategory) : undefined
+                categoryId = (await findOrCreateCategory(params.category, parent?.id)).id
+              }
+              const normalizedPapers = usable.map((paper: any) => {
+                const provider = paper.source || source
+                const providedId = paper.id || (provider === 'semantic_scholar' ? params.paperId : provider === 'ieee' ? params.articleNumber : undefined)
+                return {
+                  ...paper,
+                  id: providedId || paper.id,
+                  source: provider,
+                  paperId: paper.paperId
+                    || (provider === 'semantic_scholar' && paper.id ? paper.id : undefined)
+                    || (provider === 'semantic_scholar' && paper.doi ? `DOI:${paper.doi}` : undefined)
+                    || (provider === 'semantic_scholar' && paper.arxivId ? `ARXIV:${paper.arxivId}` : undefined)
+                    || (provider === 'semantic_scholar' && paper.url ? `URL:${paper.url}` : undefined)
+                    || (provider === 'semantic_scholar' && params.paperId ? params.paperId : undefined),
+                  articleNumber: paper.articleNumber || (provider === 'ieee' ? paper.id : undefined) || (provider === 'ieee' ? params.articleNumber : undefined),
+                }
+              })
+              const job = importJobService.create({
+                papers: normalizedPapers,
+                categoryId,
+                requirePdf: params.requirePdf !== false,
+                extractMetadata: params.extractMetadata === true,
+                removeFromSearchCategory: params.removeFromSearchCategory,
+              })
+              return { content: [{ type: 'text' as const, text: `Queued formal library import job ${job.id} for ${job.total} paper(s). The job will download PDFs, parse them, and create library papers.` }], details: { action, status: 'queued', job, jobId: job.id, total: job.total, categoryId } }
+            }
+
+            return { content: [{ type: 'text' as const, text: `Unsupported yarc_search_papers action: ${action}` }], isError: true, details: {} }
           } catch (err) {
-            return { content: [{ type: 'text' as const, text: `Search failed: ${(err as Error).message}` }], isError: true, details: {} }
+            return { content: [{ type: 'text' as const, text: `yarc_search_papers ${params.action || 'search'} failed: ${(err as Error).message}` }], isError: true, details: {} }
           }
         },
       }),
@@ -2249,7 +2402,7 @@ export class PiService {
           if (ctx) this.emitAgentToolEvent(event.isError ? 'failed' : 'completed', ctx.name, ctx.args, event.result, !!event.isError)
           if (ctx?.name === 'yarc_search_papers' && !event.isError) {
             const details = event.result?.details || {}
-            if (Array.isArray(details.papers)) {
+            if (details.action === 'search' && Array.isArray(details.papers)) {
               push({
                 type: 'search_results',
                 toolCallId,
@@ -2487,7 +2640,7 @@ export class PiService {
     if (status !== 'completed' || isError) return
 
     // yarc_search_papers
-    if (toolName === 'yarc_search_papers' && Array.isArray(details.papers)) {
+    if (toolName === 'yarc_search_papers' && details.action === 'search' && Array.isArray(details.papers)) {
       sseHub.emit({
         type: 'search-results',
         query: String(details.query || args?.query || ''),

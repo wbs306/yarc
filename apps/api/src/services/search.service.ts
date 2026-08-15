@@ -310,6 +310,7 @@ export class SearchService {
     const metadata = (paper.metadata || {}) as Record<string, unknown>
     return {
       id: paper.id,
+      paperId: paper.id,
       title: paper.title,
       abstract: paper.abstract,
       authors: paper.authors || [],
@@ -330,6 +331,7 @@ export class SearchService {
     const publicationVenue = paper.publicationVenue || {}
     return {
       id: paper.paperId,
+      paperId: paper.paperId,
       title: cleanText(paper.title) || '',
       abstract: cleanText(paper.abstract),
       authors: Array.isArray(paper.authors)
@@ -591,6 +593,7 @@ export class SearchService {
 
       const papers: SearchPaper[] = Array.from(paperMap.values()).map((r) => ({
         id: r.paperId,
+        paperId: r.paperId,
         title: r.title,
         abstract: r.snippet,
         authors: r.authors || [],
@@ -809,6 +812,7 @@ export class SearchService {
         const titleMatches = normalizeForSearch(p.title).includes(normalizedQuery)
         return {
           id: p.id,
+          paperId: p.id,
           title: p.title,
           abstract: cleanSnippetForDisplay(p.abstract || snippet?.content || '', 700) || null,
           authors: p.authors,
@@ -911,6 +915,55 @@ export class SearchService {
 
   // ── Semantic Scholar Search (direct TypeScript integration) ────────────
 
+  private mapSemanticScholarPaper(p: any): SearchPaper {
+    const externalIds = p.externalIds || {}
+    const publicationVenue = p.publicationVenue || {}
+    return {
+      id: p.paperId,
+      paperId: p.paperId,
+      title: cleanText(p.title) || '',
+      abstract: cleanText(p.abstract),
+      authors: Array.isArray(p.authors)
+        ? p.authors
+            .map((a: any) => cleanText(a.name))
+            .filter((a: string | null): a is string => !!a)
+        : [],
+      year: numberOrNull(p.year),
+      url: cleanText(p.url),
+      pdfUrl: cleanText(p.openAccessPdf?.url),
+      doi: cleanText(externalIds.DOI),
+      arxivId: cleanText(externalIds.ArXiv),
+      journal: cleanText(publicationVenue.name),
+      venue: cleanText(p.venue) || cleanText(publicationVenue.name),
+      source: 'semantic_scholar',
+      citationCount: numberOrNull(p.citationCount),
+      referenceCount: numberOrNull(p.referenceCount),
+      publicationDate: cleanText(p.publicationDate),
+      publicationTypes: p.publicationTypes || [],
+      fieldsOfStudy: p.fieldsOfStudy || [],
+      openAccessPdf: p.openAccessPdf || null,
+      tldr: cleanText(p.tldr?.text),
+    }
+  }
+
+  async fetchSemanticScholarPaper(paperId: string): Promise<SearchPaper> {
+    const identifier = paperId.trim()
+    if (!identifier) throw new Error('Semantic Scholar paperId is required')
+    const normalizedIdentifier = identifier.replace(/^S2:/i, '')
+
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'User-Agent': 'YARC/2.0 SemanticScholarSearch',
+    }
+    if (config.semanticScholarApiKey) headers['x-api-key'] = config.semanticScholarApiKey
+
+    const data = await fetchJsonWithRetry(
+      `${S2_API_BASE}/paper/${encodeURIComponent(normalizedIdentifier)}?fields=${S2_FIELDS}`,
+      { headers }
+    )
+    return this.mapSemanticScholarPaper(data)
+  }
+
   async searchSemanticScholar(
     query: string,
     _field = 'all',
@@ -951,34 +1004,7 @@ export class SearchService {
 
     try {
       const data = await fetchJsonWithRetry(`${S2_API_BASE}/paper/search?${params}`, { headers })
-      const papers = (data.data || []).map((p: any): SearchPaper => {
-        const externalIds = p.externalIds || {}
-        const publicationVenue = p.publicationVenue || {}
-        return {
-          id: p.paperId,
-          title: cleanText(p.title) || '',
-          abstract: cleanText(p.abstract),
-          authors: Array.isArray(p.authors)
-            ? p.authors
-                .map((a: any) => cleanText(a.name))
-                .filter((a: string | null): a is string => !!a)
-            : [],
-          year: numberOrNull(p.year),
-          url: cleanText(p.url),
-          doi: cleanText(externalIds.DOI),
-          arxivId: cleanText(externalIds.ArXiv),
-          journal: cleanText(publicationVenue.name),
-          venue: cleanText(p.venue) || cleanText(publicationVenue.name),
-          source: 'semantic_scholar' as const,
-          citationCount: numberOrNull(p.citationCount),
-          referenceCount: numberOrNull(p.referenceCount),
-          publicationDate: cleanText(p.publicationDate),
-          publicationTypes: p.publicationTypes || [],
-          fieldsOfStudy: p.fieldsOfStudy || [],
-          openAccessPdf: p.openAccessPdf || null,
-          tldr: cleanText(p.tldr?.text),
-        }
-      })
+      const papers = (data.data || []).map((p: any): SearchPaper => this.mapSemanticScholarPaper(p))
 
       return {
         papers,

@@ -29,6 +29,8 @@ export interface TemporaryPdfDocument {
   status: 'parsing' | 'ready' | 'failed'
   path?: string
   error?: string
+  timedOut?: boolean
+  expiresAt?: string
 }
 
 async function request<T>(endpoint: string, options: RequestInitExt = {}): Promise<T> {
