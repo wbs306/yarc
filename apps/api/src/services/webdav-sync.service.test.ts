@@ -8,6 +8,7 @@ import { after, before, describe, it } from 'node:test'
 import {
   WebDavClient,
   isExcludedPath,
+  isSafeToDeleteRemoteFile,
   isSelectedPath,
   normalizeWebDavConfig,
   shouldSyncPath,
@@ -17,6 +18,7 @@ import {
 const directories = new Set(['/dav/'])
 const files = new Map<string, { data: Buffer; modified: number }>()
 const propfindRequests: string[] = []
+const deleteRequests: string[] = []
 let server: ReturnType<typeof createServer>
 let baseUrl = ''
 
@@ -101,6 +103,18 @@ before(async () => {
         ETag: `"${data.byteLength}-${modified}"`,
         'Last-Modified': new Date(modified).toUTCString(),
       })
+      response.end()
+      return
+    }
+
+    if (request.method === 'DELETE') {
+      deleteRequests.push(path)
+      if (!files.has(path)) {
+        response.writeHead(404)
+      } else {
+        files.delete(path)
+        response.writeHead(204)
+      }
       response.end()
       return
     }
@@ -192,10 +206,22 @@ describe('WebDAV path selection and exclusions', () => {
       syncOnLocalChange: true,
     }).syncOnLocalChange, false)
     assert.equal(normalizeWebDavConfig({
+      direction: 'download',
+      propagateLocalDeletions: true,
+    }).propagateLocalDeletions, false)
+    assert.equal(normalizeWebDavConfig({
+      direction: 'upload',
+      propagateLocalDeletions: true,
+    }).propagateLocalDeletions, true)
+    assert.equal(normalizeWebDavConfig({
       direction: 'upload',
       syncOnLocalChange: true,
       localChangeDebounceSeconds: 1,
     }).localChangeDebounceSeconds, 2)
+    const remote = { path: 'notes/delete.md', size: 4, modified: 1_000, etag: 'etag' }
+    assert.equal(isSafeToDeleteRemoteFile({ local: '4:1000', remote: '4:1000:etag' }, remote), true)
+    assert.equal(isSafeToDeleteRemoteFile({ local: '4:1000', remote: '4:1000:changed' }, remote), false)
+    assert.equal(isSafeToDeleteRemoteFile(undefined, remote), false)
     assert.throws(
       () => normalizeWebDavConfig({ url: 'https://user:secret@example.com/dav' }),
       /不要把凭据写在 WebDAV 地址中/,
@@ -227,6 +253,22 @@ describe('WebDavClient', () => {
 
     const downloaded = await client.download('notes/example.md')
     assert.equal(new TextDecoder().decode(downloaded), '# synced\n')
+  })
+
+  it('deletes a remote file when requested', async () => {
+    const client = new WebDavClient({
+      url: baseUrl,
+      username: 'tester',
+      remotePath: 'sync-root',
+      timeoutSeconds: 5,
+    }, 'secret')
+
+    await client.upload('delete/example.md', new TextEncoder().encode('delete me'), Date.now())
+    deleteRequests.length = 0
+    await client.deleteFile('delete/example.md')
+
+    assert.deepEqual(deleteRequests, ['/dav/sync-root/delete/example.md'])
+    assert.equal(files.has('/dav/sync-root/delete/example.md'), false)
   })
 
   it('only traverses selected remote directory branches', async () => {

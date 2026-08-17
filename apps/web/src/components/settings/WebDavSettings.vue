@@ -25,6 +25,7 @@ const defaultConfig = (): WebDavSyncConfig => ({
   scheduleEnabled: false,
   intervalMinutes: 60,
   syncOnLocalChange: false,
+  propagateLocalDeletions: false,
   localChangeDebounceSeconds: 10,
   timeoutSeconds: 30,
 })
@@ -216,7 +217,7 @@ const syncNow = async () => {
   try {
     if (!await saveSettings(true)) return
     const result = await syncStore.syncNow()
-    message.value = `同步完成：上传 ${result.uploaded}，下载 ${result.downloaded}，跳过 ${result.skipped}，冲突 ${result.conflicts}，失败 ${result.failed}`
+    message.value = `同步完成：上传 ${result.uploaded}，下载 ${result.downloaded}，删除远端 ${result.deleted}，跳过 ${result.skipped}，冲突 ${result.conflicts}，失败 ${result.failed}`
   } catch (err) {
     error.value = (err as Error).message || 'WebDAV 同步失败'
   } finally {
@@ -229,7 +230,10 @@ watch(() => config.value.syncAll, (syncAll) => {
 })
 
 watch(() => config.value.direction, (direction) => {
-  if (direction === 'download') config.value.syncOnLocalChange = false
+  if (direction === 'download') {
+    config.value.syncOnLocalChange = false
+    config.value.propagateLocalDeletions = false
+  }
 })
 
 watch(() => status.value.phase, (phase) => {
@@ -278,7 +282,8 @@ onMounted(() => {
           </div>
           <div v-if="status.lastResult" class="result-summary">
             最近结果：上传 {{ status.lastResult.uploaded }} · 下载 {{ status.lastResult.downloaded }} ·
-            跳过 {{ status.lastResult.skipped }} · 冲突 {{ status.lastResult.conflicts }} · 失败 {{ status.lastResult.failed }}
+            删除远端 {{ status.lastResult.deleted ?? 0 }} · 跳过 {{ status.lastResult.skipped }} ·
+            冲突 {{ status.lastResult.conflicts }} · 失败 {{ status.lastResult.failed }}
           </div>
           <div v-if="status.lastResult?.errors.length" class="error-list">
             <div v-for="item in status.lastResult.errors.slice(0, 8)" :key="`${item.action}:${item.path}`">
@@ -340,7 +345,7 @@ onMounted(() => {
       <section class="settings-card">
         <div class="card-header">
           <h3>同步范围与方向</h3>
-          <p>本地同步根目录固定为 <code>data/</code>。同步不会删除本地或远端文件。</p>
+          <p>本地同步根目录固定为 <code>data/</code>。默认不传播删除；开启下方选项后，仅会删除此前成功同步且远端未变化的文件。</p>
         </div>
         <div class="card-body">
           <div class="direction-grid">
@@ -356,6 +361,13 @@ onMounted(() => {
             </button>
           </div>
           <p class="selection-note">当前模式：{{ selectedDirection.label }}。双向首次遇到同名且内容不同的文件时，会根据修改时间判断；无法安全判断时报告冲突并跳过。</p>
+
+          <label class="switch-row deletion-switch">
+            <span><strong>同步本地删除到远端</strong><small>开启后，仅删除此前成功同步且远端没有变化的文件；远端独有文件和删除冲突会保留。</small></span>
+            <input v-model="config.propagateLocalDeletions" type="checkbox" :disabled="config.direction === 'download'" />
+          </label>
+          <p v-if="config.direction === 'download'" class="deletion-note">仅下载模式不会执行远端删除。</p>
+          <p v-else class="deletion-note warning">这是破坏性操作；开启后，自动同步也会将符合条件的本地删除同步到远端。</p>
 
           <div class="scope-panel" :class="{ expanded: !config.syncAll }">
             <label class="switch-row scope-switch">
@@ -436,7 +448,7 @@ onMounted(() => {
           </div>
           <div class="auto-sync-row">
             <label class="switch-row">
-              <span><strong>本地变化后同步</strong><small>监听选中范围内的新建和修改；连续变化会合并，删除操作不会上传。</small></span>
+              <span><strong>本地变化后同步</strong><small>监听选中范围内的新建和修改；开启上方选项后，也会将本地删除纳入自动同步。</small></span>
               <input v-model="config.syncOnLocalChange" type="checkbox" :disabled="config.direction === 'download'" />
             </label>
             <label class="field interval-field" :class="{ disabled: config.direction === 'download' }">
@@ -453,7 +465,7 @@ onMounted(() => {
       <div v-if="error" class="feedback error">{{ error }}</div>
 
       <div class="footer-actions">
-        <span>“立即同步”会先保存当前表单。同步过程不传播删除操作。</span>
+        <span>“立即同步”会先保存当前表单。远端删除仅在启用“同步本地删除到远端”且满足安全条件时执行。</span>
         <div>
           <button class="btn secondary" :disabled="saving || syncing || testing || pausing || status.running" @click="saveSettings(false)">
             {{ saving && !syncing ? '保存中…' : '保存设置' }}
@@ -531,6 +543,9 @@ onMounted(() => {
 .direction-option span { font-size: 11px; line-height: 1.5; color: var(--color-text-muted); }
 .direction-option.active { border-color: var(--color-primary); background: var(--color-primary-soft); }
 .selection-note { margin: 10px 0 16px; color: var(--color-text-muted); font-size: 11px; line-height: 1.55; }
+.deletion-switch { margin-bottom: 6px; padding: 11px 13px; border: 1px solid color-mix(in srgb, #ef4444 24%, var(--color-border)); border-radius: 8px; background: color-mix(in srgb, #ef4444 4%, var(--color-bg)); }
+.deletion-note { margin: 0 0 14px; color: var(--color-text-muted); font-size: 10px; line-height: 1.5; }
+.deletion-note.warning { color: #b45309; }
 .scope-panel { overflow: hidden; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg); }
 .scope-panel.expanded { border-color: color-mix(in srgb, var(--color-primary) 28%, var(--color-border)); }
 .scope-switch { min-height: 62px; padding: 11px 13px; }

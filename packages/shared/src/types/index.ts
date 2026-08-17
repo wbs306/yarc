@@ -431,6 +431,7 @@ export interface WebDavSyncConfig {
   scheduleEnabled: boolean
   intervalMinutes: number
   syncOnLocalChange: boolean
+  propagateLocalDeletions: boolean
   localChangeDebounceSeconds: number
   timeoutSeconds: number
 }
@@ -446,7 +447,7 @@ export interface WebDavSyncTreeNode {
 
 export interface WebDavSyncErrorItem {
   path: string
-  action: 'upload' | 'download' | 'conflict' | 'scan'
+  action: 'upload' | 'download' | 'delete' | 'conflict' | 'scan'
   message: string
 }
 
@@ -456,6 +457,7 @@ export interface WebDavSyncResult {
   finishedAt: string
   uploaded: number
   downloaded: number
+  deleted: number
   skipped: number
   conflicts: number
   failed: number

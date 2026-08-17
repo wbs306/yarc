@@ -48,6 +48,7 @@ export const DEFAULT_WEB_DAV_SYNC_CONFIG: WebDavSyncConfig = {
   scheduleEnabled: false,
   intervalMinutes: 60,
   syncOnLocalChange: false,
+  propagateLocalDeletions: false,
   localChangeDebounceSeconds: 10,
   timeoutSeconds: 30,
 }
@@ -168,6 +169,9 @@ export const normalizeWebDavConfig = (
     syncOnLocalChange: direction !== 'download' && (typeof source.syncOnLocalChange === 'boolean'
       ? source.syncOnLocalChange
       : base.syncOnLocalChange),
+    propagateLocalDeletions: direction !== 'download' && (typeof source.propagateLocalDeletions === 'boolean'
+      ? source.propagateLocalDeletions
+      : base.propagateLocalDeletions),
     localChangeDebounceSeconds: clampInteger(source.localChangeDebounceSeconds, base.localChangeDebounceSeconds, 2, 300),
     timeoutSeconds: clampInteger(source.timeoutSeconds, base.timeoutSeconds, 5, 300),
   }
@@ -519,6 +523,12 @@ export class WebDavClient {
     return this.finishUpload(normalizedPath)
   }
 
+  async deleteFile(path: string) {
+    await this.request(appendUrlPath(this.rootUrl, normalizeRelativePath(path)), {
+      method: 'DELETE',
+    }, [200, 202, 204, 404])
+  }
+
   private downloadResponse(path: string) {
     return this.request(appendUrlPath(this.rootUrl, normalizeRelativePath(path)), { method: 'GET' }, [200])
   }
@@ -548,6 +558,11 @@ export class WebDavClient {
 
 const localSignature = (file: LocalFile) => `${file.size}:${Math.round(file.modified)}`
 const remoteSignature = (file: RemoteFile) => `${file.size}:${file.modified ?? ''}:${file.etag}`
+
+export const isSafeToDeleteRemoteFile = (
+  previous: Pick<ManifestEntry, 'local' | 'remote'> | null | undefined,
+  remote: RemoteFile,
+) => Boolean(previous?.local && previous.remote && previous.remote === remoteSignature(remote))
 
 const hashFile = async (absolutePath: string) => {
   const digest = createHash('sha256')
@@ -777,7 +792,7 @@ export class WebDavSyncService {
   }
 
   private handleLocalChange(event: DataChangeEvent) {
-    if (event.source === 'webdav' || event.kind === 'delete') return
+    if (event.source === 'webdav' || (event.kind === 'delete' && !this.config.propagateLocalDeletions)) return
     if (!this.config.enabled || !this.isRelevantLocalChange(event.path)) return
     if (this.config.paused) {
       this.changedWhilePaused = true
@@ -1188,7 +1203,9 @@ export class WebDavSyncService {
       const remoteCandidates = new Map([...remoteFiles].filter(([path]) => shouldSyncPath(path, syncConfig)))
       const paths = new Set<string>()
       if (syncConfig.direction !== 'download') for (const path of localFiles.keys()) paths.add(path)
-      if (syncConfig.direction !== 'upload') for (const path of remoteCandidates.keys()) paths.add(path)
+      if (syncConfig.direction !== 'upload' || syncConfig.propagateLocalDeletions) {
+        for (const path of remoteCandidates.keys()) paths.add(path)
+      }
       const sortedPaths = [...paths].sort((a, b) => a.localeCompare(b))
 
       const result: WebDavSyncResult = {
@@ -1197,6 +1214,7 @@ export class WebDavSyncService {
         finishedAt: startedAt,
         uploaded: 0,
         downloaded: 0,
+        deleted: 0,
         skipped: 0,
         conflicts: 0,
         failed: 0,
@@ -1224,6 +1242,14 @@ export class WebDavSyncService {
         remoteCandidates.set(path, remote)
         recordManifest(path, local, remote)
         result.uploaded++
+      }
+
+      const deleteRemote = async (path: string) => {
+        currentAction = 'delete'
+        await client.deleteFile(path)
+        remoteCandidates.delete(path)
+        delete manifest[path]
+        result.deleted++
       }
 
       const download = async (path: string, remote: RemoteFile) => {
@@ -1265,7 +1291,17 @@ export class WebDavSyncService {
           const remote = remoteCandidates.get(path)
           const previous = manifest[path]
 
-          if (syncConfig.direction === 'upload') {
+          if (syncConfig.propagateLocalDeletions && syncConfig.direction !== 'download' && !local && remote) {
+            if (isSafeToDeleteRemoteFile(previous, remote)) {
+              await deleteRemote(path)
+            } else if (previous?.local && previous.remote) {
+              conflict(path, '本地文件已删除，但远端文件在上次同步后发生了变化，未删除以避免覆盖远端修改')
+            } else if (syncConfig.direction === 'upload') {
+              result.skipped++
+            } else {
+              await download(path, remote)
+            }
+          } else if (syncConfig.direction === 'upload') {
             if (!local) {
               result.skipped++
             } else if (previous?.local === localSignature(local) && remote && previous.remote === remoteSignature(remote)) {
@@ -1332,8 +1368,8 @@ export class WebDavSyncService {
 
       const problemCount = result.failed + result.conflicts
       const message = problemCount
-        ? `同步完成：上传 ${result.uploaded}，下载 ${result.downloaded}，冲突 ${result.conflicts}，失败 ${result.failed}`
-        : `同步完成：上传 ${result.uploaded}，下载 ${result.downloaded}，跳过 ${result.skipped}`
+        ? `同步完成：上传 ${result.uploaded}，下载 ${result.downloaded}，删除远端 ${result.deleted}，冲突 ${result.conflicts}，失败 ${result.failed}`
+        : `同步完成：上传 ${result.uploaded}，下载 ${result.downloaded}，删除远端 ${result.deleted}，跳过 ${result.skipped}`
       const nextSyncAt = this.config.enabled && !this.config.paused && this.config.scheduleEnabled
         ? trigger === 'local-change'
           ? this.status.nextSyncAt
