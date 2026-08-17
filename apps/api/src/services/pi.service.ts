@@ -843,7 +843,7 @@ export class PiService {
       defineTool({
         name: 'yarc_search_papers',
         label: 'Search and Process Papers',
-        description: 'Search papers and process external results. action=search finds papers; action=abstract gets a complete external abstract; action=preview temporarily downloads and MinerU-parses a PDF, returning a readable Markdown path only when ready; action=import queues a formal library import. action defaults to search. Use import only when the user explicitly asks to save/import a paper.',
+        description: 'Search papers and process external results. action=search searches papers and defaults to IEEE for external searches; action=abstract gets a complete external abstract; action=preview temporarily downloads and MinerU-parses a PDF, returning a readable Markdown path only when status=ready; while parsing or timed out, retry with the same temporaryId and do not read a path; action=import queues a formal library import. Use import only when the user explicitly asks to save/import a paper.',
         parameters: Type.Object({
           action: Type.Optional(Type.Union([
             Type.Literal('search'),
@@ -856,7 +856,7 @@ export class PiService {
             Type.Literal('local'),
             Type.Literal('ieee'),
             Type.Literal('semantic_scholar')
-          ], { description: 'Search/source provider. Defaults to semantic_scholar.' })),
+          ], { description: 'Search/source provider. Defaults to ieee for external searches; use local for the library and semantic_scholar for broader searches.' })),
           paperId: Type.Optional(Type.String({ description: 'Local paper ID for local search, or Semantic Scholar paperId for abstract/preview/import' })),
           articleNumber: Type.Optional(Type.String({ description: 'IEEE article number for abstract/preview/import' })),
           doi: Type.Optional(Type.String({ description: 'DOI used to identify an external paper' })),
@@ -909,7 +909,7 @@ export class PiService {
               if (typeof params.query !== 'string' || !params.query.trim()) {
                 return { content: [{ type: 'text' as const, text: 'query is required for action=search' }], isError: true, details: {} }
               }
-              const source = params.source || 'semantic_scholar'
+              const source = params.source || 'ieee'
               const field = params.field || 'all'
               const page = Number(params.page || 1)
               const limit = Number(params.limit || 20)
@@ -1189,7 +1189,7 @@ export class PiService {
       defineTool({
         name: 'yarc_papers',
         label: 'Manage Papers',
-        description: 'Unified paper management. Actions: list (query papers), read (read local parsed PDF content), save (batch save to library/search), classify (batch move to category), update (batch update metadata), delete (batch delete with cascade). Use type="library" for uploaded PDFs or type="search" for search collections.',
+        description: 'Unified paper management. Actions: list (query papers), read (read local parsed PDF content), save (batch save to library/search), classify (batch move to category), update (batch update metadata), delete (batch delete with cascade). Use type="library" for local papers or type="search" for search collections. For formal external PDF imports, prefer yarc_search_papers action=import; the legacy save type=library importPdf=true path remains compatible.',
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal('list'),
@@ -1559,7 +1559,7 @@ export class PiService {
       defineTool({
         name: 'yarc_system',
         label: 'YARC System',
-        description: 'Inspect YARC backend status and enqueue maintenance jobs. Use action="status" to read paper/queue/MinerU/vector status. Use action="maintenance" to enqueue re-MinerU parsing, re-embedding, or re-summarization jobs; use dryRun=true first for broad scopes.',
+        description: 'Inspect YARC backend status and enqueue maintenance jobs. Use action="status" to read paper, queue, MinerU, vector, and summary status. Use action="maintenance" with maintenanceAction="mineru", "embeddings", or "summaries"; scope defaults to needed, while all or explicit paperIds target broader sets. Use dryRun=true before broad maintenance to inspect matched targets without enqueueing jobs.',
         parameters: Type.Object({
           action: Type.Union([Type.Literal('status'), Type.Literal('maintenance')], { description: 'status reads backend status; maintenance enqueues maintenance jobs' }),
           maintenanceAction: Type.Optional(Type.Union([
@@ -1647,7 +1647,7 @@ export class PiService {
       defineTool({
         name: 'yarc_notes',
         label: 'Manage Notes',
-        description: 'Unified note management. Actions: list, create, update, delete, and sync. sync imports existing linked Markdown files into database notes and accepts paperId or paperIds.',
+        description: 'Unified note management. Actions: list, create, update, delete, and sync. Summary notes can be written directly when the user requests a paper summary; organized notes should be drafted and reviewed before writing. sync imports existing linked Markdown files into database notes and accepts paperId or paperIds.',
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal('list'),
