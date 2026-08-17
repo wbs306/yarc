@@ -102,6 +102,9 @@ conversations.post('/:id/btw', async (c) => {
         branchId: branchId || undefined,
         model: typeof body.model === 'string' ? body.model : conv.model || undefined,
         reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort : undefined,
+        thinkingEnabled: typeof body.thinkingEnabled === 'boolean'
+          ? body.thinkingEnabled
+          : (body.reasoningEffort === 'off' ? false : undefined),
         question,
         abortSignal: run.abortController.signal,
         onEvent: (event: ChatEvent) => {

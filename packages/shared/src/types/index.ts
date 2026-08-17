@@ -209,11 +209,17 @@ export type CurrentChatResource =
   | { type: 'paper'; paperId: string; title: string }
   | { type: 'file'; path: string; name?: string }
 
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ChatThinkingLevel = 'off' | ThinkingLevel
+
 export interface ChatRequest {
   type: 'chat'
   content: string
   model?: string
-  reasoning_effort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  /** A Pi thinking level; `off` is represented by thinking_enabled instead. */
+  reasoning_effort?: ThinkingLevel
+  /** Whether the selected reasoning-capable model should emit thinking. */
+  thinking_enabled?: boolean
   branchId?: string
   editMessageId?: string
   context?: {

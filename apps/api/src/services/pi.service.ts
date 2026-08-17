@@ -23,8 +23,26 @@ import { liveFileService } from './live-file.service.js'
 import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/mineru-content-v2.js'
 import type { AgentInteractionResponse, ChatEvent } from '@yarc/shared'
 
-const DEFAULT_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh'] as const
-const PI_THINKING_LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+// `off` is a session control, not a model/provider thinking level. Keep it
+// out of model maps and capability lists; the chat UI adds it separately.
+const DEFAULT_THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const
+const PI_THINKING_LEVEL_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+const resolveSessionThinkingLevel = (options: {
+  reasoningEffort?: string
+  thinkingEnabled?: boolean
+}): string => {
+  const effort = options.reasoningEffort?.trim().toLowerCase()
+
+  // New clients send thinkingEnabled=false for the UI's `off` choice. Keep
+  // accepting the old `reasoningEffort: 'off'` shape for existing callers.
+  if (options.thinkingEnabled === false) return 'off'
+  if (options.thinkingEnabled === undefined && (!effort || effort === 'off')) return 'off'
+
+  // An enabled request without an explicit level uses Pi's normal medium
+  // default. Pi will clamp it to the selected model's supported levels.
+  return effort && effort !== 'off' ? effort : 'medium'
+}
 
 const orderThinkingLevels = (levels: Iterable<string>): string[] => {
   const order = new Map<string, number>(PI_THINKING_LEVEL_ORDER.map((level, index) => [level, index]))
@@ -52,6 +70,25 @@ export class PiService {
       modelsPath: join(agentWorkspace.agentDir, 'models.json'),
       modelsStorePath: join(agentWorkspace.agentDir, 'models-store.json'),
     })
+  }
+
+  /**
+   * `off` is controlled by the session, not by a provider mapping. Older
+   * models.json files may still contain `thinkingLevelMap.off`; hide that
+   * legacy entry from the SDK model used by a chat session so setThinkingLevel
+   * can always select the off state without mutating the user's config file.
+   */
+  private modelForSession(model: any): any {
+    const map = model?.thinkingLevelMap
+    if (!map || !Object.prototype.hasOwnProperty.call(map, 'off')) return model
+
+    const thinkingLevelMap = Object.fromEntries(
+      Object.entries(map).filter(([level]) => level !== 'off')
+    )
+    return {
+      ...model,
+      thinkingLevelMap: Object.keys(thinkingLevelMap).length ? thinkingLevelMap : undefined,
+    }
   }
 
   // ── Pi session persistence ──────────────────────────────────────────────
@@ -1922,6 +1959,7 @@ export class PiService {
     branchId?: string
     model?: string
     reasoningEffort?: string
+    thinkingEnabled?: boolean
     question: string
     abortSignal?: AbortSignal
     onEvent?: (event: ChatEvent) => void
@@ -1978,7 +2016,7 @@ export class PiService {
       const result = await createAgentSession({
         sessionManager,
         modelRuntime: this.modelRuntime,
-        ...(model ? { model } : {}),
+        ...(model ? { model: this.modelForSession(model) } : {}),
         resourceLoader,
         customTools: this.createWorkspaceToolOverrides(agentWorkspace.cwd),
       })
@@ -1988,8 +2026,7 @@ export class PiService {
       return { answer: 'Session 创建失败。', thinking: undefined, events: [] }
     }
 
-    const effort = options.reasoningEffort || 'off'
-    session.setThinkingLevel(effort)
+    session.setThinkingLevel(resolveSessionThinkingLevel(options))
 
     const sidePrompt = [
       'You are answering a side question (not part of the main conversation).',
@@ -2058,6 +2095,7 @@ export class PiService {
     assistantMessageId?: string
     model?: string
     reasoningEffort?: string
+    thinkingEnabled?: boolean
     customInstructions?: string
     _cancelled?: string
   }): AsyncGenerator<ChatEvent> {
@@ -2112,7 +2150,7 @@ export class PiService {
       const result = await createAgentSession({
         sessionManager,
         modelRuntime: this.modelRuntime,
-        ...(model ? { model } : {}),
+        ...(model ? { model: this.modelForSession(model) } : {}),
         resourceLoader,
         customTools: this.createWorkspaceToolOverrides(agentWorkspace.cwd),
       })
@@ -2124,7 +2162,7 @@ export class PiService {
       return
     }
 
-    session.setThinkingLevel(options.reasoningEffort || 'off')
+    session.setThinkingLevel(resolveSessionThinkingLevel(options))
     let unregisterAbortHandler: (() => void) | null = null
 
     try {
@@ -2181,6 +2219,7 @@ export class PiService {
     systemPrompt?: string
     prompt: string
     reasoningEffort?: string
+    thinkingEnabled?: boolean
     _cancelled?: string  // messageId to check for cancellation
   }): AsyncGenerator<ChatEvent> {
     await this.initPi()
@@ -2250,7 +2289,7 @@ export class PiService {
       const result = await createAgentSession({
         sessionManager,
         modelRuntime: this.modelRuntime,
-        ...(model ? { model } : {}),
+        ...(model ? { model: this.modelForSession(model) } : {}),
         customTools: [...this.createWorkspaceToolOverrides(agentWorkspace.cwd), ...enabledTools],
         resourceLoader,
       })
@@ -2262,11 +2301,10 @@ export class PiService {
       return
     }
 
-    // Apply reasoning effort / thinking level. Always set it explicitly so
-    // Pi's default or a reopened session's previous level (often `medium`) does
-    // not override the chat box selector. `off` is a real user choice.
-    const effort = options.reasoningEffort || 'off'
-    session.setThinkingLevel(effort)
+    // Apply the UI's independent thinking-enabled flag and the actual level.
+    // Always set it explicitly so a reopened session cannot override the
+    // current chat selector.
+    session.setThinkingLevel(resolveSessionThinkingLevel(options))
 
     let unregisterAbortHandler: (() => void) | null = null
 
@@ -2773,11 +2811,14 @@ export class PiService {
     try {
       await this.initPi()
       const models = this.modelRuntime ? await this.modelRuntime.getAvailable() : []
-      const runtimeLevels = models.flatMap((model: any) => Object.keys(model.thinkingLevelMap || {}))
+      const runtimeLevels = models.flatMap((model: any) =>
+        Object.keys(model.thinkingLevelMap || {}).filter(level => level !== 'off')
+      )
       return {
         // Pi 0.83 exposes this canonical set through its SDK model metadata;
         // include all current levels so a custom model can opt into `max` even
-        // before another configured model advertises it.
+        // before another configured model advertises it. `off` is deliberately
+        // excluded because it is a session toggle, not a model mapping.
         levels: orderThinkingLevels([...PI_THINKING_LEVEL_ORDER, ...runtimeLevels]),
         defaultLevels: [...DEFAULT_THINKING_LEVELS],
       }
@@ -2814,13 +2855,14 @@ export class PiService {
           maxTokens: m.maxTokens,
           cost: m.cost,
           // Pi uses null to mean hidden/unsupported. YARC starts with its
-          // five default controls and adds explicitly mapped Pi levels (such
-          // as `minimal` or `max`), independent of JSON insertion order.
+          // default actual thinking levels and adds explicitly mapped Pi levels
+          // (such as `minimal` or `max`), independent of JSON insertion order.
+          // `off` is always added by the chat UI for reasoning models.
           thinkingLevels: m.reasoning
             ? orderThinkingLevels([
               ...DEFAULT_THINKING_LEVELS.filter(level => m.thinkingLevelMap?.[level] !== null),
               ...Object.entries(m.thinkingLevelMap || {})
-                .filter(([, value]) => value !== null)
+                .filter(([level, value]) => level !== 'off' && value !== null)
                 .map(([level]) => level),
             ])
             : undefined,

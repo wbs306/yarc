@@ -526,9 +526,13 @@ const handleWebSlashCommand = async (text: string): Promise<boolean> => {
       return true
     }
 
-    const levels = currentModelLevels.value?.length
-      ? currentModelLevels.value
-      : ['off', 'low', 'medium', 'high', 'xhigh']
+    // `off` is a session toggle, so expose it for every reasoning model even
+    // when the model metadata only contains configured provider levels.
+    const levels = [
+      'off',
+      ...(currentModelLevels.value ?? ['low', 'medium', 'high', 'xhigh'])
+        .filter(level => level !== 'off'),
+    ]
     const requested = thinkingMatch[1]?.trim().toLowerCase()
     if (!requested) {
       const currentIndex = levels.indexOf(chatStore.reasoningEffort)

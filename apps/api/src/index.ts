@@ -606,10 +606,15 @@ const setupChatBridge = () => {
      * Send a chat message and yield events.
      * This is an async generator that yields ChatEvent objects.
      */
-    sendMessage: async function* (content: string, conversationId: string, options?: { model?: string; reasoningEffort?: string }) {
+    sendMessage: async function* (content: string, conversationId: string, options?: { model?: string; reasoningEffort?: string; thinkingEnabled?: boolean }) {
       const request: ChatRequest = { type: 'chat', content } as ChatRequest
       if (options?.model) (request as any).model = options.model
-      if (options?.reasoningEffort) (request as any).reasoning_effort = options.reasoningEffort
+      if (options?.thinkingEnabled !== undefined) (request as any).thinking_enabled = options.thinkingEnabled
+      if (options?.reasoningEffort && options.reasoningEffort !== 'off') {
+        (request as any).reasoning_effort = options.reasoningEffort
+      } else if (options?.reasoningEffort === 'off') {
+        (request as any).thinking_enabled = false
+      }
 
       for await (const event of chatService.processMessage(conversationId, request)) {
         yield event

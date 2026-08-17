@@ -72,9 +72,9 @@ const customProviders = ref<Record<string, Provider>>({})
 const customModelsLoading = ref(false)
 const customModelsSaving = ref(false)
 const customModelsError = ref('')
-const piThinkingLevels = ref<string[]>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+// `off` is a chat/session toggle, not a model thinking level.
+const piThinkingLevels = ref<string[]>(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const THINKING_LEVEL_LABELS: Record<string, string> = {
-  off: '关',
   minimal: '极低',
   low: '低',
   medium: '中',
@@ -133,7 +133,7 @@ const loadCustomModels = async () => {
 const loadPiThinkingLevels = async () => {
   try {
     const result = await api.getPiThinkingLevels()
-    if (result.levels.length) piThinkingLevels.value = result.levels
+    if (result.levels.length) piThinkingLevels.value = result.levels.filter(level => level !== 'off')
   } catch (err) {
     console.warn('Failed to load Pi thinking levels:', err)
   }
@@ -144,7 +144,17 @@ const saveCustomModels = async () => {
   customModelsSaving.value = true
   customModelsError.value = ''
   try {
-    await api.updatePiModels(customProviders.value)
+    // Keep legacy `thinkingLevelMap.off` entries from being written back. The
+    // off choice is transported separately by the chat request.
+    const providers = JSON.parse(JSON.stringify(customProviders.value)) as Record<string, Provider>
+    for (const provider of Object.values(providers)) {
+      for (const model of provider.models || []) {
+        if (!model.thinkingLevelMap || !('off' in model.thinkingLevelMap)) continue
+        delete model.thinkingLevelMap.off
+        if (!Object.keys(model.thinkingLevelMap).length) delete model.thinkingLevelMap
+      }
+    }
+    await api.updatePiModels(providers)
   } catch (err) {
     customModelsError.value = (err as Error).message || '保存失败'
   } finally {
@@ -283,7 +293,7 @@ const ensureCost = (model: ProviderModel) => {
 const thinkingLevelEntries = (model: ProviderModel): Array<[string, string | null]> => {
   const map = model.thinkingLevelMap || {}
   const order = new Map(piThinkingLevels.value.map((level, index) => [level, index]))
-  return Object.entries(map).sort(([a], [b]) => {
+  return Object.entries(map).filter(([level]) => level !== 'off').sort(([a], [b]) => {
     const aOrder = order.get(a)
     const bOrder = order.get(b)
     if (aOrder != null && bOrder != null) return aOrder - bOrder
@@ -309,6 +319,7 @@ const addThinkingLevels = async (model: ProviderModel) => {
 }
 
 const setThinkingLevelMap = (model: ProviderModel, level: string, value: string) => {
+  if (level === 'off') return
   const v = value.trim()
   if (!v) {
     removeThinkingLevel(model, level)
@@ -1925,10 +1936,10 @@ onBeforeUnmount(() => {
                             <div class="tlm-add-row">
                               <button class="btn-ghost-sm" @click="openThinkingLevelPicker(m)">添加推理等级</button>
                               <div v-if="addingThinkingLevelsFor === m" class="tlm-picker">
-                                <label v-for="level in piThinkingLevels.filter(level => !(level in (m.thinkingLevelMap || {})))" :key="level" class="check-label">
+                                <label v-for="level in piThinkingLevels.filter(level => level !== 'off' && !(level in (m.thinkingLevelMap || {})))" :key="level" class="check-label">
                                   <input v-model="pendingThinkingLevels" type="checkbox" :value="level" /> {{ thinkingLevelLabel(level) }}（{{ level }}）
                                 </label>
-                                <span v-if="!piThinkingLevels.some(level => !(level in (m.thinkingLevelMap || {})))" class="empty-text">所有 Pi 等级均已添加</span>
+                                <span v-if="!piThinkingLevels.some(level => level !== 'off' && !(level in (m.thinkingLevelMap || {})))" class="empty-text">所有 Pi 等级均已添加</span>
                                 <div class="tlm-picker-actions">
                                   <button class="btn-primary-sm" :disabled="!pendingThinkingLevels.length" @click="addThinkingLevels(m)">添加</button>
                                   <button class="btn-ghost-sm" @click="addingThinkingLevelsFor = null; pendingThinkingLevels = []">取消</button>

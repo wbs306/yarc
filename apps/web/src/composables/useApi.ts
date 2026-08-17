@@ -271,13 +271,13 @@ export function useApi() {
         body: JSON.stringify({ title }),
       }),
 
-    askBtw: (convId: string, body: { question: string; branchId?: string; model?: string; reasoningEffort?: string }) =>
+    askBtw: (convId: string, body: { question: string; branchId?: string; model?: string; reasoningEffort?: string; thinkingEnabled?: boolean }) =>
       request<{ answer: string; thinking?: string; events?: any[] }>(`/conversations/${convId}/btw`, {
         method: 'POST',
         body: JSON.stringify(body),
       }),
 
-    startBtw: (convId: string, body: { question: string; branchId?: string; model?: string; reasoningEffort?: string }) =>
+    startBtw: (convId: string, body: { question: string; branchId?: string; model?: string; reasoningEffort?: string; thinkingEnabled?: boolean }) =>
       request<{ runId: string; status: string }>(`/conversations/${convId}/btw`, {
         method: 'POST',
         body: JSON.stringify(body),

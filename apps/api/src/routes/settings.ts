@@ -77,6 +77,29 @@ const refreshCatalogForModelFetch = async () => {
   }
 }
 
+/** `off` is a chat/session toggle, never a provider model mapping. */
+const normalizePiModelProviders = (providers: Record<string, any>): Record<string, any> => {
+  const normalized = { ...providers }
+  for (const [providerId, provider] of Object.entries(normalized)) {
+    if (!provider || typeof provider !== 'object' || !Array.isArray(provider.models)) continue
+    normalized[providerId] = {
+      ...provider,
+      models: provider.models.map((model: any) => {
+        const map = model?.thinkingLevelMap
+        if (!model || typeof model !== 'object' || !map || typeof map !== 'object') return model
+        const thinkingLevelMap = Object.fromEntries(
+          Object.entries(map).filter(([level]) => level !== 'off')
+        )
+        const normalizedModel = { ...model }
+        if (Object.keys(thinkingLevelMap).length) normalizedModel.thinkingLevelMap = thinkingLevelMap
+        else delete normalizedModel.thinkingLevelMap
+        return normalizedModel
+      }),
+    }
+  }
+  return normalized
+}
+
 const walkDirStats = async (root: string): Promise<{ bytes: number; files: number; dirs: number }> => {
   let bytes = 0
   let files = 0
@@ -720,7 +743,7 @@ settings.get('/pi-models', async (c) => {
     const parsed = JSON.parse(raw)
     providers = parsed.providers || {}
   } catch { /* file doesn't exist or invalid JSON */ }
-  return c.json({ providers })
+  return c.json({ providers: normalizePiModelProviders(providers) })
 })
 
 // PUT /api/settings/pi-models — write custom models.json and reload Pi
@@ -729,10 +752,11 @@ settings.put('/pi-models', async (c) => {
   if (!providers || typeof providers !== 'object') {
     return c.json({ error: { code: 'INVALID_BODY', message: 'providers must be an object' } }, 400)
   }
+  const normalizedProviders = normalizePiModelProviders(providers)
   const paths = agentWorkspacePaths()
-  await writeFile(paths.models, JSON.stringify({ providers }, null, 2) + '\n', 'utf-8')
+  await writeFile(paths.models, JSON.stringify({ providers: normalizedProviders }, null, 2) + '\n', 'utf-8')
   await piService.reload('settings:pi-models')
-  return c.json({ providers })
+  return c.json({ providers: normalizedProviders })
 })
 
 // GET /api/settings/pi-settings — read pi settings.json

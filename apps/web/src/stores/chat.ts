@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useApi } from '@/composables/useApi'
 import { createClientId } from '@/lib/id'
-import type { CurrentChatResource } from '@yarc/shared'
+import type { ChatThinkingLevel, CurrentChatResource, ThinkingLevel } from '@yarc/shared'
 
 export interface ChatSegment { type: 'text' | 'tool' | 'error'; text?: string; toolCallId?: string }
 export interface Message {
@@ -58,7 +58,8 @@ export const useChatStore = defineStore('chat', () => {
   const currentConvId = ref<string | null>(null)
   const models = ref<ModelInfo[]>([])
   const currentModel = ref(localStorage.getItem(MODEL_KEY) || '')
-  const reasoningEffort = ref(localStorage.getItem(EFFORT_KEY) || 'off')
+  const storedReasoningEffort = localStorage.getItem(EFFORT_KEY) as ChatThinkingLevel | null
+  const reasoningEffort = ref<ChatThinkingLevel>(storedReasoningEffort || 'off')
   const modelsError = ref('')
   const chatError = ref('')
   const pendingPrompt = ref('')
@@ -283,7 +284,10 @@ export const useChatStore = defineStore('chat', () => {
   loadPrefs()
 
   const setCurrentModel = (m: string) => { currentModel.value = m; if (m) localStorage.setItem(MODEL_KEY, m) }
-  const setReasoningEffort = (e: string) => { reasoningEffort.value = e; localStorage.setItem(EFFORT_KEY, e) }
+  const setReasoningEffort = (e: string) => {
+    reasoningEffort.value = e as ChatThinkingLevel
+    localStorage.setItem(EFFORT_KEY, e)
+  }
   const ensureModel = () => {
     if (!models.value.length) return
     if (!currentModel.value || !models.value.some(m => m.id === currentModel.value)) {
@@ -559,7 +563,8 @@ export const useChatStore = defineStore('chat', () => {
         question: q,
         branchId: currentBranchId.value || undefined,
         model: currentModel.value || undefined,
-        reasoningEffort: reasoningEffort.value,
+        reasoningEffort: reasoningEffort.value === 'off' ? undefined : reasoningEffort.value as ThinkingLevel,
+        thinkingEnabled: reasoningEffort.value !== 'off',
       })
       item.runId = response.runId
     } catch (err) {
@@ -738,9 +743,11 @@ export const useChatStore = defineStore('chat', () => {
       markActive(convId)
       streamingContent.value = ''
 
+      const thinkingEnabled = reasoningEffort.value !== 'off'
       assistantMsg = await streamWs(convId, {
         type: 'chat', content, model: currentModel.value || undefined,
-        reasoning_effort: reasoningEffort.value,
+        thinking_enabled: thinkingEnabled,
+        ...(thinkingEnabled ? { reasoning_effort: reasoningEffort.value as ThinkingLevel } : {}),
         context: requestContext || undefined, branchId: currentBranchId.value || undefined,
         ...(opts.editMessageId ? { editMessageId: opts.editMessageId } : {}),
         ...(opts.editForkMessageId ? { editForkMessageId: opts.editForkMessageId } : {}),

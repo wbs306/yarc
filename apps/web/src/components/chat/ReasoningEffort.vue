@@ -17,7 +17,14 @@ const LABELS: Record<string, string> = {
   max: '极高',
 }
 
-const effectiveLevels = computed(() => props.levels?.length ? props.levels : ['off', 'low', 'medium', 'high', 'xhigh'])
+const DEFAULT_LEVELS = ['low', 'medium', 'high', 'xhigh']
+
+// Model metadata contains actual provider thinking levels only. `off` is a
+// chat/session toggle and must be available for every reasoning-capable model.
+const effectiveLevels = computed(() => {
+  const configured = props.levels ?? DEFAULT_LEVELS
+  return ['off', ...new Set(configured.filter(level => level !== 'off'))]
+})
 const activeIndex = computed(() => Math.max(0, effectiveLevels.value.indexOf(props.modelValue)))
 </script>
 

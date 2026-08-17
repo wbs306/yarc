@@ -64,7 +64,7 @@ export class ChatService {
     request: ChatRequest,
     options: { persistUserMessage?: boolean; cancelledMessageId?: string } = {}
   ): AsyncGenerator<ChatEvent> {
-    const { content, model, reasoning_effort, context } = request
+    const { content, model, reasoning_effort, thinking_enabled, context } = request
     const branchId = (request as any).branchId as string | undefined
     const userMessageId = (request as any).userMessageId as string | undefined
     const assistantMessageId = (request as any).assistantMessageId as string | undefined
@@ -82,6 +82,7 @@ export class ChatService {
           assistantMessageId,
           model,
           reasoningEffort: reasoning_effort,
+          thinkingEnabled: thinking_enabled,
           customInstructions: compactCommand.customInstructions,
           _cancelled: options.cancelledMessageId,
         })
@@ -102,7 +103,7 @@ export class ChatService {
         await piConversationService.appendContextEntry(conversationId, branchId, context)
       }
 
-      yield* this.callAI(userMessage, model, reasoning_effort, conversationId, branchId, userMessageId, assistantMessageId, options.cancelledMessageId)
+      yield* this.callAI(userMessage, model, reasoning_effort, thinking_enabled, conversationId, branchId, userMessageId, assistantMessageId, options.cancelledMessageId)
     } catch (err) {
       yield {
         type: 'error',
@@ -350,6 +351,7 @@ export class ChatService {
     userMessage: string,
     model?: string,
     reasoningEffort?: string,
+    thinkingEnabled?: boolean,
     conversationId?: string,
     branchId?: string,
     userMessageId?: string,
@@ -370,6 +372,7 @@ export class ChatService {
       model,
       prompt: userMessage,
       reasoningEffort,
+      thinkingEnabled,
       _cancelled: cancelledMessageId,
     })) {
       if (event.type === 'text') emittedText = true
