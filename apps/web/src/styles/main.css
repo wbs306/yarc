@@ -283,6 +283,14 @@ body[data-app-background="on"] .mode-btn {
 .md p { margin-bottom: 8px; }
 .md p:last-child { margin-bottom: 0; }
 .md a { color: var(--color-primary); }
+.md a[href^="#workspace-file="] {
+  color: inherit;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
 .md a[href^="paper://"],
 .md a[href*="doi.org/"],
 .md a[href*="arxiv.org/abs/"],

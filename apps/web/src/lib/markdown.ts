@@ -1,6 +1,7 @@
 import katex, { type KatexOptions } from 'katex'
 import { marked, Renderer, type MarkedExtension, type Token, type Tokens } from 'marked'
 import { linkifyImplicitPaperReferences } from './paper-reference'
+import { linkifyWorkspaceFileReferences } from './workspace-file-reference'
 import { relaxedStrongRule } from './markdown-strong'
 
 interface KatexToken extends Tokens.Generic {
@@ -404,8 +405,15 @@ export function renderInlineLatex(text: string): string {
  * character. Chinese prose normally has no space there, so handle this common
  * form as a dedicated inline token.
  */
-const prepareMarkdownSource = (text: string) =>
-  linkifyImplicitPaperReferences(normalizeListMathBlocks(normalizeBlockquoteMathBlocks(text)))
+export interface MarkdownRenderOptions {
+  fileReferences?: boolean
+}
+
+const prepareMarkdownSource = (text: string, options: MarkdownRenderOptions = {}) => {
+  const normalized = normalizeListMathBlocks(normalizeBlockquoteMathBlocks(text))
+  const withFileReferences = options.fileReferences ? linkifyWorkspaceFileReferences(normalized) : normalized
+  return linkifyImplicitPaperReferences(withFileReferences)
+}
 
 type TokenWithChildren = Token & {
   tokens?: Token[]
@@ -523,25 +531,25 @@ class MarkdownSourceMapRenderer extends Renderer {
   }
 }
 
-export function renderMarkdown(text: string): string {
+export function renderMarkdown(text: string, options: MarkdownRenderOptions = {}): string {
   if (!text) return ''
   configureMarked()
   try {
-    return marked.parse(prepareMarkdownSource(text)) as string
+    return marked.parse(prepareMarkdownSource(text, options)) as string
   } catch {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')
   }
 }
 
-export function renderMarkdownWithSourceMap(text: string): string {
+export function renderMarkdownWithSourceMap(text: string, options: MarkdownRenderOptions = {}): string {
   if (!text) return ''
   configureMarked()
   try {
-    const source = prepareMarkdownSource(text)
+    const source = prepareMarkdownSource(text, options)
     const tokens = marked.lexer(source)
     const renderer = new MarkdownSourceMapRenderer(buildMarkdownSourceRanges(tokens, source))
     return marked.parser(tokens, { ...marked.defaults, renderer }) as string
   } catch {
-    return renderMarkdown(text)
+    return renderMarkdown(text, options)
   }
 }

@@ -60,6 +60,31 @@ const persistExpandedPath = (path: string, isExpanded: boolean) => {
 }
 
 const expanded = ref<Set<string>>(loadExpandedPaths())
+
+watch(
+  () => props.selectedPath,
+  (path) => {
+    const segments = (path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
+    segments.pop()
+    if (!segments.length) return
+
+    const next = new Set(expanded.value)
+    const added: string[] = []
+    let ancestor = ''
+    for (const segment of segments) {
+      ancestor = ancestor ? `${ancestor}/${segment}` : segment
+      if (next.has(ancestor)) continue
+      next.add(ancestor)
+      added.push(ancestor)
+    }
+    if (!added.length) return
+
+    expanded.value = next
+    for (const path of added) persistExpandedPath(path, true)
+  },
+  { immediate: true },
+)
+
 const renamingPath = ref<string | null>(null)
 const renamingValue = ref('')
 const renameInput = ref<HTMLInputElement | null>(null)

@@ -12,7 +12,10 @@ import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import type { CurrentChatResource } from '@yarc/shared'
 
 const props = defineProps<{ currentResource?: CurrentChatResource | null; currentResourceNotice?: string }>()
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{
+  close: []
+  openFile: [path: string]
+}>()
 const chatStore = useChatStore()
 const theme = useThemeStore()
 const paperStore = usePaperStore()
@@ -967,7 +970,7 @@ const sessionState = computed(() => {
           <div v-else-if="item.error" class="btw-error">❌ {{ item.error }}</div>
           <div v-else-if="item.cancelled" class="btw-cancelled">已取消</div>
           <details v-if="item.thinking" class="btw-thinking"><summary>思考记录</summary><pre>{{ item.thinking }}</pre></details>
-          <MarkdownContent v-if="item.answer" class="btw-answer" :content="item.answer" />
+          <MarkdownContent v-if="item.answer" class="btw-answer" :content="item.answer" file-references @open-file="emit('openFile', $event)" />
           <div v-if="!item.loading && item.answer && !item.error" class="btw-actions">
             <button class="btw-action-btn" @click="chatStore.insertBtwAnswer(item.runId || item.id)" title="插入输入框">📋 插入</button>
             <button class="btw-action-btn" @click="chatStore.sendBtwAsMainMessage(item.runId || item.id)" title="作为主消息发送">💬 发送</button>
@@ -1122,9 +1125,9 @@ const sessionState = computed(() => {
               <div v-if="toolForSegment(msg, seg)?.result" class="tool-result">{{ toolForSegment(msg, seg)?.result }}</div>
             </template>
           </details>
-          <MarkdownContent v-else-if="seg.type === 'error'" class="msg-body error" :content="seg.text || ''" />
-          <MarkdownContent v-else-if="seg.type === 'compaction'" class="msg-body compaction" :content="seg.text || ''" />
-          <MarkdownContent v-else class="msg-body" :class="{ placeholder: isPlaceholderSegment(seg) }" :content="seg.text || ''" />
+          <MarkdownContent v-else-if="seg.type === 'error'" class="msg-body error" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
+          <MarkdownContent v-else-if="seg.type === 'compaction'" class="msg-body compaction" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
+          <MarkdownContent v-else class="msg-body" :class="{ placeholder: isPlaceholderSegment(seg) }" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
         </template>
 
         <div v-if="isStreamingMsg(msg)" class="typing-indicator"><span /><span /><span /></div>

@@ -9,6 +9,7 @@ import { useWebDavSyncStore } from '@/stores/webdavSync'
 import { useApi, useTemporaryPdfUrl } from '@/composables/useApi'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
+import { normalizeWorkspaceFileReferencePath } from '@/lib/workspace-file-reference'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
 import type { CurrentChatResource, IeeeJournalBrowserPreferences, ReparseAction, ReparsePaperInfo } from '@yarc/shared'
@@ -907,6 +908,49 @@ const findWorkspaceNode = (nodes: FileNode[], path: string): FileNode | null => 
   return null
 }
 
+const replaceWorkspaceDirectoryChildren = (nodes: FileNode[], path: string, children: FileNode[]): FileNode[] => nodes.map(node => {
+  if (node.path === path && node.type === 'directory') return { ...node, children }
+  if (!node.children?.length) return node
+  return { ...node, children: replaceWorkspaceDirectoryChildren(node.children, path, children) }
+})
+
+const findDeepestWorkspaceDirectory = (nodes: FileNode[], targetPath: string): FileNode | null => {
+  const segments = targetPath.split('/').filter(Boolean)
+  segments.pop()
+  let currentNodes = nodes
+  let currentPath = ''
+  let deepest: FileNode | null = null
+
+  for (const segment of segments) {
+    currentPath = currentPath ? `${currentPath}/${segment}` : segment
+    const node = currentNodes.find(candidate => candidate.path === currentPath)
+    if (!node || node.type !== 'directory') break
+    deepest = node
+    currentNodes = node.children || []
+  }
+  return deepest
+}
+
+const ensureWorkspaceNodeLoaded = async (path: string): Promise<FileNode | null> => {
+  let node = findWorkspaceNode(workspaceFiles.value, path)
+  let lastHydratedPath = ''
+
+  while (!node) {
+    const directory = findDeepestWorkspaceDirectory(workspaceFiles.value, path)
+    if (!directory || directory.path === lastHydratedPath) break
+
+    const response = await api.getFileTree(directory.path)
+    workspaceFiles.value = replaceWorkspaceDirectoryChildren(workspaceFiles.value, directory.path, response.files as FileNode[])
+    workspaceFilesStale = false
+    workspaceTreeFromCache.value = false
+    void putOfflineWorkspaceTree(workspaceFiles.value)
+    lastHydratedPath = directory.path
+    node = findWorkspaceNode(workspaceFiles.value, path)
+  }
+
+  return node
+}
+
 const removeWorkspaceTreePath = (nodes: FileNode[], path: string): FileNode[] => nodes
   .filter(node => node.path !== path)
   .map(node => node.children && path.startsWith(`${node.path}/`)
@@ -1160,7 +1204,7 @@ const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee') => {
   if (route.fullPath !== router.resolve(target).fullPath) {
     router.replace(target).catch(() => {})
   }
-  if (mode === 'files' && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFiles()
+  if (mode === 'files' && !filesLoading.value && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFiles()
   if (mode === 'ieee' && !ieeeJournalPreferences.value.journals.length && !ieeeJournalLoading.value) {
     void loadIeeeJournalPreferences()
   }
@@ -1255,6 +1299,56 @@ const selectWorkspaceFile = async (node: FileNode) => {
   } finally {
     workspaceContentLoading.value = false
     void nextTick(() => restoreMarkdownScrollPosition(markdownScrollLine.value))
+  }
+}
+
+const openWorkspaceFileReference = async (rawPath: string) => {
+  const path = normalizeWorkspaceFileReferencePath(rawPath)
+  const filesWorkspaceActive = sidebarMode.value === 'files' && route.name === 'files'
+  if (isMobile.value) {
+    mobileChat.value = false
+    mobileSidebar.value = false
+  } else {
+    sidebarOpen.value = true
+  }
+
+  if (!path) {
+    if (!filesWorkspaceActive) setSidebarMode('files')
+    filesError.value = '文件引用路径无效'
+    return
+  }
+
+  if (selectedWorkspacePath.value === path) {
+    if (!filesWorkspaceActive) setSidebarMode('files')
+    filesError.value = ''
+    return
+  }
+
+  const needsInitialTreeLoad = !workspaceFiles.value.length || workspaceFilesStale
+  if (needsInitialTreeLoad) filesLoading.value = true
+  if (!filesWorkspaceActive) setSidebarMode('files')
+  filesError.value = ''
+  try {
+    if (needsInitialTreeLoad) await loadWorkspaceFiles(true)
+    let node = await ensureWorkspaceNodeLoaded(path)
+    if (!node && !needsInitialTreeLoad) {
+      filesLoading.value = true
+      await loadWorkspaceFiles(true)
+      node = await ensureWorkspaceNodeLoaded(path)
+    }
+    if (!node) {
+      if (!filesError.value) filesError.value = `文件不存在或不可访问：${path}`
+      return
+    }
+    if (node.type !== 'file') {
+      filesError.value = `文件引用指向了目录：${path}`
+      return
+    }
+    await selectWorkspaceFile(node)
+  } catch (err) {
+    filesError.value = (err as Error).message || `打开文件失败：${path}`
+  } finally {
+    filesLoading.value = false
   }
 }
 
@@ -4214,6 +4308,7 @@ const showSearchPaperPopup = (paper: any) => {
           :current-resource="currentChatResource"
           :current-resource-notice="currentChatResourceNotice"
           @close="isMobile ? (mobileChat = false) : (chatOpen = false)"
+          @open-file="openWorkspaceFileReference"
         />
       </aside>
     </div>
