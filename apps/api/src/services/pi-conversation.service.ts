@@ -6,6 +6,7 @@
  */
 
 import { prisma } from '@yarc/db'
+import { writeFile } from 'node:fs/promises'
 import {
   type SessionEntry,
   type SessionMessageEntry,
@@ -228,23 +229,42 @@ export class PiConversationService {
     _newContent: string,
     _context?: ConversationMessage['context'],
     forkDisplayMessageId?: string
-  ): Promise<{ branchId: string; forkEntryId: string; sessionFile: string }> {
+  ): Promise<{ branchId: string; forkEntryId: string | null; sessionFile: string }> {
     const sessionFile = await this.getSessionFile(conversationId, sourceBranchId)
     if (!sessionFile) throw new Error('Session file not found')
 
     const sm = SessionManager.open(sessionFile)
-    
-    // Check if the edited entry exists. To edit a user turn, fork from its
-    // parent so the original user message and its assistant reply are excluded;
-    // the edited text is then appended by PiService.completeEvents(prompt).
+
+    // To edit a user turn, fork from its parent so the original user message
+    // and its assistant reply are excluded. Editing the root user is special:
+    // there is no parent entry, so create a materialized empty child session.
     const resolvedEditEntryId = editEntryId
     const entry = sm.getEntry(resolvedEditEntryId)
     if (!entry) throw new Error(`Entry not found: ${editEntryId}`)
-    const forkEntryId = entry.parentId || resolvedEditEntryId
+    if (entry.type !== 'message' || entry.message.role !== 'user') {
+      throw new Error(`Only user messages can be edited: ${editEntryId}`)
+    }
 
-    sm.branch(forkEntryId)
-    const newSessionFile = sm.createBranchedSession(forkEntryId)
-    if (!newSessionFile) throw new Error('Failed to create branch')
+    const forkEntryId = entry.parentId
+    let newSessionFile: string
+    if (forkEntryId) {
+      const branchedSessionFile = sm.createBranchedSession(forkEntryId)
+      if (!branchedSessionFile) throw new Error('Failed to create branch')
+      newSessionFile = branchedSessionFile
+    } else {
+      const rootSession = SessionManager.create(sm.getCwd(), sm.getSessionDir(), {
+        parentSession: sessionFile,
+      })
+      const rootSessionFile = rootSession.getSessionFile()
+      const header = rootSession.getHeader()
+      if (!rootSessionFile || !header) throw new Error('Failed to create root edit branch')
+
+      // SessionManager defers writing a new file until the first assistant
+      // message. Materialize the public header now so PiService can reopen this
+      // exact empty session before it appends the edited root prompt.
+      await writeFile(rootSessionFile, `${JSON.stringify(header)}\n`, { flag: 'wx' })
+      newSessionFile = rootSessionFile
+    }
 
     const newBranchId = `edit-${Date.now()}`
     await this.saveSessionInfo(conversationId, newBranchId, newSessionFile, forkEntryId, {
@@ -282,7 +302,7 @@ export class PiConversationService {
     conversationId: string,
     branchId: string,
     sessionFile: string,
-    leafEntryId?: string,
+    leafEntryId?: string | null,
     branchMeta: { parentBranchId?: string | null; forkMessageId?: string | null; forkParentEntryId?: string | null } = {}
   ): Promise<void> {
     const conv = await prisma.conversation.findUnique({
@@ -333,6 +353,15 @@ export class PiConversationService {
   private entriesToMessages(entries: SessionEntry[], branchMeta?: any): ConversationMessage[] {
     const messages: ConversationMessage[] = []
     const toolResultMap = new Map<string, { text: string; details?: unknown }>() // toolCallId -> result
+    const forkMessageId = typeof branchMeta?.forkMessageId === 'string'
+      ? branchMeta.forkMessageId
+      : null
+    const hasForkParentMetadata = !!branchMeta && Object.prototype.hasOwnProperty.call(branchMeta, 'forkParentEntryId')
+    const forkParentEntryId = typeof branchMeta?.forkParentEntryId === 'string'
+      ? branchMeta.forkParentEntryId
+      : null
+    let forkParentSeen = hasForkParentMetadata && forkParentEntryId === null
+    let forkMapped = false
 
     // First pass: collect tool results
     for (const entry of entries) {
@@ -346,24 +375,36 @@ export class PiConversationService {
       }
     }
 
-    // Second pass: convert messages
+    // Second pass: convert messages. A yarc-context custom entry may sit
+    // between the fork parent and edited user, so map by branch order rather
+    // than requiring the user's direct parentId to equal forkParentEntryId.
     for (const entry of entries) {
+      const isForkParent = !forkParentSeen && entry.id === forkParentEntryId
+      if (isForkParent) forkParentSeen = true
+
       const message = this.entryToMessage(entry, toolResultMap)
       if (message) {
-        if (
-          message.role === 'user' &&
-          branchMeta?.forkMessageId &&
-          branchMeta?.forkParentEntryId &&
-          message.parentId === branchMeta.forkParentEntryId &&
-          !messages.some(m => m.forkFromMessageId === branchMeta.forkMessageId)
-        ) {
-          message.forkFromMessageId = branchMeta.forkMessageId
+        if (message.role === 'user' && forkMessageId && forkParentSeen && !isForkParent && !forkMapped) {
+          message.forkFromMessageId = forkMessageId
+          forkMapped = true
         }
         messages.push(message)
       }
     }
 
-    return messages
+    // Pi keeps provider-error assistant entries from every automatic retry in
+    // JSONL even though it removes them from the active agent context. Hide an
+    // error when a later assistant exists before the next user; this removes
+    // intermediate retry failures and keeps only the final failure when all
+    // retries are exhausted.
+    return messages.filter((message, index) => {
+      if (message.role !== 'assistant' || !message.isError) return true
+      for (let next = index + 1; next < messages.length; next++) {
+        if (messages[next].role === 'user') break
+        if (messages[next].role === 'assistant') return false
+      }
+      return true
+    })
   }
 
   /**

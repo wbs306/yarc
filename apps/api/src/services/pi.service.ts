@@ -20,6 +20,7 @@ import { getPiSessionMetadata, savePiSessionMetadata } from '../lib/pi-metadata.
 import { DEFAULT_CHAT_SYSTEM_PROMPT } from '../lib/prompts.js'
 import { agentInteractionRegistry } from '../lib/agent-interaction-registry.js'
 import { liveFileService } from './live-file.service.js'
+import { persistFailedPromptIfMissing } from './pi-failed-turn.js'
 import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/mineru-content-v2.js'
 import type { AgentInteractionResponse, ChatEvent } from '@yarc/shared'
 
@@ -2206,7 +2207,80 @@ export class PiService {
       }
       unregisterAbortHandler?.()
       agentInteractionRegistry.cancelByStream(options.assistantMessageId || '', 'session_disposed')
-      await session.dispose()
+      try {
+        await session.dispose()
+      } catch (err) {
+        console.warn('[PiService] Compaction session dispose failed:', (err as Error).message)
+      }
+    }
+  }
+
+  /** Best-effort canonical persistence for failures before prompt() takes ownership. */
+  async persistFailedTurn(options: {
+    conversationId?: string
+    branchId?: string
+    prompt: string
+    errorMessage: string
+    sessionManager?: any
+    initialLeafId?: string | null
+    model?: string
+    assistantModel?: any
+  }): Promise<void> {
+    if (!options.conversationId || !options.branchId || !options.errorMessage) return
+
+    try {
+      let sessionManager = options.sessionManager
+      if (!sessionManager) {
+        await this.initPi()
+        if (!this.piModule) return
+        sessionManager = await this.resolveSessionManager(
+          options.conversationId,
+          options.branchId,
+          config.dataDir
+        )
+      }
+
+      let assistantModel = options.assistantModel
+      try {
+        if (!assistantModel && options.model) {
+          const [provider, modelId] = options.model.split('/')
+          if (provider && modelId) assistantModel = this.modelRuntime?.getModel(provider, modelId)
+          if (!assistantModel) {
+            const available = await this.modelRuntime?.getAvailable?.() || []
+            assistantModel = available.find((candidate: any) => candidate.id === options.model)
+          }
+        }
+        if (!assistantModel) {
+          const available = await this.modelRuntime?.getAvailable?.() || []
+          assistantModel = available[0]
+        }
+      } catch {
+        // Reuse the previous assistant identity (or the helper's neutral
+        // fallback) rather than losing canonical persistence altogether.
+      }
+
+      const initialLeafId = options.initialLeafId !== undefined
+        ? options.initialLeafId
+        : sessionManager.getLeafId?.() || null
+      persistFailedPromptIfMissing(
+        sessionManager,
+        initialLeafId,
+        options.prompt,
+        options.errorMessage,
+        assistantModel
+      )
+
+      const sessionFile = sessionManager.getSessionFile?.()
+      if (sessionFile) {
+        await savePiSessionMetadata(options.conversationId, options.branchId, {
+          sessionFile,
+          sessionId: sessionManager.getSessionId?.(),
+          leafEntryId: sessionManager.getLeafId?.() || null,
+          updatedAt: new Date().toISOString(),
+        })
+      }
+    } catch (err) {
+      console.warn('[PiService] Failed to persist errored turn:', (err as Error).message)
     }
   }
 
@@ -2254,6 +2328,15 @@ export class PiService {
       }
     }
 
+    // Resolve the persistent session before fallible resource/session setup so
+    // a setup error can still be represented by canonical user/error entries.
+    const sessionManager = await this.resolveSessionManager(
+      options.conversationId,
+      options.branchId,
+      agentWorkspace.cwd
+    )
+    const initialLeafId = sessionManager.getLeafId?.() || null
+
     // Keep Pi scoped to YARC's data directory so paper parse output, notes,
     // project .pi resources, and skills all live under one runtime root.
     let resourceLoader: any
@@ -2272,17 +2355,12 @@ export class PiService {
       await resourceLoader.reload()
     } catch (err) {
       console.error('[PiService] ResourceLoader error:', err)
-      yield { type: 'error', message: `ResourceLoader init failed: ${(err as Error).message}` }
+      const message = `ResourceLoader init failed: ${(err as Error).message}`
+      await this.persistFailedTurn({ ...options, errorMessage: message, sessionManager, initialLeafId, assistantModel: model })
+      yield { type: 'error', message }
       yield { type: 'done' }
       return
     }
-
-    // Resolve session manager: reopen existing persistent session or create new one.
-    const sessionManager = await this.resolveSessionManager(
-      options.conversationId,
-      options.branchId,
-      agentWorkspace.cwd
-    )
 
     let session: any
     try {
@@ -2294,19 +2372,22 @@ export class PiService {
         resourceLoader,
       })
       session = result.session
+
+      // Apply the UI's independent thinking-enabled flag and the actual level.
+      // Always set it explicitly so a reopened session cannot override the
+      // current chat selector.
+      session.setThinkingLevel(resolveSessionThinkingLevel(options))
     } catch (err) {
       console.error('[PiService] createAgentSession error:', err)
-      yield { type: 'error', message: `Session creation failed: ${(err as Error).message}` }
+      const message = `Session creation failed: ${(err as Error).message}`
+      await this.persistFailedTurn({ ...options, errorMessage: message, sessionManager, initialLeafId, assistantModel: model })
+      yield { type: 'error', message }
       yield { type: 'done' }
       return
     }
 
-    // Apply the UI's independent thinking-enabled flag and the actual level.
-    // Always set it explicitly so a reopened session cannot override the
-    // current chat selector.
-    session.setThinkingLevel(resolveSessionThinkingLevel(options))
-
     let unregisterAbortHandler: (() => void) | null = null
+    let promptError: string | null = null
 
     try {
       const queue: ChatEvent[] = []
@@ -2318,10 +2399,20 @@ export class PiService {
       }
       let terminalQueued = false
       let errorQueued = false
+      let pendingAssistantError: string | null = null
       const pushError = (message: string) => {
         if (errorQueued) return
         errorQueued = true
         push({ type: 'error', message: message || 'Pi error' })
+      }
+      const queueAssistantError = (message: string) => {
+        pendingAssistantError = message || 'Pi error'
+      }
+      const flushAssistantError = () => {
+        if (!pendingAssistantError) return
+        const message = pendingAssistantError
+        pendingAssistantError = null
+        pushError(message)
       }
       const pushDone = () => {
         if (terminalQueued) return
@@ -2411,9 +2502,10 @@ export class PiService {
               inputDelta: String(update.delta),
             })
           } else if (update?.type === 'error') {
-            // This may be an intermediate error that Pi will retry; the
-            // final agent_end/prompt settlement decides when the turn ends.
-            pushError(update.error?.errorMessage || 'Pi error')
+            // This may be an intermediate error that Pi will retry. Keep it
+            // pending until agent_end tells us whether Pi will retry, so the
+            // frontend does not finalize/reload a turn that is still running.
+            queueAssistantError(update.error?.errorMessage || 'Pi error')
           }
         } else if (event.type === 'tool_execution_start') {
           const toolCallId = String(event.toolCallId || '')
@@ -2460,9 +2552,15 @@ export class PiService {
             }
           }
         } else if (event.type === 'agent_end') {
-          // Pi can emit agent_end before an automatic retry. Keep consuming
-          // the session until the final agent_end or prompt settlement.
-          if (!event.willRetry) pushDone()
+          // Pi can emit agent_end before an automatic retry. Do not expose an
+          // intermediate provider error as terminal; clear it and keep
+          // consuming the session until the retry settles.
+          if (event.willRetry) {
+            pendingAssistantError = null
+          } else {
+            flushAssistantError()
+            pushDone()
+          }
         } else if (event.type === 'message_end') {
           // AgentSession persists message_end after notifying subscribers.
           // Defer the mapping lookup to a microtask so getLeafId() points at
@@ -2500,8 +2598,14 @@ export class PiService {
               } catch { /* non-fatal */ }
             })
           }
-          if (msg?.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
-            pushError(msg.errorMessage || (msg.stopReason === 'aborted' ? 'Request aborted' : 'Pi error'))
+          if (msg?.role === 'assistant') {
+            if (msg.stopReason === 'error' || msg.stopReason === 'aborted' || msg.errorMessage) {
+              queueAssistantError(msg.errorMessage || (msg.stopReason === 'aborted' ? 'Request aborted' : 'Pi error'))
+            } else {
+              // A successful assistant message supersedes an earlier
+              // message_update error that did not lead to a retry.
+              pendingAssistantError = null
+            }
           }
         }
       })
@@ -2513,10 +2617,13 @@ export class PiService {
           // Registered extension slash commands may finish without starting an
           // agent turn, so they do not emit agent_end. Close the web stream once
           // the SDK command handler itself has completed.
+          flushAssistantError()
           pushDone()
         })
         .catch((err: Error) => {
-          pushError(err.message)
+          promptError = err.message || 'Pi error'
+          pendingAssistantError = null
+          pushError(promptError)
           pushDone()
         })
 
@@ -2538,7 +2645,10 @@ export class PiService {
             if (evt.type === 'error') sawError = true
             if (evt.type !== 'done') yield evt
           }
-          if (!sawError) yield { type: 'error', message: 'Request aborted' }
+          if (!sawError) {
+            promptError = 'Request aborted'
+            yield { type: 'error', message: promptError }
+          }
           yield { type: 'done' }
           return
         }
@@ -2559,6 +2669,14 @@ export class PiService {
         }
       }
     } finally {
+      if (promptError) {
+        try {
+          persistFailedPromptIfMissing(session.sessionManager, initialLeafId, options.prompt, promptError, session.model)
+        } catch (err) {
+          console.warn('[PiService] Failed to persist errored prompt:', (err as Error).message)
+        }
+      }
+
       // Persist the Pi session file path so the next turn reopens this session.
       if (options.conversationId && options.branchId) {
         await this.savePiSessionInfo(options.conversationId, options.branchId, session)
@@ -2566,7 +2684,11 @@ export class PiService {
       unregisterAbortHandler?.()
       agentInteractionRegistry.cancelByStream(options.assistantMessageId || '', 'session_disposed')
       emitInteractionEvent = null
-      await session.dispose()
+      try {
+        await session.dispose()
+      } catch (err) {
+        console.warn('[PiService] Session dispose failed:', (err as Error).message)
+      }
     }
   }
 

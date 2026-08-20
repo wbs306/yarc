@@ -65,14 +65,17 @@ export class ChatService {
     options: { persistUserMessage?: boolean; cancelledMessageId?: string } = {}
   ): AsyncGenerator<ChatEvent> {
     const { content, model, reasoning_effort, thinking_enabled, context } = request
-    const branchId = (request as any).branchId as string | undefined
+    let branchId = (request as any).branchId as string | undefined
     const userMessageId = (request as any).userMessageId as string | undefined
     const assistantMessageId = (request as any).assistantMessageId as string | undefined
 
     if (options.persistUserMessage !== false) {
-      await this.handleEditBranch(conversationId, request)
+      const prepared = await this.handleEditBranch(conversationId, request)
+      branchId = prepared.branchId
     }
 
+    let persistPreflightFailure = false
+    let failedPrompt = content
     try {
       const compactCommand = this.parseCompactCommand(content)
       if (compactCommand) {
@@ -89,6 +92,8 @@ export class ChatService {
         return
       }
 
+      persistPreflightFailure = true
+
       // Build context block and collect stored context for message metadata.
       const { contextBlock } = yield* this.buildContextBlock(content, context, conversationId)
 
@@ -97,18 +102,29 @@ export class ChatService {
       // tool results, compaction) via SessionManager.open(sessionFile), so we
       // only send the current user message.
       const userMessage = this.buildUserMessage(content, contextBlock)
+      failedPrompt = userMessage
 
       // Store context as CustomEntry in Pi session
       if (context && branchId) {
         await piConversationService.appendContextEntry(conversationId, branchId, context)
       }
 
+      // Keep the fallback armed while entering PiService too. Its setup can
+      // still throw before it obtains a SessionManager; the persistence helper
+      // is idempotent when Pi already wrote part or all of the turn.
       yield* this.callAI(userMessage, model, reasoning_effort, thinking_enabled, conversationId, branchId, userMessageId, assistantMessageId, options.cancelledMessageId)
     } catch (err) {
-      yield {
-        type: 'error',
-        message: `Pi 对话调用失败：${(err as Error).message || '未知错误'}`,
+      const message = `Pi 对话调用失败：${(err as Error).message || '未知错误'}`
+      if (persistPreflightFailure) {
+        await piService.persistFailedTurn({
+          conversationId,
+          branchId: branchId || 'main',
+          prompt: failedPrompt,
+          errorMessage: message,
+          model,
+        })
       }
+      yield { type: 'error', message }
       yield { type: 'done' }
     }
   }
