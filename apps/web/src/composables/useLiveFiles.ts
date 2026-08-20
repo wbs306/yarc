@@ -6,6 +6,7 @@ import {
   removeOfflineWorkspaceFile,
   type OfflineWorkspaceFileSnapshot,
 } from '@/lib/offline-workspace-cache'
+import { sha256Text } from '@/lib/sha256'
 
 export interface LiveFileStatus {
   path: string
@@ -77,17 +78,6 @@ const toBase64 = (update: Uint8Array) => {
   let binary = ''
   for (const byte of update) binary += String.fromCharCode(byte)
   return window.btoa(binary)
-}
-
-const sha256Text = async (value: string): Promise<string | null> => {
-  const subtle = globalThis.crypto?.subtle
-  if (!subtle) return null
-  try {
-    const digest = await subtle.digest('SHA-256', new TextEncoder().encode(value))
-    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
-  } catch {
-    return null
-  }
 }
 
 const createRequestId = () => {
@@ -368,7 +358,6 @@ export function useLiveFiles() {
 
       const generation = localChangeGeneration
       const localHash = await sha256Text(ytext.toString())
-      if (localHash === null) return
       if (generation !== localChangeGeneration || statusVersion !== observedStatusVersion) return
       if (!localDirty || activeFlushId || pendingServerContent !== null) return
       if (localHash !== serverStatus.contentHash) return
