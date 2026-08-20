@@ -8,32 +8,59 @@ interface ActiveStream {
   branchId: string
   sessionFile: string
   startedAt: number
+  updatedAt: number
   completion: Promise<void>
   resolveCompletion: () => void
 }
 
-class StreamingRegistry {
+export class StreamingRegistry {
   private activeStreams = new Map<string, ActiveStream>()
+  private timeoutMs: number
 
-  /** Register a new active stream */
+  constructor(options: { timeoutMs?: number } = {}) {
+    this.timeoutMs = options.timeoutMs ?? 5 * 60 * 1000
+  }
+
+  /** Register a new active stream. A conversation has at most one producer. */
   register(conversationId: string, messageId: string, branchId: string, sessionFile: string): void {
-    // A stale producer must not be able to resolve/remove a newer stream for
-    // the same conversation. Its message ID is checked in unregister().
-    this.activeStreams.get(conversationId)?.resolveCompletion()
+    if (this.activeStreams.has(conversationId)) {
+      throw new Error('Conversation already has an active stream')
+    }
 
     let resolveCompletion!: () => void
     const completion = new Promise<void>((resolve) => { resolveCompletion = resolve })
+    const now = Date.now()
     this.activeStreams.set(conversationId, {
       messageId,
       branchId,
       sessionFile,
-      startedAt: Date.now(),
+      startedAt: now,
+      updatedAt: now,
       completion,
       resolveCompletion,
     })
   }
 
-  /** Unregister a completed/failed stream */
+  /** Update branch/session metadata after an edit branch has been prepared. */
+  update(
+    conversationId: string,
+    messageId: string,
+    values: { branchId?: string; sessionFile?: string }
+  ): void {
+    const active = this.activeStreams.get(conversationId)
+    if (!active || active.messageId !== messageId) return
+    if (values.branchId !== undefined) active.branchId = values.branchId
+    if (values.sessionFile !== undefined) active.sessionFile = values.sessionFile
+    active.updatedAt = Date.now()
+  }
+
+  /** Refresh producer liveness without changing user-visible state. */
+  touch(conversationId: string, messageId: string): void {
+    const active = this.activeStreams.get(conversationId)
+    if (active?.messageId === messageId) active.updatedAt = Date.now()
+  }
+
+  /** Unregister a completed/failed stream. */
   unregister(conversationId: string, messageId?: string): void {
     const active = this.activeStreams.get(conversationId)
     if (!active || (messageId && active.messageId !== messageId)) return
@@ -55,22 +82,21 @@ class StreamingRegistry {
     ])
   }
 
-  /** Get active stream for a conversation */
+  /** Get active stream for a conversation. */
   get(conversationId: string): ActiveStream | undefined {
     return this.activeStreams.get(conversationId)
   }
 
-  /** Check if a conversation has an active stream */
+  /** Check if a conversation has an active stream. */
   has(conversationId: string): boolean {
     return this.activeStreams.has(conversationId)
   }
 
-  /** Clean up timed-out streams (5 minutes) */
+  /** Clean up producers that have stopped updating their heartbeat. */
   cleanup(): void {
     const now = Date.now()
-    const timeoutMs = 5 * 60 * 1000
     for (const [convId, stream] of this.activeStreams) {
-      if (now - stream.startedAt > timeoutMs) {
+      if (now - stream.updatedAt > this.timeoutMs) {
         this.unregister(convId, stream.messageId)
       }
     }
@@ -79,5 +105,6 @@ class StreamingRegistry {
 
 export const streamingRegistry = new StreamingRegistry()
 
-// Periodic cleanup
-setInterval(() => streamingRegistry.cleanup(), 60_000)
+// Periodic cleanup. Do not keep isolated test/CLI processes alive.
+const cleanupTimer = setInterval(() => streamingRegistry.cleanup(), 60_000)
+if (typeof cleanupTimer.unref === 'function') cleanupTimer.unref()

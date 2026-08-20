@@ -3,7 +3,8 @@
  *
  * - Events are written here during streaming (fast, no DB round-trips).
  * - Text/thinking deltas are accumulated and flushed as combined events.
- * - tool_call, citation, done events are stored immediately.
+ * - tool_call and citation events are stored immediately.
+ * - done is emitted only by complete()/fail() after final persistence.
  * - Periodic flush to DB reduces write frequency.
  * - Frontend can replay from REST or attach live subscribers for reconnection.
  */
@@ -25,7 +26,7 @@ export interface StreamEntry {
   thinking: string            // Accumulated thinking content
   toolCalls: Array<{ id: string; name: string; input: unknown; result?: string }>
   citations: Array<{ pageNumber: number; text: string }>
-  segments: Array<{ type: 'text' | 'error'; text: string } | { type: 'tool'; toolCallId: string }>
+  segments: Array<{ type: 'text' | 'thinking' | 'error'; text: string } | { type: 'tool'; toolCallId: string }>
   status: 'streaming' | 'completed' | 'failed'
   conversationId: string
   branchId?: string
@@ -42,7 +43,7 @@ export type FlushFn = (
     content: string
     thinking?: string
     citations?: Array<{ pageNumber: number; text: string }>
-    segments?: Array<{ type: 'text' | 'error'; text: string } | { type: 'tool'; toolCallId: string }>
+    segments?: Array<{ type: 'text' | 'thinking' | 'error'; text: string } | { type: 'tool'; toolCallId: string }>
     toolCalls?: Array<{ id: string; name: string; input: unknown; result?: string }>
     status: 'streaming' | 'completed' | 'failed'
   }
@@ -103,16 +104,26 @@ export class StreamBuffer {
     const evt = event as any
 
     if (evt.type === 'text') {
+      // Preserve replay order when providers switch from thinking to visible
+      // text before the periodic buffer flush runs.
+      this.flushThinkingBufferSync(messageId)
       this.textBuffers.get(messageId)?.push(evt.content)
       entry.content += evt.content
       this.notify(messageId, event)
     } else if (evt.type === 'thinking') {
+      // Likewise, visible text emitted before a later reasoning block must be
+      // materialized before that reasoning event.
+      this.flushTextOnlySync(messageId)
       this.thinkBuffers.get(messageId)?.push(evt.content)
       entry.thinking += evt.content
       this.notify(messageId, event)
     } else {
-      // Flush text/thinking buffers before non-text events
+      // A producer-level done only means its generator reached a terminal
+      // yield. The outer producer still has to drain cleanup and persist the Pi
+      // session, so complete()/fail() owns the replayable terminal signal.
       this.flushTextBufferSync(messageId)
+      if (evt.type === 'done') return
+
       entry.events.push(event)
 
       if (evt.type === 'tool_call') {
@@ -131,11 +142,7 @@ export class StreamBuffer {
         entry.citations.push({ pageNumber: evt.pageNumber, text: evt.text })
       }
 
-      // A done event is stored immediately for replay, but subscribers are
-      // notified only after complete() has persisted the final message. This
-      // prevents reconnecting clients from fetching a still-stale DB row and
-      // replacing visible streamed content with an empty placeholder.
-      if (evt.type !== 'done') this.notify(messageId, event)
+      this.notify(messageId, event)
     }
   }
 
@@ -184,11 +191,9 @@ export class StreamBuffer {
       entry.events.push(errorEvent)
       this.notify(messageId, errorEvent)
     }
-    const doneEvent = { type: 'done' }
-    entry.events.push(doneEvent)
-    this.notify(messageId, doneEvent)
-
     await this.persistSnapshot(messageId, 'failed')
+
+    this.notify(messageId, { type: 'done' })
 
     this.streams.delete(messageId)
     this.textBuffers.delete(messageId)
@@ -258,26 +263,39 @@ export class StreamBuffer {
     }
   }
 
+  private flushTextOnlySync(messageId: string): void {
+    const entry = this.streams.get(messageId)
+    const textBuf = this.textBuffers.get(messageId)
+    if (!entry || !textBuf?.length) return
+
+    const text = textBuf.join('')
+    entry.events.push({ type: 'text', content: text })
+    const lastSegment = entry.segments[entry.segments.length - 1]
+    if (lastSegment?.type === 'text') lastSegment.text += text
+    else entry.segments.push({ type: 'text', text })
+    textBuf.length = 0
+  }
+
+  private flushThinkingBufferSync(messageId: string): void {
+    const entry = this.streams.get(messageId)
+    const thinkBuf = this.thinkBuffers.get(messageId)
+    if (!entry || !thinkBuf?.length) return
+
+    const thinking = thinkBuf.join('')
+    entry.events.push({ type: 'thinking', content: thinking })
+    const lastSegment = entry.segments[entry.segments.length - 1]
+    if (lastSegment?.type === 'thinking') lastSegment.text += thinking
+    else entry.segments.push({ type: 'thinking', text: thinking })
+    thinkBuf.length = 0
+  }
+
   /** Sync flush of text/thinking buffers into events array. */
   private flushTextBufferSync(messageId: string): void {
-    const entry = this.streams.get(messageId)
-    if (!entry) return
-
-    const textBuf = this.textBuffers.get(messageId)
-    if (textBuf?.length) {
-      const text = textBuf.join('')
-      entry.events.push({ type: 'text', content: text })
-      const lastSegment = entry.segments[entry.segments.length - 1]
-      if (lastSegment?.type === 'text') lastSegment.text += text
-      else entry.segments.push({ type: 'text', text })
-      textBuf.length = 0
-    }
-
-    const thinkBuf = this.thinkBuffers.get(messageId)
-    if (thinkBuf?.length) {
-      entry.events.push({ type: 'thinking', content: thinkBuf.join('') })
-      thinkBuf.length = 0
-    }
+    // Channel transitions flush the previous channel immediately, so at most
+    // one buffer is normally non-empty here. Keep this deterministic fallback
+    // for completion and periodic snapshots.
+    this.flushTextOnlySync(messageId)
+    this.flushThinkingBufferSync(messageId)
   }
 
   private buildFinalData(

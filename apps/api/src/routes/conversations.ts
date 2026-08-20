@@ -176,10 +176,17 @@ conversations.get('/:id/streaming-message', async (c) => {
   const activeStream = streamingRegistry.get(id)
   if (activeStream) {
     const bufferedStream = streamBuffer.get(activeStream.messageId)
+    if (!bufferedStream) {
+      // The WebSocket handler reserves producer ownership before awaited edit
+      // branch/session setup. A refreshed client should retry shortly rather
+      // than attach to a buffer that has not started and mistake it for done.
+      return c.json({ message: null, preparing: true })
+    }
+
     const message = {
       id: activeStream.messageId,
       conversationId: id,
-      branchId: activeStream.branchId,
+      branchId: bufferedStream.branchId || activeStream.branchId,
       role: 'assistant' as const,
       content: '',
       toolCalls: null,
@@ -187,17 +194,12 @@ conversations.get('/:id/streaming-message', async (c) => {
       createdAt: new Date(bufferedStream?.createdAt || activeStream.startedAt).toISOString(),
     }
 
-    // If we have buffered events, return the complete in-flight turn metadata.
-    if (bufferedStream) {
-      return c.json({
-        message,
-        userMessage: bufferedStream.userMessage || null,
-        events: streamBuffer.getEvents(activeStream.messageId),
-        fromBuffer: true,
-      })
-    }
-    // Stream is still active but no buffer yet (shouldn't happen normally).
-    return c.json({ message, userMessage: null })
+    return c.json({
+      message,
+      userMessage: bufferedStream.userMessage || null,
+      events: streamBuffer.getEvents(activeStream.messageId),
+      fromBuffer: true,
+    })
   }
 
   return c.json({ message: null })

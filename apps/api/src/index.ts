@@ -1,6 +1,7 @@
 // Ensure Pi SDK packages installed in the agent npm directory are resolvable
 // by child processes spawned by extensions (e.g., pi-subagents async runner).
 import { createRequire } from 'node:module'
+import { randomUUID } from 'node:crypto'
 const _require = createRequire(import.meta.url)
 const _agentNpmModules = _require('node:path').join(process.cwd(), '.pi', 'agent', 'npm', 'node_modules')
 if (_require('node:fs').existsSync(_agentNpmModules)) {
@@ -297,8 +298,20 @@ app.get(
           }
 
           if (data.type === 'chat' && conversationId) {
-            // Prepare message (may create branch for edits)
-            const originalBranchId = data.branchId
+            if (streamingRegistry.has(conversationId)) {
+              safeSend({ type: 'error', code: 'STREAM_ACTIVE', message: 'Conversation already has an active stream' })
+              safeSend({ type: 'done' })
+              return
+            }
+
+            // Reserve the conversation synchronously before branch creation or
+            // other awaited setup. This prevents two producers from opening the
+            // same Pi session concurrently and usually avoids orphan edit
+            // branches from a second send.
+            streamMsgId = randomUUID()
+            streamingRegistry.register(conversationId, streamMsgId, data.branchId || 'main', '')
+
+            // Prepare message (may create branch for edits).
             const prepared = await chatService.handleEditBranch(conversationId, data) as any
             const branchId = prepared?.branchId || data.branchId || 'main'
             data.branchId = branchId
@@ -306,9 +319,7 @@ app.get(
             // Generate stable in-flight user/assistant IDs. The pending user
             // message is retained with the stream so an immediate refresh can
             // restore the complete turn before Pi JSONL has persisted it.
-            const { randomUUID } = await import('node:crypto')
-            streamMsgId = randomUUID()
-            const isEditBranch = !!(prepared?.branchId && prepared.branchId !== originalBranchId)
+            const isEditBranch = Boolean(data.editMessageId)
             const pendingUserMessage = {
               id: `pending-user-${streamMsgId}`,
               conversationId,
@@ -319,15 +330,15 @@ app.get(
               metadata: {
                 pending: true,
                 context: data.context || null,
-                ...(isEditBranch ? { forkFromMessageId: data.editMessageId || null } : {}),
+                ...(isEditBranch ? { forkFromMessageId: data.editForkMessageId || data.editMessageId || null } : {}),
               },
               createdAt: new Date().toISOString(),
             }
             streamBuffer.start(streamMsgId, conversationId, branchId, pendingUserMessage)
 
-            // Register in streaming registry for resumption
+            // Fill in the reservation metadata used by stop/resume routes.
             const sessionFile = await piConversationService.getSessionFile(conversationId, branchId) || ''
-            streamingRegistry.register(conversationId, streamMsgId, branchId, sessionFile)
+            streamingRegistry.update(conversationId, streamMsgId, { branchId, sessionFile })
 
             // In-flight IDs let replay metadata map pending messages to their
             // canonical Pi JSONL entries after persistence.
@@ -369,6 +380,7 @@ app.get(
             const runMessageId = streamMsgId
             const heartbeat = setInterval(() => {
               streamBuffer.touch(runMessageId)
+              streamingRegistry.touch(runConversationId, runMessageId)
             }, 30_000)
             if (typeof heartbeat.unref === 'function') heartbeat.unref()
             void (async () => {
@@ -447,6 +459,8 @@ app.get(
           safeSend({ type: 'error', message })
           if (streamMsgId) {
             await streamBuffer.fail(streamMsgId, message).catch(() => {})
+            if (conversationId) streamingRegistry.unregister(conversationId, streamMsgId)
+            chatStreamControl.clear(streamMsgId)
             streamMsgId = null
           }
           // Even failures before stream_start (notably stale edit entry IDs)
