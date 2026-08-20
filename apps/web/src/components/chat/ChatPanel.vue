@@ -747,6 +747,7 @@ const messageSegments = (msg: any) => {
   return fallback.length ? fallback : []
 }
 
+const hasThinkingSegments = (msg: any) => messageSegments(msg).some((seg: any) => seg.type === 'thinking')
 const toolForSegment = (msg: any, seg: any) => (msg.toolCalls || []).find((tc: any) => tc.id === seg.toolCallId)
 const toolSearchResults = (tc: any) => tc?.searchResults || null
 const openToolSearchResults = (tc: any) => {
@@ -1057,7 +1058,7 @@ const sessionState = computed(() => {
             <div v-if="msg.metadata.context.selectedText">选中: "{{ msg.metadata.context.selectedText }}"</div>
           </template>
         </div>
-        <details v-if="msg.metadata?.thinking" class="msg-thinking"><summary>💭 思考记录</summary><div>{{ msg.metadata.thinking }}</div></details>
+        <details v-if="msg.metadata?.thinking && !hasThinkingSegments(msg)" class="msg-thinking"><summary>💭 思考记录</summary><div>{{ msg.metadata.thinking }}</div></details>
 
         <!-- Compaction summary -->
         <details v-if="msg.metadata?.isCompaction" class="msg-compaction">
@@ -1079,7 +1080,11 @@ const sessionState = computed(() => {
         </div>
 
         <template v-for="(seg, i) in messageSegments(msg)" :key="`${msg.id}-${i}`">
-          <details v-if="seg.type === 'tool' && toolForSegment(msg, seg)" class="msg-tool" :class="{ subagent: isSubagentTool(toolForSegment(msg, seg)) }" :open="isSubagentTool(toolForSegment(msg, seg)) || chatStore.toolsExpanded">
+          <details v-if="seg.type === 'thinking'" class="msg-thinking">
+            <summary>💭 思考记录</summary>
+            <div>{{ seg.text || '' }}</div>
+          </details>
+          <details v-else-if="seg.type === 'tool' && toolForSegment(msg, seg)" class="msg-tool" :class="{ subagent: isSubagentTool(toolForSegment(msg, seg)) }" :open="isSubagentTool(toolForSegment(msg, seg)) || chatStore.toolsExpanded">
             <summary class="tool-summary">
               <span>🔧 {{ formatToolName(toolForSegment(msg, seg)) }}<span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress"> · {{ formatToolInputTokens(toolForSegment(msg, seg)) }}</span></span>
               <button

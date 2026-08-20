@@ -4,7 +4,7 @@ import { useApi } from '@/composables/useApi'
 import { createClientId } from '@/lib/id'
 import type { ChatThinkingLevel, CurrentChatResource, ThinkingLevel } from '@yarc/shared'
 
-export interface ChatSegment { type: 'text' | 'tool' | 'error'; text?: string; toolCallId?: string }
+export interface ChatSegment { type: 'text' | 'thinking' | 'tool' | 'error' | 'compaction'; text?: string; toolCallId?: string }
 export interface Message {
   id: string; conversationId: string; branchId?: string | null; parentId?: string | null
   role: 'user' | 'assistant' | 'system'; content: string; toolCalls: any[] | null
@@ -80,6 +80,8 @@ export const useChatStore = defineStore('chat', () => {
   const abortControllers = new Map<string, AbortController>()
   const textQueues = new Map<string, { buf: string; timer: number | null }>()
   const streamReconnectTimers = new Map<string, number>()
+  let conversationSelectionSeq = 0
+  let branchSelectionSeq = 0
 
   // PDF context
   const pdfContext = ref<{
@@ -192,26 +194,28 @@ export const useChatStore = defineStore('chat', () => {
    * Convert PiMessage from Pi JSONL to frontend Message format.
    */
   const convertPiMessage = (piMsg: any, convId: string, branchId?: string): Message => {
-    // Build segments from content (excluding thinking, which is displayed separately)
-    const segments: Array<{ type: 'text' | 'tool' | 'error'; text?: string; toolCallId?: string }> = []
-    
-    // Add text content segment
-    if (piMsg.content) {
-      segments.push({ type: 'text', text: piMsg.content })
+    // Pi preserves the chronological content-block order. Keep it so thinking,
+    // text, and tool calls do not jump to different positions after the final
+    // canonical branch reload.
+    const segments: ChatSegment[] = Array.isArray(piMsg.segments)
+      ? piMsg.segments
+          .filter((segment: any) => ['text', 'thinking', 'tool', 'error', 'compaction'].includes(segment?.type))
+          .map((segment: any) => ({
+            type: segment.type,
+            ...(typeof segment.text === 'string' ? { text: segment.text } : {}),
+            ...(typeof segment.toolCallId === 'string' ? { toolCallId: segment.toolCallId } : {}),
+          }))
+      : []
+
+    if (!segments.length && piMsg.content) segments.push({ type: 'text', text: piMsg.content })
+    if (!segments.some(segment => segment.type === 'tool') && piMsg.toolCalls?.length) {
+      for (const tc of piMsg.toolCalls) segments.push({ type: 'tool', toolCallId: tc.id })
     }
-    
-    // Add tool segments if present
-    if (piMsg.toolCalls?.length) {
-      for (const tc of piMsg.toolCalls) {
-        segments.push({ type: 'tool', toolCallId: tc.id })
-      }
-    }
-    
+
     const errorMessage = piMsg.errorMessage || (piMsg.stopReason === 'aborted' ? 'Request aborted' : undefined)
     const isError = !!piMsg.isError || piMsg.stopReason === 'error' || piMsg.stopReason === 'aborted' || !!errorMessage
 
-    // Add error segment if present
-    if (isError && errorMessage) {
+    if (isError && errorMessage && !segments.some(segment => segment.type === 'error')) {
       segments.push({ type: 'error', text: errorMessage })
     }
     
@@ -315,6 +319,14 @@ export const useChatStore = defineStore('chat', () => {
   }
   const markActive = (c: string, m = '') => { activeStreams.set(c, m); syncStream() }
   const markInactive = (c: string, m?: string) => { const cur = activeStreams.get(c); if (m && cur && cur !== m) return; activeStreams.delete(c); syncStream() }
+  const detachConversationStream = (convId: string) => {
+    abortControllers.get(convId)?.abort()
+    abortControllers.delete(convId)
+    markInactive(convId)
+    const reconnectTimer = streamReconnectTimers.get(convId)
+    if (reconnectTimer) window.clearTimeout(reconnectTimer)
+    streamReconnectTimers.delete(convId)
+  }
   const finalizeFailedStream = (convId: string, branchId: string | null | undefined, msg: Message | null) => {
     if (msg) {
       msg.metadata.pending = false
@@ -422,19 +434,30 @@ export const useChatStore = defineStore('chat', () => {
     catch (e) { models.value = []; modelsError.value = (e as Error).message }
   }
 
-  const loadBranches = async (convId: string) => {
-    try { const r = await api.getBranches(convId); branches.value = r.branches || [] }
-    catch { branches.value = [] }
+  const loadBranches = async (convId: string): Promise<BranchInfo[]> => {
+    let loaded: BranchInfo[] = []
+    try {
+      const r = await api.getBranches(convId)
+      loaded = r.branches || []
+    } catch {}
+    // A slower response for a conversation that is no longer selected must
+    // not replace the current conversation's branch selector.
+    if (currentConvId.value === convId) branches.value = loaded
+    return loaded
   }
 
-  /** Load messages for a branch (cache-first) */
+  /** Load messages for a branch (cache-first). */
   const loadBranchMsgs = async (convId: string, branchId: string, force = false): Promise<Message[]> => {
-    if (!force && branchCache.value.has(branchId)) return branchCache.value.get(branchId)!
+    if (currentConvId.value === convId && !force && branchCache.value.has(branchId)) {
+      return branchCache.value.get(branchId)!
+    }
     try {
       const r = await api.switchBranch(convId, branchId)
       const msgs = (r.messages || []).map((m: any) => convertPiMessage(m, convId, branchId))
-      setBranchMessages(branchId, msgs)
-      return branchCache.value.get(branchId)!
+      // branchCache is scoped to the selected conversation. Ignore late loads
+      // from a stream or selection that belongs to a conversation left behind.
+      if (currentConvId.value === convId) setBranchMessages(branchId, msgs)
+      return msgs
     } catch { return [] }
   }
 
@@ -449,53 +472,75 @@ export const useChatStore = defineStore('chat', () => {
 
   const selectConversation = async (id: string) => {
     if (!id) return
+    const selection = ++conversationSelectionSeq
+    branchSelectionSeq++
+    const previousConversationId = currentConvId.value
 
-    // If switching away from an empty conversation, delete it
-    if (currentConvId.value && currentConvId.value !== id && pendingEmptyConvs.has(currentConvId.value)) {
-      const emptyId = currentConvId.value
-      conversations.value = conversations.value.filter(c => c.id !== emptyId)
-      deleteEmptyConv(emptyId)
+    // A chat producer is server-owned and continues after its WebSocket is
+    // closed. Detach the old conversation locally; selecting it again will
+    // replay its buffer and subscribe to the still-running producer.
+    if (previousConversationId && previousConversationId !== id) {
+      detachConversationStream(previousConversationId)
     }
 
-    // Clear branch cache when switching conversations because branch IDs
-    // (e.g. 'main') are only unique within a single conversation.
-    if (currentConvId.value !== id) branchCache.value.clear()
+    // If switching away from an empty conversation, delete it
+    if (previousConversationId && previousConversationId !== id && pendingEmptyConvs.has(previousConversationId)) {
+      conversations.value = conversations.value.filter(c => c.id !== previousConversationId)
+      deleteEmptyConv(previousConversationId)
+    }
+
+    // Clear conversation-scoped branch state immediately because branch IDs
+    // (e.g. 'main') are only unique within a single conversation. This also
+    // avoids briefly rendering the previous conversation's branch selector.
+    if (previousConversationId !== id) {
+      branchCache.value.clear()
+      branches.value = []
+      currentBranchId.value = null
+      currentContextUsage.value = null
+    }
 
     currentConvId.value = id
     chatError.value = ''
 
-    await loadBranches(id)
+    const loadedBranches = await loadBranches(id)
+    if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
 
     const pref = convBranchPrefs.get(id)
-    const main = branches.value.find(b => b.branchName === "main")
-    const target = (pref && branches.value.find(b => b.id === pref)?.id) || main?.id || branches.value[0]?.id
+    const main = loadedBranches.find(b => b.branchName === 'main')
+    const target = (pref && loadedBranches.find(b => b.id === pref)?.id) || main?.id || loadedBranches[0]?.id
 
     if (target) {
       currentBranchId.value = target
       await loadBranchMsgs(id, target)
+      if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
       await loadContextUsage(id, target)
     } else {
+      currentBranchId.value = null
       currentContextUsage.value = null
     }
+    if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
+
     syncStream()
     refreshActiveInteraction()
     await attachStream(id)
 
     // Detect subagent runs in loaded messages for real-time tracking
-    detectSubagentRuns().catch(() => {})
+    if (selection === conversationSelectionSeq && currentConvId.value === id) detectSubagentRuns().catch(() => {})
   }
 
   const switchBranch = async (branchId: string) => {
-    if (!currentConvId.value || currentBranchId.value === branchId) return
-    convBranchPrefs.set(currentConvId.value, branchId)
+    const convId = currentConvId.value
+    if (!convId || currentBranchId.value === branchId) return
+    const selection = ++branchSelectionSeq
+    convBranchPrefs.set(convId, branchId)
     savePrefs()
-    if (branchCache.value.has(branchId)) {
-      currentBranchId.value = branchId
-    } else {
-      await loadBranchMsgs(currentConvId.value, branchId)
-      currentBranchId.value = branchId
-    }
-    await loadContextUsage(currentConvId.value, branchId)
+
+    // Switch immediately so late responses from a previous branch selection
+    // cannot move the UI back to an older choice.
+    currentBranchId.value = branchId
+    if (!branchCache.value.has(branchId)) await loadBranchMsgs(convId, branchId)
+    if (selection !== branchSelectionSeq || currentConvId.value !== convId || currentBranchId.value !== branchId) return
+    await loadContextUsage(convId, branchId)
   }
 
   const createConversation = async (paperId?: string) => {
@@ -509,11 +554,20 @@ export const useChatStore = defineStore('chat', () => {
 
     ensureModel()
     const r = await api.createConversation({ paperId, model: currentModel.value || undefined })
+    const previousConversationId = currentConvId.value
+    if (previousConversationId && previousConversationId !== r.conversation.id) {
+      detachConversationStream(previousConversationId)
+    }
+    conversationSelectionSeq++
+    branchSelectionSeq++
     conversations.value.unshift(r.conversation)
     currentConvId.value = r.conversation.id
     chatError.value = ''
     pendingEmptyConvs.add(r.conversation.id)
     branchCache.value.clear()
+    branches.value = []
+    currentBranchId.value = null
+    currentContextUsage.value = null
     await loadBranches(r.conversation.id)
     const main = branches.value.find(b => b.branchName === "main")
     if (main) { currentBranchId.value = main.id; branchCache.value.set(main.id, []) }
@@ -774,7 +828,9 @@ export const useChatStore = defineStore('chat', () => {
           }
         }
       } else syncStream()
-      pdfContext.value = null
+      // A detached background send may settle after the user has moved to a
+      // different conversation/resource; do not clear that new view's context.
+      if (!convId || currentConvId.value === convId) pdfContext.value = null
     }
   }
 
@@ -819,6 +875,13 @@ export const useChatStore = defineStore('chat', () => {
       ws.onmessage = async (ev) => {
         try {
           const d = JSON.parse(ev.data)
+          // The server keeps producing after a conversation switch, but this
+          // detached socket must never mutate the newly selected conversation.
+          if (currentConvId.value !== convId) {
+            rejectOnce(new DOMException('Detached', 'AbortError'))
+            ws.close()
+            return
+          }
 
           if (d.type === 'stream_start') {
             if (d.branch?.id) {
@@ -866,28 +929,30 @@ export const useChatStore = defineStore('chat', () => {
 
           if (d.type === 'done') {
             terminalReceived = true
+            if (msg) flushTextQueue(msg, convId)
             const bid = msg?.branchId || currentBranchId.value
             if (streamFailed) {
-              // Keep the live error and edit-branch messages visible. A forced
-              // reload can race Pi's final JSONL write and replace the useful
-              // `❌ Request aborted` segment with an empty assistant message.
+              // The server sends `done` only after Pi has finished persisting
+              // the session. Reload the failed branch as well as successful
+              // branches so temporary pending IDs are replaced by canonical
+              // Pi entry IDs before the user can edit this turn again.
               finalizeFailedStream(convId, bid, msg)
+            }
+
+            try {
+              if (bid) {
+                await loadBranchMsgs(convId, bid, true)
+                await loadContextUsage(convId, bid)
+              }
               await loadBranches(convId)
+            } catch {
+              // Terminal stream settlement must not depend on a follow-up
+              // reconciliation request. The next normal branch load retries it.
+            } finally {
               detectSubagentRuns().catch(() => {})
               resolveOnce(msg)
               ws.close()
-              return
             }
-
-            if (bid) {
-              await loadBranchMsgs(convId, bid, true)
-              await loadContextUsage(convId, bid)
-            }
-            await loadBranches(convId)
-            // Detect new subagent runs from this turn
-            detectSubagentRuns().catch(() => {})
-            resolveOnce(msg)
-            ws.close()
             return
           }
 
@@ -937,11 +1002,36 @@ export const useChatStore = defineStore('chat', () => {
 
   // ── Event handling ────────────────────────────────────────────────
 
-  const ensureSeg = (m: Message) => { if (!Array.isArray(m.metadata.segments)) m.metadata.segments = []; return m.metadata.segments }
-  const appendSeg = (m: Message, t: string, type: 'text' | 'error' = 'text') => { const s = ensureSeg(m); const l = s[s.length - 1]; if (l?.type === type) l.text += t; else s.push({ type, text: t }) }
-  const pushTool = (m: Message, id: string) => { const s = ensureSeg(m); if (!s.some(x => x.type === 'tool' && x.toolCallId === id)) s.push({ type: 'tool', toolCallId: id }) }
+  const ensureSeg = (m: Message): ChatSegment[] => {
+    if (!Array.isArray(m.metadata.segments)) m.metadata.segments = []
+    return m.metadata.segments as ChatSegment[]
+  }
+  const appendSeg = (m: Message, t: string, type: 'text' | 'thinking' | 'error' = 'text') => {
+    const segments = ensureSeg(m)
+    const last = segments[segments.length - 1]
+    if (last?.type === type) last.text = (last.text || '') + t
+    else segments.push({ type, text: t })
+  }
+  const pushTool = (m: Message, id: string) => {
+    const segments = ensureSeg(m)
+    if (!segments.some(segment => segment.type === 'tool' && segment.toolCallId === id)) {
+      segments.push({ type: 'tool', toolCallId: id })
+    }
+  }
 
-  const appendText = (m: Message, t: string, c: string) => { if (c === currentConvId.value) streamingContent.value += t; m.content += t; appendSeg(m, t) }
+  const appendText = (m: Message, t: string, c: string) => {
+    if (c === currentConvId.value) streamingContent.value += t
+    m.content += t
+    appendSeg(m, t)
+  }
+
+  const flushTextQueue = (m: Message, c: string) => {
+    const queued = textQueues.get(m.id)
+    if (!queued) return
+    if (queued.timer !== null) window.clearTimeout(queued.timer)
+    textQueues.delete(m.id)
+    if (queued.buf) appendText(m, queued.buf, c)
+  }
 
   const enqueue = (m: Message, t: string, c: string) => {
     const id = m.id; const q = textQueues.get(id) || { buf: '', timer: null }; q.buf += t; textQueues.set(id, q)
@@ -953,8 +1043,13 @@ export const useChatStore = defineStore('chat', () => {
   const applyEvent = (d: any, m: Message, c: string) => {
     switch (d.type) {
       case 'text': enqueue(m, d.content, c); break
-      case 'thinking': m.metadata.thinking = (m.metadata.thinking || '') + d.content; break
+      case 'thinking':
+        flushTextQueue(m, c)
+        m.metadata.thinking = (m.metadata.thinking || '') + d.content
+        appendSeg(m, d.content, 'thinking')
+        break
       case 'tool_call_delta': {
+        flushTextQueue(m, c)
         if (!m.toolCalls) m.toolCalls = []
         const ex = m.toolCalls.find((t: any) => t.id === d.toolCallId)
         if (ex) {
@@ -966,7 +1061,7 @@ export const useChatStore = defineStore('chat', () => {
         pushTool(m, d.toolCallId)
         break
       }
-      case 'tool_call': { if (!m.toolCalls) m.toolCalls = []; let inp = d.input; if (typeof inp === 'string') try { inp = JSON.parse(inp) } catch {}; const ex = m.toolCalls.find((t: any) => t.id === d.toolCallId); if (ex) { ex.name = d.toolName; ex.input = inp; delete ex.inputText } else m.toolCalls.push({ id: d.toolCallId, name: d.toolName, input: inp }); pushTool(m, d.toolCallId); break }
+      case 'tool_call': { flushTextQueue(m, c); if (!m.toolCalls) m.toolCalls = []; let inp = d.input; if (typeof inp === 'string') try { inp = JSON.parse(inp) } catch {}; const ex = m.toolCalls.find((t: any) => t.id === d.toolCallId); if (ex) { ex.name = d.toolName; ex.input = inp; delete ex.inputText } else m.toolCalls.push({ id: d.toolCallId, name: d.toolName, input: inp }); pushTool(m, d.toolCallId); break }
       case 'tool_result': if (m.toolCalls) { const tc = m.toolCalls.find((t: any) => t.id === d.toolCallId); if (tc) tc.result = d.result }; break
       case 'search_results': {
         const searchTool = d.toolCallId && m.toolCalls?.find((tc: any) => tc.id === d.toolCallId)
@@ -1021,7 +1116,7 @@ export const useChatStore = defineStore('chat', () => {
         refreshActiveInteraction();
         if (d.reason === 'timeout') chatError.value = 'Agent 交互请求已超时，已按取消处理。';
         break;
-      case 'error': { const t = `❌ ${d.message}`; m.content += m.content ? `\n\n${t}` : t; if (c === currentConvId.value) chatError.value = d.message; appendSeg(m, t, 'error'); break }
+      case 'error': { flushTextQueue(m, c); const t = `❌ ${d.message}`; m.content += m.content ? `\n\n${t}` : t; if (c === currentConvId.value) chatError.value = d.message; appendSeg(m, t, 'error'); break }
       // UI Context bridge events
       case 'agent_ui_status': if (d.key) uiStatus.value = { ...uiStatus.value, [d.key]: d.text || '' }; break
       case 'agent_ui_widget': if (d.key) uiWidgets.value = { ...uiWidgets.value, [d.key]: { lines: d.lines || [], placement: d.placement || 'above' } }; break
@@ -1052,8 +1147,14 @@ export const useChatStore = defineStore('chat', () => {
     try { r = await api.getStreamingMessage(convId) }
     catch { syncStream(); return false }
 
+    if (currentConvId.value !== convId) return false
+
     const sm = r.message as Message | null
-    if (!sm?.id) { syncStream(); return false }
+    if (!sm?.id) {
+      syncStream()
+      if (r.preparing && currentConvId.value === convId) scheduleStreamReconnect(convId, 500)
+      return false
+    }
 
     const bid = (sm as any).branchId || currentBranchId.value
     const recoveredUser = r.userMessage as Message | null | undefined
@@ -1093,15 +1194,34 @@ export const useChatStore = defineStore('chat', () => {
 
     markActive(convId, sm.id)
 
+    const attachAbort = new AbortController()
+    abortControllers.get(convId)?.abort()
+    abortControllers.set(convId, attachAbort)
+    const clearAttachController = () => {
+      if (abortControllers.get(convId) === attachAbort) abortControllers.delete(convId)
+    }
+
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${location.host}/api/chat?conversation_id=${convId}`)
     let streamCompleted = false
     let streamFailed = false
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'attach', messageId: sm.id }))
+    attachAbort.signal.addEventListener('abort', () => ws.close())
+    ws.onopen = () => {
+      if (attachAbort.signal.aborted || currentConvId.value !== convId) {
+        ws.close()
+        return
+      }
+      ws.send(JSON.stringify({ type: 'attach', messageId: sm.id }))
+    }
     ws.onmessage = (ev) => {
       try {
         const d = JSON.parse(ev.data)
+        if (currentConvId.value !== convId) {
+          ws.close()
+          return
+        }
         if (d.type === 'done') {
+          flushTextQueue(msgRef, convId)
           streamCompleted = true
           ws.close(); return
         }
@@ -1115,7 +1235,9 @@ export const useChatStore = defineStore('chat', () => {
     }
     ws.onerror = () => { /* onclose handles retry/reload */ }
     ws.onclose = () => {
+      clearAttachController()
       markInactive(convId, sm.id)
+      if (currentConvId.value !== convId) return
       if (streamCompleted && !streamFailed) {
         if (bid) {
           branchCache.value.delete(bid)
@@ -1125,10 +1247,16 @@ export const useChatStore = defineStore('chat', () => {
           }).catch(() => {})
         }
       } else if (streamCompleted) {
-        // A stopped/failed reconnect already has the complete replayed content.
-        // Keep it visible instead of replacing it with Pi JSONL while abort
-        // persistence is still settling.
+        // The backend sends terminal `done` after Pi has finished writing the
+        // session, so reconcile failed reconnects with canonical JSONL too.
+        // This is what makes a message editable after a refresh during an
+        // errored turn instead of leaving its temporary pending ID in cache.
         finalizeFailedStream(convId, bid, msgRef)
+        if (bid) {
+          loadBranchMsgs(convId, bid, true)
+            .then(() => loadContextUsage(convId, bid))
+            .catch(() => {})
+        }
       } else if (currentConvId.value === convId) {
         scheduleStreamReconnect(convId, navigator.onLine === false ? 5000 : 1500)
       }
