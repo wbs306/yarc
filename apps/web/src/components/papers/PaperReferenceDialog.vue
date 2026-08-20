@@ -4,6 +4,7 @@ import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import type { SearchPaper } from '@yarc/shared'
 import ImportToLibraryDialog from '@/components/search/ImportToLibraryDialog.vue'
+import JournalRankingBadge from '@/components/rankings/JournalRankingBadge.vue'
 import { useApi } from '@/composables/useApi'
 import { usePaperReferenceStore } from '@/stores/paperReference'
 
@@ -234,6 +235,7 @@ onBeforeUnmount(() => {
             <div class="reference-badges">
               <span class="reference-badge" :class="{ local: isLocal }">{{ isLocal ? '本地论文' : '外部论文 · 尚未保存' }}</span>
               <span class="reference-badge muted">{{ sourceLabel }}</span>
+              <JournalRankingBadge :journal-name="paper.journal || undefined" :venue-name="paper.venue || undefined" />
             </div>
             <h3 class="reference-title">{{ paper.title }}</h3>
             <p class="reference-authors">{{ paper.authors?.join(', ') || '作者未知' }}</p>
@@ -308,7 +310,7 @@ onBeforeUnmount(() => {
 .candidate-title { font-weight: 600; line-height: 1.4; }
 .candidate-meta { color: var(--color-text-secondary); font-size: 12px; }
 .candidate-source { color: var(--color-text-muted); font-size: 11px; }
-.reference-badges { display: flex; gap: 6px; margin-bottom: 8px; }
+.reference-badges { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .reference-badge { padding: 2px 7px; border-radius: 999px; background: rgba(245, 158, 11, .12); color: var(--color-warning); font-size: 10px; font-weight: 600; }
 .reference-badge.local { background: rgba(34, 197, 94, .12); color: var(--color-success); }
 .reference-badge.muted { background: var(--color-bg-muted); color: var(--color-text-muted); }
