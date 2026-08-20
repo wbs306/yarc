@@ -89,4 +89,29 @@ describe('StreamBuffer terminal ordering', () => {
 
     await buffer.complete('message-3')
   })
+
+  it('merges reasoning blocks within the same tool phase', async () => {
+    const buffer = new StreamBuffer({
+      flushFn: async () => {},
+      flushIntervalMs: 60_000,
+    })
+
+    buffer.start('message-4', 'conversation-1', 'main')
+    buffer.append('message-4', { type: 'tool_call', toolCallId: 'tool-1', toolName: 'read', input: '{}' })
+    buffer.append('message-4', { type: 'thinking', content: 'reason-1' })
+    buffer.append('message-4', { type: 'text', content: 'intermediate text' })
+    buffer.append('message-4', { type: 'thinking', content: 'reason-2' })
+    buffer.append('message-4', { type: 'tool_call', toolCallId: 'tool-2', toolName: 'write', input: '{}' })
+
+    buffer.getEvents('message-4')
+    assert.deepEqual(
+      buffer.get('message-4')?.segments.map(segment => segment.type),
+      ['tool', 'thinking', 'text', 'tool']
+    )
+    const thinkingSegment = buffer.get('message-4')?.segments[1]
+    assert.equal(thinkingSegment?.type, 'thinking')
+    assert.equal(thinkingSegment && 'text' in thinkingSegment ? thinkingSegment.text : undefined, 'reason-1\n\nreason-2')
+
+    await buffer.complete('message-4')
+  })
 })

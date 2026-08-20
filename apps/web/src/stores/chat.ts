@@ -50,6 +50,35 @@ const MODEL_KEY = 'yarc-current-model'
 const EFFORT_KEY = 'yarc-reasoning-effort'
 const BRANCH_KEY = 'yarc-conv-branches'
 
+/** Keep one thinking card per interval bounded by tool calls. */
+const mergeThinkingSegmentsByToolPhase = (segments: ChatSegment[]): ChatSegment[] => {
+  const merged: ChatSegment[] = []
+  let thinkingIndex = -1
+
+  for (const segment of segments) {
+    if (segment.type === 'tool') {
+      merged.push({ ...segment })
+      thinkingIndex = -1
+      continue
+    }
+    if (segment.type !== 'thinking') {
+      merged.push({ ...segment })
+      continue
+    }
+
+    if (thinkingIndex >= 0) {
+      const target = merged[thinkingIndex]
+      const separator = thinkingIndex === merged.length - 1 ? '' : '\n\n'
+      target.text = `${target.text || ''}${separator}${segment.text || ''}`
+    } else {
+      thinkingIndex = merged.length
+      merged.push({ ...segment })
+    }
+  }
+
+  return merged
+}
+
 export const useChatStore = defineStore('chat', () => {
   const api = useApi()
 
@@ -194,10 +223,9 @@ export const useChatStore = defineStore('chat', () => {
    * Convert PiMessage from Pi JSONL to frontend Message format.
    */
   const convertPiMessage = (piMsg: any, convId: string, branchId?: string): Message => {
-    // Pi preserves the chronological content-block order. Keep it so thinking,
-    // text, and tool calls do not jump to different positions after the final
-    // canonical branch reload.
-    const segments: ChatSegment[] = Array.isArray(piMsg.segments)
+    // Preserve Pi's tool boundaries across canonical reloads while coalescing
+    // repeated reasoning blocks within each tool phase into one display card.
+    const segments: ChatSegment[] = mergeThinkingSegmentsByToolPhase(Array.isArray(piMsg.segments)
       ? piMsg.segments
           .filter((segment: any) => ['text', 'thinking', 'tool', 'error', 'compaction'].includes(segment?.type))
           .map((segment: any) => ({
@@ -205,7 +233,7 @@ export const useChatStore = defineStore('chat', () => {
             ...(typeof segment.text === 'string' ? { text: segment.text } : {}),
             ...(typeof segment.toolCallId === 'string' ? { toolCallId: segment.toolCallId } : {}),
           }))
-      : []
+      : [])
 
     if (!segments.length && piMsg.content) segments.push({ type: 'text', text: piMsg.content })
     if (!segments.some(segment => segment.type === 'tool') && piMsg.toolCalls?.length) {
@@ -1009,8 +1037,25 @@ export const useChatStore = defineStore('chat', () => {
   const appendSeg = (m: Message, t: string, type: 'text' | 'thinking' | 'error' = 'text') => {
     const segments = ensureSeg(m)
     const last = segments[segments.length - 1]
-    if (last?.type === type) last.text = (last.text || '') + t
-    else segments.push({ type, text: t })
+    if (last?.type === type) {
+      last.text = (last.text || '') + t
+      return
+    }
+
+    if (type === 'thinking') {
+      // Multiple provider reasoning blocks can occur before the next tool call.
+      // Keep them in one card for that phase, even if text blocks sit between.
+      for (let index = segments.length - 1; index >= 0; index--) {
+        const segment = segments[index]
+        if (segment.type === 'tool') break
+        if (segment.type === 'thinking') {
+          segment.text = `${segment.text || ''}\n\n${t}`
+          return
+        }
+      }
+    }
+
+    segments.push({ type, text: t })
   }
   const pushTool = (m: Message, id: string) => {
     const segments = ensureSeg(m)

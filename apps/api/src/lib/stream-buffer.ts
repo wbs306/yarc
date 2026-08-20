@@ -284,8 +284,24 @@ export class StreamBuffer {
     const thinking = thinkBuf.join('')
     entry.events.push({ type: 'thinking', content: thinking })
     const lastSegment = entry.segments[entry.segments.length - 1]
-    if (lastSegment?.type === 'thinking') lastSegment.text += thinking
-    else entry.segments.push({ type: 'thinking', text: thinking })
+    if (lastSegment?.type === 'thinking') {
+      lastSegment.text += thinking
+    } else {
+      // Providers may emit several reasoning blocks between two tool calls.
+      // Store one thinking segment for that whole phase so replay and final
+      // snapshots match the frontend's single-card presentation.
+      let phaseThinking: { text: string } | undefined
+      for (let index = entry.segments.length - 1; index >= 0; index--) {
+        const segment = entry.segments[index]
+        if (segment.type === 'tool') break
+        if (segment.type === 'thinking') {
+          phaseThinking = segment
+          break
+        }
+      }
+      if (phaseThinking) phaseThinking.text += `\n\n${thinking}`
+      else entry.segments.push({ type: 'thinking', text: thinking })
+    }
     thinkBuf.length = 0
   }
 
