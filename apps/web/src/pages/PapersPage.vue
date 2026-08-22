@@ -289,7 +289,8 @@ const markdownScrollLine = ref(1)
 const markdownScrollPercent = ref(0)
 const markdownViewportPercent = ref(100)
 const markdownSplitRatio = ref(50)
-const markdownSplitEditorOnLeft = ref(true)
+const defaultMarkdownSplitEditorOnLeft = () => prefs.markdownSplitEditorPosition === 'left'
+const markdownSplitEditorOnLeft = ref(defaultMarkdownSplitEditorOnLeft())
 const markdownSplitResizeActive = ref(false)
 const pendingMarkdownScroll = new Map<MarkdownScrollPane, number>()
 let markdownScrollRestoreTimer: number | null = null
@@ -658,6 +659,9 @@ const setMarkdownViewMode = (mode: MarkdownViewMode) => {
   markdownScrollLine.value = currentLine
   pendingMarkdownScroll.clear()
   if (mode === 'edit') closeMarkdownSearch()
+  if (mode === 'split' && markdownViewMode.value !== 'split') {
+    markdownSplitEditorOnLeft.value = defaultMarkdownSplitEditorOnLeft()
+  }
   markdownViewMode.value = mode
   void nextTick(() => restoreMarkdownScrollPosition(currentLine))
 }
@@ -736,7 +740,7 @@ const restoreWorkspaceTab = (tab: WorkspaceFileTab, node: FileNode) => {
   markdownViewMode.value = tab.markdownViewMode ?? 'edit'
   markdownScrollLine.value = restoredLine
   markdownSplitRatio.value = clampMarkdownSplitRatio(tab.markdownSplitRatio ?? 50)
-  markdownSplitEditorOnLeft.value = tab.markdownSplitEditorOnLeft ?? true
+  markdownSplitEditorOnLeft.value = tab.markdownSplitEditorOnLeft ?? defaultMarkdownSplitEditorOnLeft()
   workspaceContentLoading.value = false
   tab.lastAccessedAt = Date.now()
   void nextTick(() => restoreMarkdownScrollPosition(restoredLine))
@@ -982,7 +986,7 @@ const clearWorkspaceEditor = () => {
   markdownScrollLine.value = 1
   markdownScrollPercent.value = 0
   markdownSplitRatio.value = 50
-  markdownSplitEditorOnLeft.value = true
+  markdownSplitEditorOnLeft.value = defaultMarkdownSplitEditorOnLeft()
   pendingMarkdownScroll.clear()
 }
 
@@ -1267,7 +1271,7 @@ const selectWorkspaceFile = async (node: FileNode) => {
   markdownViewMode.value = existingTab?.markdownViewMode ?? 'edit'
   markdownScrollLine.value = existingTab?.markdownScrollLine ?? 1
   markdownSplitRatio.value = clampMarkdownSplitRatio(existingTab?.markdownSplitRatio ?? 50)
-  markdownSplitEditorOnLeft.value = existingTab?.markdownSplitEditorOnLeft ?? true
+  markdownSplitEditorOnLeft.value = existingTab?.markdownSplitEditorOnLeft ?? defaultMarkdownSplitEditorOnLeft()
   pendingMarkdownScroll.clear()
 
   if (node.type !== 'file' || !node.editable) {

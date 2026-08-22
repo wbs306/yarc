@@ -1386,6 +1386,7 @@ const resetAllSettings = async () => {
   prefs.searchSource = 'semantic_scholar'
   prefs.searchPageSize = 20
   prefs.workspaceAutoSaveOnSwitch = false
+  prefs.markdownSplitEditorPosition = 'left'
   localStorage.removeItem('yarc_sort')
   loadLitPrefs()
 }
@@ -1645,6 +1646,18 @@ onBeforeUnmount(() => {
             </div>
             <div class="row-control" style="flex: 1; max-width: 200px;">
               <input type="range" :value="theme.editor.markdownFontSize" min="10" max="24" step="1" class="range" @input="theme.setEditorSetting('markdownFontSize', Number(($event.target as HTMLInputElement).value))" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="row-info">
+              <div class="row-label">Markdown 双栏编辑位置</div>
+              <div class="row-desc">点击“双栏”时，编辑区显示在左侧或右侧</div>
+            </div>
+            <div class="row-control">
+              <div class="pill-group">
+                <button class="pill" :class="{ active: prefs.markdownSplitEditorPosition === 'left' }" @click="prefs.markdownSplitEditorPosition = 'left'">编辑在左侧</button>
+                <button class="pill" :class="{ active: prefs.markdownSplitEditorPosition === 'right' }" @click="prefs.markdownSplitEditorPosition = 'right'">编辑在右侧</button>
+              </div>
             </div>
           </div>
           <div class="setting-row">

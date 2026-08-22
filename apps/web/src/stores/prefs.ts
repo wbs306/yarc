@@ -5,6 +5,7 @@ import { ref, watch } from 'vue'
 // Persisted to localStorage; reactive so changing a default in Settings updates the
 // already-mounted search bar live.
 export type SearchSource = 'local' | 'ieee' | 'semantic_scholar'
+export type MarkdownSplitEditorPosition = 'left' | 'right'
 
 export const usePrefsStore = defineStore('prefs', () => {
   const searchSource = ref<SearchSource>(
@@ -12,10 +13,14 @@ export const usePrefsStore = defineStore('prefs', () => {
   )
   const searchPageSize = ref<number>(Number(localStorage.getItem('yarc_search_page_size')) || 20)
   const workspaceAutoSaveOnSwitch = ref<boolean>(localStorage.getItem('yarc_workspace_auto_save_on_switch') === 'true')
+  const markdownSplitEditorPosition = ref<MarkdownSplitEditorPosition>(
+    localStorage.getItem('yarc_markdown_split_editor_position') === 'right' ? 'right' : 'left'
+  )
 
   watch(searchSource, (v) => localStorage.setItem('yarc_search_source', v))
   watch(searchPageSize, (v) => localStorage.setItem('yarc_search_page_size', String(v)))
   watch(workspaceAutoSaveOnSwitch, (v) => localStorage.setItem('yarc_workspace_auto_save_on_switch', String(v)))
+  watch(markdownSplitEditorPosition, (v) => localStorage.setItem('yarc_markdown_split_editor_position', v))
 
-  return { searchSource, searchPageSize, workspaceAutoSaveOnSwitch }
+  return { searchSource, searchPageSize, workspaceAutoSaveOnSwitch, markdownSplitEditorPosition }
 })
