@@ -4198,27 +4198,27 @@ const showSearchPaperPopup = (paper: any) => {
                     />
                   </div>
                 </aside>
-                <div
-                  v-if="markdownIsSplit"
-                  ref="markdownSplitDividerRef"
-                  class="markdown-split-divider"
-                  :class="{ active: markdownSplitResizeActive }"
-                  role="separator"
-                  tabindex="0"
-                  :aria-orientation="markdownSplitIsVertical() ? 'horizontal' : 'vertical'"
-                  aria-label="调整编辑区和预览区宽度"
-                  aria-valuemin="20"
-                  aria-valuemax="80"
-                  :aria-valuenow="Math.round(markdownSplitRatio)"
-                  @pointerdown="startMarkdownSplitResize"
-                  @pointermove="onMarkdownSplitResize"
-                  @pointerup="endMarkdownSplitResize"
-                  @pointercancel="endMarkdownSplitResize"
-                  @keydown.left.prevent="adjustMarkdownSplitRatio(-5)"
-                  @keydown.right.prevent="adjustMarkdownSplitRatio(5)"
-                >
-                  <span class="markdown-split-divider-grip" aria-hidden="true" />
-                </div>
+              </div>
+              <div
+                v-if="markdownIsSplit"
+                ref="markdownSplitDividerRef"
+                class="markdown-split-divider"
+                :class="{ active: markdownSplitResizeActive }"
+                role="separator"
+                tabindex="0"
+                :aria-orientation="markdownSplitIsVertical() ? 'horizontal' : 'vertical'"
+                aria-label="调整编辑区和预览区宽度"
+                aria-valuemin="20"
+                aria-valuemax="80"
+                :aria-valuenow="Math.round(markdownSplitRatio)"
+                @pointerdown="startMarkdownSplitResize"
+                @pointermove="onMarkdownSplitResize"
+                @pointerup="endMarkdownSplitResize"
+                @pointercancel="endMarkdownSplitResize"
+                @keydown.left.prevent="adjustMarkdownSplitRatio(-5)"
+                @keydown.right.prevent="adjustMarkdownSplitRatio(5)"
+              >
+                <span class="markdown-split-divider-grip" aria-hidden="true" />
               </div>
               <CodeEditor
                 ref="workspaceEditorRef"
