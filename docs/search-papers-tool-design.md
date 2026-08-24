@@ -73,7 +73,7 @@ action?: 'search' | 'abstract' | 'preview' | 'import'
   arxivId?: string
   url?: string
   paper?: Record<string, unknown>  // 允许直接传 search 返回的单篇结果
-  papers?: Array<Record<string, unknown>> // import 批量使用
+  papers?: Array<Record<string, unknown>> // preview / import 批量使用
 
   // preview
   temporaryId?: string
@@ -403,6 +403,28 @@ content.md.tmp
 ```
 
 如果未来需要按页精确读取，可新增只读 helper，但不是本设计的必要条件。
+
+### 5.8 单篇与批量 preview
+
+`preview` 同时支持 `paper` 单篇和 `papers` 数组：
+
+- `papers` 长度为 1 时沿用单篇返回形状，不要求调用方改处理逻辑；
+- 长度大于 1 时并行启动各项预览，`details.previews` 按输入顺序逐项返回 `ready`、`parsing`、`failed`、`unavailable` 或 `expired` 状态；
+- 批量结果允许部分成功。只有 `ready` 项返回 `path`；`parsing` 项只返回 `temporaryId`，不能读取路径；
+- 重试时把每项返回的 `temporaryId` 放回对应的 `papers` 项中，并继续使用 `action=preview`。
+
+示例：
+
+```json
+{
+  "action": "preview",
+  "papers": [
+    { "source": "semantic_scholar", "paperId": "paper-a", "title": "Paper A" },
+    { "source": "semantic_scholar", "paperId": "paper-b", "title": "Paper B" }
+  ],
+  "async": true
+}
+```
 
 ## 6. `action: import`
 

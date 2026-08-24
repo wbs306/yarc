@@ -881,7 +881,7 @@ export class PiService {
       defineTool({
         name: 'yarc_search_papers',
         label: 'Search and Process Papers',
-        description: 'Search papers and process external results. action=search searches papers and defaults to IEEE for external searches; action=abstract gets a complete external abstract; action=preview temporarily downloads and MinerU-parses a PDF, returning a readable Markdown path only when status=ready; while parsing or timed out, retry with the same temporaryId and do not read a path; action=import queues a formal library import. Use import only when the user explicitly asks to save/import a paper.',
+        description: 'Search papers and process external results. action=search searches papers and defaults to IEEE for external searches; action=abstract gets a complete external abstract; action=preview temporarily downloads and MinerU-parses one or more PDFs, returning readable Markdown paths only when status=ready; while parsing or timed out, retry with the same temporaryId (for batch previews, put each temporaryId in its corresponding papers item) and do not read a path; action=import queues a formal library import. Use import only when the user explicitly asks to save/import a paper.',
         parameters: Type.Object({
           action: Type.Optional(Type.Union([
             Type.Literal('search'),
@@ -917,7 +917,7 @@ export class PiService {
           earlyAccess: Type.Optional(Type.Boolean({ description: 'IEEE only: return Early Access Articles' })),
           publication: Type.Optional(Type.String({ description: 'IEEE only: top venue alias or exact publication title' })),
           paper: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: 'A single paper object copied from action=search' })),
-          papers: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { description: 'Papers for action=import (batch supported)' })),
+          papers: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), { minItems: 1, description: 'Paper objects for action=preview or action=import. Preview accepts a batch; when papers has one item the response stays the same as the single-paper form. For batch preview retries, include the returned temporaryId in each corresponding item.' })),
           temporaryId: Type.Optional(Type.String({ description: 'Temporary preview ID returned by an earlier preview call' })),
           async: Type.Optional(Type.Boolean({ description: 'For preview: return parsing status immediately instead of waiting; parsing status never includes a readable path' })),
           retryFailed: Type.Optional(Type.Boolean({ description: 'For preview: restart a previously failed temporary parse' })),
@@ -1013,6 +1013,140 @@ export class PiService {
             }
 
             if (action === 'preview') {
+              const previewPapers = params.paper
+                ? [params.paper]
+                : Array.isArray(params.papers) && params.papers.length > 0
+                  ? params.papers
+                  : [params]
+
+              if (previewPapers.length > 1) {
+                const previews = await Promise.all(previewPapers.map(async (paper: any, index: number) => {
+                  const previewPaper = paper && typeof paper === 'object' ? paper : {}
+                  const itemSource = previewPaper.source || params.source || (previewPaper.articleNumber ? 'ieee' : 'semantic_scholar')
+                  const title = typeof previewPaper.title === 'string' && previewPaper.title.trim()
+                    ? previewPaper.title.trim()
+                    : `Paper ${index + 1}`
+                  const temporaryId = typeof previewPaper.temporaryId === 'string'
+                    ? previewPaper.temporaryId
+                    : undefined
+                  const base = { index, title, source: itemSource, ...(temporaryId ? { temporaryId } : {}) }
+
+                  if (!['local', 'ieee', 'semantic_scholar'].includes(itemSource)) {
+                    return { ...base, status: 'unavailable' as const, retryable: false, error: `Unsupported paper source: ${itemSource}` }
+                  }
+
+                  try {
+                    let document
+                    if (temporaryId) {
+                      const current = temporaryPdfService.get(temporaryId)
+                      if (!current) {
+                        return { ...base, status: 'expired' as const, retryable: false, error: 'Temporary PDF not found or expired' }
+                      }
+                      document = params.async
+                        ? current.status === 'failed' && params.retryFailed
+                          ? await temporaryPdfService.create(current.sourceUrl, current.title, { retryFailed: true })
+                          : current
+                        : await temporaryPdfService.waitForReady(temporaryId, { timeoutMs: 180_000, retryFailed: params.retryFailed === true })
+                    } else {
+                      let resolvedPaper = previewPaper
+                      const sourceId = previewPaper.paperId
+                        || (itemSource === 'semantic_scholar' && previewPaper.id)
+                        || (itemSource === 'semantic_scholar' && previewPaper.doi ? `DOI:${previewPaper.doi}` : undefined)
+                        || (itemSource === 'semantic_scholar' && previewPaper.arxivId ? `ARXIV:${previewPaper.arxivId}` : undefined)
+                        || (itemSource === 'semantic_scholar' && previewPaper.url ? `URL:${previewPaper.url}` : undefined)
+                      const articleNumber = previewPaper.articleNumber || (itemSource === 'ieee' ? previewPaper.id : undefined)
+                      let pdfUrl = previewPaper.pdfUrl || previewPaper.openAccessPdf?.url
+                      if (!pdfUrl && typeof previewPaper.url === 'string' && /\.pdf(?:[?#]|$)/i.test(previewPaper.url)) pdfUrl = previewPaper.url
+                      if (!pdfUrl && itemSource === 'semantic_scholar' && sourceId) {
+                        resolvedPaper = await searchService.fetchSemanticScholarPaper(String(sourceId))
+                        pdfUrl = resolvedPaper.pdfUrl || resolvedPaper.openAccessPdf?.url
+                      }
+                      if (!pdfUrl && itemSource === 'ieee' && articleNumber) {
+                        pdfUrl = `https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=${articleNumber}`
+                      }
+                      if (!pdfUrl || typeof pdfUrl !== 'string') {
+                        return { ...base, status: 'unavailable' as const, retryable: false, error: 'No usable PDF URL is available for this result. Use action=abstract or provide pdfUrl.' }
+                      }
+                      const resolvedTitle = typeof resolvedPaper.title === 'string' && resolvedPaper.title.trim()
+                        ? resolvedPaper.title.trim()
+                        : title
+                      document = params.async
+                        ? await temporaryPdfService.create(pdfUrl, resolvedTitle, { retryFailed: params.retryFailed === true })
+                        : await temporaryPdfService.ensureReady(pdfUrl, resolvedTitle, { timeoutMs: 180_000, retryFailed: params.retryFailed === true })
+                    }
+
+                    if (document.status === 'parsing') {
+                      return {
+                        ...base,
+                        title: document.title || title,
+                        status: 'parsing' as const,
+                        temporaryId: document.id,
+                        retryable: true,
+                        timedOut: document.timedOut,
+                      }
+                    }
+                    if (document.status === 'failed' || !document.path) {
+                      return {
+                        ...base,
+                        title: document.title || title,
+                        status: 'failed' as const,
+                        temporaryId: document.id,
+                        retryable: true,
+                        error: document.error || 'MinerU parsing failed',
+                      }
+                    }
+                    return {
+                      ...base,
+                      title: document.title || title,
+                      status: 'ready' as const,
+                      temporaryId: document.id,
+                      path: document.path,
+                      expiresAt: document.expiresAt,
+                    }
+                  } catch (err) {
+                    return { ...base, status: 'failed' as const, retryable: true, error: (err as Error).message || 'PDF preview failed' }
+                  }
+                }))
+                const readyCount = previews.filter((preview) => preview.status === 'ready').length
+                const parsingCount = previews.filter((preview) => preview.status === 'parsing').length
+                const failedCount = previews.length - readyCount - parsingCount
+                const status = readyCount === previews.length
+                  ? 'ready'
+                  : readyCount === 0 && parsingCount === previews.length
+                    ? 'parsing'
+                    : readyCount === 0
+                      ? 'failed'
+                      : 'partial'
+                let text = `PDF preview batch: ${readyCount} ready, ${parsingCount} parsing, ${failedCount} failed out of ${previews.length}.`
+                for (const preview of previews) {
+                  text += `\n\n${preview.index + 1}. ${preview.title} [${preview.status}]`
+                  if (preview.path) text += `\nPath: ${preview.path}`
+                  if (preview.temporaryId) text += `\nTemporary ID: ${preview.temporaryId}`
+                  if (preview.expiresAt) text += `\nExpires: ${preview.expiresAt}`
+                  if (preview.error) text += `\nError: ${preview.error}`
+                }
+                if (parsingCount > 0) text += '\n\nParsing items have no readable path yet; retry preview with each corresponding temporaryId in papers.'
+                const allFailed = previews.every((preview) => ['failed', 'unavailable', 'expired'].includes(preview.status))
+                return {
+                  content: [{ type: 'text' as const, text }],
+                  ...(allFailed ? { isError: true } : {}),
+                  details: {
+                    action,
+                    status,
+                    total: previews.length,
+                    ready: readyCount,
+                    parsing: parsingCount,
+                    failed: failedCount,
+                    retryable: previews.some((preview) => preview.retryable),
+                    previews,
+                    mode: params.mode || 'full_text',
+                    startPage: params.startPage,
+                    endPage: params.endPage,
+                    maxChars: params.maxChars,
+                  },
+                }
+              }
+
               let document
               if (params.temporaryId) {
                 const current = temporaryPdfService.get(params.temporaryId)

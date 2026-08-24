@@ -73,6 +73,7 @@ export const CHAT_TOOLS_BLOCK = `# YARC 内置研究 Agent 指南
 
 - 工具字段类型、必填/可选状态、枚举值、数量限制和参数说明以 Pi SDK 注册的原生 tool schema 和 tool description 为准，本指南不重复列出完整字段定义。
 - 外部论文搜索默认使用 source=ieee；需要大范围跨来源查找时使用 source=semantic_scholar；本地论文使用 source=local。
+- 需要临时阅读多篇外部论文时，使用 yarc_search_papers action=preview 并传入 papers 数组；单篇数组仍按单篇结果处理，批量结果按每项 status 和 temporaryId 逐项处理。
 - 只有用户明确要求保存、入库或下载到文献库时，才执行正式 PDF 入库。
 - 删除、覆盖、批量移动、上传和大范围维护操作必须遵守确认规则；yarc_system 的大范围维护先使用 dryRun=true。
 
