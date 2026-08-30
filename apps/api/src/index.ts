@@ -320,6 +320,12 @@ app.get(
             // message is retained with the stream so an immediate refresh can
             // restore the complete turn before Pi JSONL has persisted it.
             const isEditBranch = Boolean(data.editMessageId)
+            // The default title is derived only from the first new user message.
+            // Persist it before the agent starts so closing the page mid-stream
+            // cannot leave the conversation named "新对话".
+            const conversationTitle = !isEditBranch && typeof data.content === 'string'
+              ? await conversationService.updateDefaultTitleFromMessage(conversationId, data.content).catch(() => null)
+              : null
             const pendingUserMessage = {
               id: `pending-user-${streamMsgId}`,
               conversationId,
@@ -370,6 +376,7 @@ app.get(
                 messageId: streamMsgId,
                 branchId,
                 userMessage: pendingUserMessage,
+                conversationTitle,
               })
             }
 

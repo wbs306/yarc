@@ -1,6 +1,11 @@
 import { prisma } from '@yarc/db'
 import { AppError } from '../lib/errors.js'
 
+const DEFAULT_CONVERSATION_TITLE = '新对话'
+
+export const conversationTitleFromMessage = (content: string) =>
+  content.slice(0, 30).replace(/\n/g, ' ').trim()
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 /**
@@ -32,7 +37,7 @@ export class ConversationService {
     const conv = await prisma.conversation.create({
       data: {
         paperId: data.paperId,
-        title: data.title || '新对话',
+        title: data.title || DEFAULT_CONVERSATION_TITLE,
         model: data.model,
         systemPrompt: data.systemPrompt,
       },
@@ -51,6 +56,17 @@ export class ConversationService {
       where: { id },
       data: { title, updatedAt: new Date() },
     })
+  }
+
+  async updateDefaultTitleFromMessage(id: string, content: string) {
+    const title = conversationTitleFromMessage(content)
+    if (!title) return null
+
+    const result = await prisma.conversation.updateMany({
+      where: { id, title: DEFAULT_CONVERSATION_TITLE },
+      data: { title, updatedAt: new Date() },
+    })
+    return result.count > 0 ? title : null
   }
 
   async updateModel(id: string, model: string) {

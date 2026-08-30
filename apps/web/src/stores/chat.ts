@@ -844,17 +844,6 @@ export const useChatStore = defineStore('chat', () => {
       if (convId) {
         markInactive(convId, assistantMsg?.id)
         if (shouldReconnect) scheduleStreamReconnect(convId)
-        // Auto-title: if conversation still has default title, use first message.
-        if (!opts.editMessageId) {
-          const conv = conversations.value.find(c => c.id === convId)
-          if (conv && conv.title === '新对话') {
-            const title = content.slice(0, 30).replace(/\n/g, ' ').trim()
-            if (title) {
-              conv.title = title
-              api.updateConversationTitle(convId, title).catch(() => {})
-            }
-          }
-        }
       } else syncStream()
       // A detached background send may settle after the user has moved to a
       // different conversation/resource; do not clear that new view's context.
@@ -912,6 +901,14 @@ export const useChatStore = defineStore('chat', () => {
           }
 
           if (d.type === 'stream_start') {
+            if (typeof d.conversationTitle === 'string' && d.conversationTitle) {
+              const conv = conversations.value.find(c => c.id === convId)
+              if (conv?.title === '新对话') {
+                conv.title = d.conversationTitle
+                conv.updatedAt = new Date().toISOString()
+              }
+            }
+
             if (d.branch?.id) {
               const exists = branches.value.findIndex(b => b.id === d.branch.id)
               if (exists >= 0) branches.value[exists] = d.branch
