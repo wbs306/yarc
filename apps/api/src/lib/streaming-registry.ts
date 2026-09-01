@@ -54,17 +54,68 @@ export class StreamingRegistry {
     active.updatedAt = Date.now()
   }
 
+  /** Atomically hand producer ownership to a continuation run in the same conversation. */
+  handoff(
+    conversationId: string,
+    fromMessageId: string,
+    toMessageId: string,
+    values: { branchId: string; sessionFile: string },
+  ): boolean {
+    const active = this.activeStreams.get(conversationId)
+    if (!active || active.messageId !== fromMessageId) return false
+    active.resolveCompletion()
+
+    let resolveCompletion!: () => void
+    const completion = new Promise<void>((resolve) => { resolveCompletion = resolve })
+    const now = Date.now()
+    this.activeStreams.set(conversationId, {
+      messageId: toMessageId,
+      branchId: values.branchId,
+      sessionFile: values.sessionFile,
+      startedAt: now,
+      updatedAt: now,
+      completion,
+      resolveCompletion,
+    })
+    return true
+  }
+
+  /** Move an active producer when an extension switches to another YARC conversation. */
+  transfer(
+    fromConversationId: string,
+    toConversationId: string,
+    messageId: string,
+    values: { branchId: string; sessionFile: string },
+  ): boolean {
+    const active = this.activeStreams.get(fromConversationId)
+    if (!active || active.messageId !== messageId) return false
+    const target = this.activeStreams.get(toConversationId)
+    if (target && target.messageId !== messageId) return false
+    this.activeStreams.delete(fromConversationId)
+    active.branchId = values.branchId
+    active.sessionFile = values.sessionFile
+    active.updatedAt = Date.now()
+    this.activeStreams.set(toConversationId, active)
+    return true
+  }
+
   /** Refresh producer liveness without changing user-visible state. */
   touch(conversationId: string, messageId: string): void {
     const active = this.activeStreams.get(conversationId)
+      || [...this.activeStreams.values()].find(stream => stream.messageId === messageId)
     if (active?.messageId === messageId) active.updatedAt = Date.now()
   }
 
   /** Unregister a completed/failed stream. */
   unregister(conversationId: string, messageId?: string): void {
-    const active = this.activeStreams.get(conversationId)
+    let ownerConversationId = conversationId
+    let active = this.activeStreams.get(conversationId)
+    if ((!active || (messageId && active.messageId !== messageId)) && messageId) {
+      const transferred = [...this.activeStreams.entries()].find(([, stream]) => stream.messageId === messageId)
+      if (transferred) [ownerConversationId, active] = transferred
+    }
     if (!active || (messageId && active.messageId !== messageId)) return
-    this.activeStreams.delete(conversationId)
+    this.activeStreams.delete(ownerConversationId)
     active.resolveCompletion()
   }
 

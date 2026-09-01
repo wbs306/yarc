@@ -13,7 +13,8 @@ describe('StreamBuffer terminal ordering', () => {
     const persist = deferred()
     let persisted = false
     const buffer = new StreamBuffer({
-      flushFn: async () => {
+      flushFn: async (_conversationId, _messageId, _events, finalData) => {
+        if (finalData.status === 'streaming') return
         await persist.promise
         persisted = true
       },
@@ -21,7 +22,7 @@ describe('StreamBuffer terminal ordering', () => {
     })
     const received: any[] = []
 
-    buffer.start('message-1', 'conversation-1', 'main')
+    await buffer.start('message-1', 'conversation-1', 'main')
     buffer.subscribe('message-1', event => { received.push(event) })
     buffer.append('message-1', { type: 'text', content: 'hello' })
     buffer.append('message-1', { type: 'done' })
@@ -45,12 +46,14 @@ describe('StreamBuffer terminal ordering', () => {
   it('publishes failed done only after the failed snapshot is persisted', async () => {
     const persist = deferred()
     const buffer = new StreamBuffer({
-      flushFn: async () => { await persist.promise },
+      flushFn: async (_conversationId, _messageId, _events, finalData) => {
+        if (finalData.status !== 'streaming') await persist.promise
+      },
       flushIntervalMs: 60_000,
     })
     const received: any[] = []
 
-    buffer.start('message-2', 'conversation-1', 'main')
+    await buffer.start('message-2', 'conversation-1', 'main')
     buffer.subscribe('message-2', event => { received.push(event) })
     const failing = buffer.fail('message-2', 'provider failed')
     await new Promise(resolve => setImmediate(resolve))
@@ -71,17 +74,20 @@ describe('StreamBuffer terminal ordering', () => {
       flushIntervalMs: 60_000,
     })
 
-    buffer.start('message-3', 'conversation-1', 'main')
+    await buffer.start('message-3', 'conversation-1', 'main')
     buffer.append('message-3', { type: 'thinking', content: 'reason-1' })
     buffer.append('message-3', { type: 'text', content: 'answer-1' })
     buffer.append('message-3', { type: 'tool_call', toolCallId: 'tool-1', toolName: 'read', input: '{}' })
     buffer.append('message-3', { type: 'thinking', content: 'reason-2' })
     buffer.append('message-3', { type: 'text', content: 'answer-2' })
 
+    const replay = buffer.getEvents('message-3')
     assert.deepEqual(
-      buffer.getEvents('message-3').map((event: any) => event.type),
+      replay.map((event: any) => event.type),
       ['thinking', 'text', 'tool_call', 'thinking', 'text']
     )
+    assert.deepEqual(replay.map((event: any) => event.eventSequence), [1, 2, 3, 4, 5])
+    assert.deepEqual(buffer.getEvents('message-3', 3).map((event: any) => event.eventSequence), [4, 5])
     assert.deepEqual(
       buffer.get('message-3')?.segments.map(segment => segment.type),
       ['thinking', 'text', 'tool', 'thinking', 'text']
@@ -90,13 +96,32 @@ describe('StreamBuffer terminal ordering', () => {
     await buffer.complete('message-3')
   })
 
+  it('records the canonical Session file when a commit mapping arrives', async () => {
+    const buffer = new StreamBuffer({
+      flushFn: async () => {},
+      flushIntervalMs: 60_000,
+    })
+
+    await buffer.start('message-5', 'conversation-1', 'main')
+    buffer.append('message-5', {
+      type: 'pi_assistant_entry',
+      conversationId: 'conversation-1',
+      messageId: 'message-5',
+      entryId: 'assistant-entry-5',
+      sessionFile: '/tmp/session-5.jsonl',
+    })
+
+    assert.equal(buffer.get('message-5')?.sessionFile, '/tmp/session-5.jsonl')
+    await buffer.complete('message-5')
+  })
+
   it('merges reasoning blocks within the same tool phase', async () => {
     const buffer = new StreamBuffer({
       flushFn: async () => {},
       flushIntervalMs: 60_000,
     })
 
-    buffer.start('message-4', 'conversation-1', 'main')
+    await buffer.start('message-4', 'conversation-1', 'main')
     buffer.append('message-4', { type: 'tool_call', toolCallId: 'tool-1', toolName: 'read', input: '{}' })
     buffer.append('message-4', { type: 'thinking', content: 'reason-1' })
     buffer.append('message-4', { type: 'text', content: 'intermediate text' })

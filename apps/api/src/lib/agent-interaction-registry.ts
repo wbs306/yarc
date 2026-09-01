@@ -9,6 +9,7 @@ import type {
 export interface PendingInteraction {
   requestId: string
   conversationId: string
+  branchId: string
   streamMessageId: string
   kind: AgentInteractionKind
   resolve: (value: AgentInteractionResponse) => void
@@ -20,6 +21,7 @@ export interface PendingInteraction {
 
 export interface CreateInteractionInput {
   conversationId: string
+  branchId: string
   streamMessageId: string
   kind: AgentInteractionKind
   title?: string
@@ -45,6 +47,7 @@ class AgentInteractionRegistry {
       type: 'agent_interaction_request',
       requestId,
       conversationId: input.conversationId,
+      branchId: input.branchId,
       streamMessageId: input.streamMessageId,
       kind: input.kind,
       title: input.title,
@@ -58,6 +61,7 @@ class AgentInteractionRegistry {
       const pending: PendingInteraction = {
         requestId,
         conversationId: input.conversationId,
+        branchId: input.branchId,
         streamMessageId: input.streamMessageId,
         kind: input.kind,
         resolve,

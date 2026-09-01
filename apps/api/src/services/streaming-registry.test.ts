@@ -19,6 +19,41 @@ describe('StreamingRegistry producer ownership', () => {
     assert.equal(registry.has('conversation-1'), false)
   })
 
+  it('transfers producer ownership across extension-driven session switches', () => {
+    const registry = new StreamingRegistry()
+    registry.register('conversation-1', 'message-1', 'main', 'session-1')
+
+    assert.equal(registry.transfer('conversation-1', 'conversation-2', 'message-1', {
+      branchId: 'main',
+      sessionFile: 'session-2',
+    }), true)
+    assert.equal(registry.has('conversation-1'), false)
+    assert.equal(registry.get('conversation-2')?.sessionFile, 'session-2')
+
+    // The original producer closure still uses its starting conversation ID.
+    // Heartbeat and cleanup must continue to find the transferred run by ID.
+    registry.touch('conversation-1', 'message-1')
+    registry.unregister('conversation-1', 'message-1')
+    assert.equal(registry.has('conversation-2'), false)
+  })
+
+  it('hands producer ownership to a delayed extension continuation without a free gap', async () => {
+    const registry = new StreamingRegistry()
+    registry.register('conversation-1', 'message-1', 'main', 'session-1')
+    const originalCompletion = registry.waitForMessage('message-1', 0)
+
+    assert.equal(registry.handoff('conversation-1', 'message-1', 'extension-run-1', {
+      branchId: 'main',
+      sessionFile: 'session-1',
+    }), true)
+    await originalCompletion
+    assert.equal(registry.get('conversation-1')?.messageId, 'extension-run-1')
+
+    registry.unregister('conversation-1', 'message-1')
+    assert.equal(registry.get('conversation-1')?.messageId, 'extension-run-1')
+    registry.unregister('conversation-1', 'extension-run-1')
+  })
+
   it('uses heartbeat activity rather than start time for cleanup', () => {
     const registry = new StreamingRegistry({ timeoutMs: 100 })
     const originalNow = Date.now

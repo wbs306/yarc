@@ -22,7 +22,10 @@ import { agentInteractionRegistry } from '../lib/agent-interaction-registry.js'
 import { liveFileService } from './live-file.service.js'
 import { persistFailedPromptIfMissing } from './pi-failed-turn.js'
 import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/mineru-content-v2.js'
-import type { AgentInteractionResponse, ChatEvent } from '@yarc/shared'
+import { PiRuntimeRegistry } from './pi-runtime-registry.js'
+import { runJournalStore } from '../lib/pi-runtime/run-journal.js'
+import type { RuntimeToolExecutionContext, RuntimeToolHost } from '../lib/pi-runtime/protocol.js'
+import type { AgentInteractionResponse, ChatEvent, PiComposerMirror, PiRuntimeKey } from '@yarc/shared'
 
 // `off` is a session control, not a model/provider thinking level. Keep it
 // out of model maps and capability lists; the chat UI adds it separately.
@@ -61,6 +64,7 @@ export class PiService {
   private piModule: any = null
   private modelRuntime: any = null
   private initialized = false
+  private runtimeRegistry: PiRuntimeRegistry | null = null
 
   private async refreshPiState() {
     if (!this.piModule) return
@@ -96,6 +100,27 @@ export class PiService {
 
   private async fileExists(path: string): Promise<boolean> {
     try { await access(path); return true } catch { return false }
+  }
+
+  private async hasCommittedAssistantEntry(sessionFile: string | undefined, entryIds: string[]): Promise<boolean> {
+    if (!sessionFile || !entryIds.length || !(await this.fileExists(sessionFile))) return false
+    try {
+      await this.initPi()
+      if (!this.piModule) return false
+      const agentWorkspace = await ensureAgentWorkspace()
+      const { SessionManager } = this.piModule
+      const sessionManager = SessionManager.open(
+        sessionFile,
+        join(config.dataDir, '.pi', 'agent', 'sessions'),
+        agentWorkspace.cwd,
+      )
+      return entryIds.some(entryId => {
+        const entry = sessionManager.getEntry?.(entryId)
+        return entry?.type === 'message' && entry.message?.role === 'assistant'
+      })
+    } catch {
+      return false
+    }
   }
 
   /** Read Pi session metadata from Conversation.metadata.pi.sessions[branchId]. */
@@ -250,6 +275,152 @@ export class PiService {
     }
   }
 
+  private getRuntimeRegistry(): PiRuntimeRegistry {
+    if (!this.runtimeRegistry) {
+      this.runtimeRegistry = new PiRuntimeRegistry({
+        systemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
+        createToolHost: (context) => this.createRuntimeToolHost(context),
+      })
+    }
+    return this.runtimeRegistry
+  }
+
+  private async createRuntimeToolHost(context: RuntimeToolExecutionContext): Promise<RuntimeToolHost> {
+    await this.initPi()
+    if (!this.piModule) return { manifests: [], execute: async () => ({ content: [{ type: 'text', text: 'Pi SDK unavailable' }], isError: true }) }
+
+    const dynamicInteractionContext = {
+      get conversationId() { return context.getKey().conversationId },
+      get branchId() { return context.getKey().branchId },
+      get streamMessageId() { return context.getRunId() },
+      emit: context.emit,
+    }
+    const agentWorkspace = await ensureAgentWorkspace()
+    const yarcTools = this.filterChatTools(await this.createYarcTools(dynamicInteractionContext))
+    const definitions = [...this.createWorkspaceToolOverrides(agentWorkspace.cwd), ...yarcTools]
+    const byName = new Map(definitions.map((definition: any) => [definition.name, definition]))
+    const manifests = definitions.map((definition: any) => ({
+      name: String(definition.name),
+      label: String(definition.label || definition.name),
+      description: String(definition.description || ''),
+      ...(definition.promptSnippet ? { promptSnippet: String(definition.promptSnippet) } : {}),
+      ...(Array.isArray(definition.promptGuidelines) ? { promptGuidelines: definition.promptGuidelines.map(String) } : {}),
+      parameters: JSON.parse(JSON.stringify(definition.parameters || {})),
+      ...(definition.constrainedSampling ? { constrainedSampling: definition.constrainedSampling } : {}),
+      ...(definition.executionMode ? { executionMode: definition.executionMode } : {}),
+    }))
+
+    return {
+      manifests,
+      execute: async (toolName, toolCallId, params, signal, onUpdate) => {
+        const definition: any = byName.get(toolName)
+        if (!definition) throw new Error(`Unknown Runtime tool: ${toolName}`)
+        this.emitAgentToolEvent('started', toolName, params)
+        try {
+          // Runtime-hosted tools are executed outside an AgentSession, so there
+          // is no ExtensionContext/sessionManager to pass to the tool definition.
+          // Passing `{}` makes Pi's bash tool try `ctx.sessionManager.getSessionId()`
+          // and fail before it can spawn the command.
+          const result = await definition.execute(toolCallId, params, signal, onUpdate)
+          this.emitAgentToolEvent(result?.isError ? 'failed' : 'completed', toolName, params, result, !!result?.isError)
+          return result
+        } catch (err) {
+          this.emitAgentToolEvent('failed', toolName, params, { content: [{ type: 'text', text: (err as Error).message }] }, true)
+          throw err
+        }
+      },
+    }
+  }
+
+  async disposeRuntimes(reason = 'api_shutdown'): Promise<void> {
+    await this.runtimeRegistry?.disposeAll(reason)
+    this.runtimeRegistry = null
+  }
+
+  async disposeConversationRuntime(conversationId: string, reason = 'conversation_deleted'): Promise<void> {
+    await this.runtimeRegistry?.disposeConversation(conversationId, reason)
+  }
+
+  async getRuntimeSnapshot(key: PiRuntimeKey) {
+    return this.getRuntimeRegistry().ensureSnapshot(key)
+  }
+
+  updateRuntimeComposer(mirror: PiComposerMirror): void {
+    this.getRuntimeRegistry().updateComposer(mirror)
+  }
+
+  getRuntimeAutocomplete(key: PiRuntimeKey, lines: string[], cursorLine: number, cursorCol: number, force?: boolean) {
+    return this.getRuntimeRegistry().getAutocomplete(key, lines, cursorLine, cursorCol, force)
+  }
+
+  applyRuntimeAutocomplete(key: PiRuntimeKey, input: { lines: string[]; cursorLine: number; cursorCol: number; item: { value: string; label: string; description?: string }; prefix: string }) {
+    return this.getRuntimeRegistry().applyAutocomplete(key, input)
+  }
+
+  sendRuntimeTuiInput(key: PiRuntimeKey, surfaceId: string, data: string, revision?: number, clientId?: string) {
+    return this.getRuntimeRegistry().sendTuiInput(key, surfaceId, data, revision, clientId)
+  }
+
+  resizeRuntimeTui(key: PiRuntimeKey, surfaceId: string, cols: number, rows: number, revision?: number, clientId?: string): boolean {
+    return this.getRuntimeRegistry().resizeTui(key, surfaceId, cols, rows, revision, clientId)
+  }
+
+  closeRuntimeTui(key: PiRuntimeKey, surfaceId: string, clientId?: string): boolean {
+    return this.getRuntimeRegistry().closeTui(key, surfaceId, clientId)
+  }
+
+  async recoverRuntimeJournals(): Promise<{ recovered: number }> {
+    const pendingRuns = (await runJournalStore.listPending())
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    const seenRunIds = new Set<string>()
+    let recovered = 0
+    for (const run of pendingRuns) {
+      if (seenRunIds.has(run.runId)) {
+        await runJournalStore.remove(run.conversationId, run.runId)
+        continue
+      }
+      seenRunIds.add(run.runId)
+      const userMessage = (run.finalData as any)?.userMessage
+      const prompt = typeof userMessage?.content === 'string' ? userMessage.content : ''
+      try {
+        // A committed assistant in Pi JSONL is already canonical. Verify the
+        // entry in the actual Session file instead of trusting a journal event
+        // that may have been written just before a process crash.
+        if (await this.hasCommittedAssistantEntry(run.sessionFile, run.commitState.assistantEntryIds)) {
+          await runJournalStore.remove(run.conversationId, run.runId)
+          recovered += 1
+          continue
+        }
+
+        // Extension-only runs have no user prompt to reconstruct. Their partial
+        // deltas are not promoted into canonical Pi JSONL.
+        if (!prompt || !run.branchId) {
+          await runJournalStore.remove(run.conversationId, run.runId)
+          recovered += 1
+          continue
+        }
+
+        const persisted = await this.persistFailedTurn({
+          conversationId: run.conversationId,
+          branchId: run.branchId,
+          sessionFile: run.sessionFile,
+          prompt,
+          errorMessage: 'Generation interrupted by an API or Runtime Worker restart',
+          initialLeafId: run.initialLeafId,
+        })
+        if (!persisted) {
+          console.warn(`[PiService] Keeping Runtime journal for retry: ${run.runId}`)
+          continue
+        }
+        await runJournalStore.remove(run.conversationId, run.runId)
+        recovered += 1
+      } catch (err) {
+        console.warn('[PiService] Runtime journal recovery failed:', (err as Error).message)
+      }
+    }
+    return { recovered }
+  }
+
   async reload(reason = 'manual'): Promise<{ reloaded: boolean; reason: string }> {
     await this.initPi()
 
@@ -258,6 +429,7 @@ export class PiService {
     }
 
     await this.refreshPiState()
+    await this.runtimeRegistry?.reloadAll(reason)
     sseHub.emit({
       type: 'pi-config-changed',
       reason,
@@ -270,6 +442,13 @@ export class PiService {
     conversationId: string,
     branchId = 'main'
   ): Promise<{ tokens: number | null; contextWindow: number; percent: number | null; model?: string } | null> {
+    try {
+      const snapshot = await this.getRuntimeRegistry().ensureSnapshot({ conversationId, branchId })
+      if (snapshot.contextUsage) return snapshot.contextUsage
+    } catch (err) {
+      console.warn('[PiService] Runtime context usage unavailable, using read-only fallback:', (err as Error).message)
+    }
+
     await this.initPi()
     if (!this.piModule) return null
     await this.refreshPiState()
@@ -416,6 +595,7 @@ export class PiService {
       }
     }
 
+    await this.runtimeRegistry?.reloadAll(`extensions:${reason}`)
     sseHub.emit({
       type: 'pi-config-changed',
       reason: `extensions:${reason}`,
@@ -437,6 +617,7 @@ export class PiService {
    */
   private async createYarcTools(interactionContext?: {
     conversationId?: string
+    branchId?: string
     streamMessageId?: string
     emit?: (event: ChatEvent) => void
   }) {
@@ -840,7 +1021,7 @@ export class PiService {
         label: 'Ask User Question',
         description: 'Ask the user one or more structured questions in the YARC web UI. Use this when you need the user to choose among options, provide custom input, or decide how to proceed.',
         parameters: askUserQuestionSchema,
-        async execute(_toolCallId: string, params: any) {
+        async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
           const validation = validateAskUserQuestionParams(params)
           if (!validation.ok) {
             return {
@@ -855,9 +1036,14 @@ export class PiService {
             return { content: [{ type: 'text' as const, text: error }], isError: true, details: { answers: [], cancelled: true, error } }
           }
 
+          const cancelInteraction = () => {
+            if (interactionContext?.streamMessageId) agentInteractionRegistry.cancelByStream(interactionContext.streamMessageId, 'tool_aborted')
+          }
+          signal?.addEventListener('abort', cancelInteraction, { once: true })
           try {
             const response = await agentInteractionRegistry.create({
               conversationId: interactionContext.conversationId,
+              branchId: interactionContext.branchId || 'main',
               streamMessageId: interactionContext.streamMessageId,
               kind: 'questionnaire',
               title: 'Agent 需要确认一些问题',
@@ -871,6 +1057,8 @@ export class PiService {
           } catch (err) {
             const error = (err as Error).message || 'ask_user_question failed'
             return { content: [{ type: 'text' as const, text: error }], isError: true, details: { answers: [], cancelled: true, error } }
+          } finally {
+            signal?.removeEventListener('abort', cancelInteraction)
           }
         },
       }),
@@ -1973,6 +2161,7 @@ export class PiService {
 
   private createWebUIContext(input: {
     conversationId?: string
+    branchId?: string
     streamMessageId?: string
     emit: (event: ChatEvent) => void
   }): any {
@@ -1983,6 +2172,7 @@ export class PiService {
         type: 'agent_interaction_request',
         requestId: randomUUID(),
         conversationId: input.conversationId,
+        branchId: input.branchId || 'main',
         streamMessageId: input.streamMessageId,
         kind: 'notification',
         title: notifyType === 'error' ? 'Agent 错误' : notifyType === 'warning' ? 'Agent 提醒' : 'Agent 通知',
@@ -2000,6 +2190,7 @@ export class PiService {
       if (!input.conversationId || !input.streamMessageId) return null
       return agentInteractionRegistry.create({
         conversationId: input.conversationId,
+        branchId: input.branchId || 'main',
         streamMessageId: input.streamMessageId,
         kind,
         title: typeof payload.title === 'string' ? payload.title : undefined,
@@ -2043,30 +2234,30 @@ export class PiService {
       notify: emitNotification,
       onTerminalInput: () => () => {},
       setStatus: (key: string, text: string | undefined) => {
-        input.emit({ type: 'agent_ui_status', key, text: text || '', conversationId: input.conversationId, streamMessageId: input.streamMessageId })
+        input.emit({ type: 'agent_ui_status', key, text, conversationId: input.conversationId || '', branchId: 'main', streamMessageId: input.streamMessageId })
       },
       setWorkingMessage: () => {},
       setWorkingVisible: () => {},
       setWorkingIndicator: () => {},
       setHiddenThinkingLabel: () => {},
       setWidget: (key: string, lines?: string[], placement?: 'above' | 'below') => {
-        input.emit({ type: 'agent_ui_widget', key, lines: lines || [], placement: placement || 'above', conversationId: input.conversationId })
+        input.emit({ type: 'agent_ui_widget', key, lines: lines || [], placement: placement === 'below' ? 'belowEditor' : 'aboveEditor', conversationId: input.conversationId || '', branchId: 'main' })
       },
       setFooter: (text?: string) => {
-        input.emit({ type: 'agent_ui_footer', text: text || '', conversationId: input.conversationId })
+        input.emit({ type: 'agent_ui_footer', text, conversationId: input.conversationId || '', branchId: 'main' })
       },
       setHeader: (lines?: string[]) => {
-        input.emit({ type: 'agent_ui_header', lines: lines || [], conversationId: input.conversationId })
+        input.emit({ type: 'agent_ui_header', lines, conversationId: input.conversationId || '', branchId: 'main' })
       },
       setTitle: (title: string) => {
-        input.emit({ type: 'agent_ui_title', title, conversationId: input.conversationId })
+        input.emit({ type: 'agent_ui_title', title, conversationId: input.conversationId || '', branchId: 'main' })
       },
       custom: async () => undefined,
       pasteToEditor: (text: string) => {
-        input.emit({ type: 'agent_ui_editor_paste', text, conversationId: input.conversationId })
+        input.emit({ type: 'agent_ui_editor_paste', text, revision: 0, selectionStart: text.length, selectionEnd: text.length, conversationId: input.conversationId || '', branchId: input.branchId || 'main' })
       },
       setEditorText: (text: string) => {
-        input.emit({ type: 'agent_ui_editor_set_text', text, conversationId: input.conversationId })
+        input.emit({ type: 'agent_ui_editor_set_text', text, revision: 0, conversationId: input.conversationId || '', branchId: 'main' })
       },
       getEditorText: () => '',
       addAutocompleteProvider: () => {},
@@ -2076,12 +2267,12 @@ export class PiService {
       getAllThemes: () => [],
       getTheme: () => undefined,
       setTheme: (themeName: string) => {
-        input.emit({ type: 'agent_ui_theme_request', theme: themeName, conversationId: input.conversationId })
+        input.emit({ type: 'agent_ui_theme_request', theme: themeName, conversationId: input.conversationId || '', branchId: 'main' })
         return { success: true }
       },
       getToolsExpanded: () => false,
       setToolsExpanded: (expanded: boolean) => {
-        input.emit({ type: 'agent_ui_tools_expanded', expanded, conversationId: input.conversationId })
+        input.emit({ type: 'agent_ui_tools_expanded', expanded, conversationId: input.conversationId || '', branchId: 'main' })
       },
       getWorkingMessage: () => undefined,
       getWorkingVisible: () => false,
@@ -2105,7 +2296,7 @@ export class PiService {
     }
     await this.refreshPiState()
 
-    const { createAgentSession, DefaultResourceLoader } = this.piModule
+    const { createAgentSession, DefaultResourceLoader, SessionManager } = this.piModule
     const agentWorkspace = await ensureAgentWorkspace()
 
     // Resolve model
@@ -2136,15 +2327,18 @@ export class PiService {
       return { answer: 'ResourceLoader 初始化失败。', thinking: undefined, events: [] }
     }
 
-    // Reuse conversation's Pi session file for full context (history, tool calls, compaction).
-    // This gives the side question the same knowledge the main agent has.
-    // We do NOT pass conversationId/branchId to completeEvents to avoid
-    // saving the side-question turn back to the main session metadata.
-    const sessionManager = await this.resolveSessionManager(
+    // Copy the active, compaction-aware context into an in-memory Session.
+    // A second AgentSession must never append side-question messages to the
+    // long-lived Runtime Worker's canonical JSONL file.
+    const sourceSessionManager = await this.resolveSessionManager(
       options.conversationId,
       options.branchId,
       agentWorkspace.cwd
     )
+    const sessionManager = SessionManager.inMemory(agentWorkspace.cwd)
+    for (const message of sourceSessionManager.buildSessionContext?.().messages || []) {
+      sessionManager.appendMessage(message)
+    }
 
     let session: any
     try {
@@ -2234,6 +2428,30 @@ export class PiService {
     customInstructions?: string
     _cancelled?: string
   }): AsyncGenerator<ChatEvent> {
+    if (options.conversationId && options.branchId && options.assistantMessageId) {
+      const key = { conversationId: options.conversationId, branchId: options.branchId }
+      let unregisterAbortHandler: (() => void) | null = null
+      if (options._cancelled) {
+        unregisterAbortHandler = chatStreamControl.registerAbortHandler(options._cancelled, () => {
+          void this.getRuntimeRegistry().abort(key, options.assistantMessageId!)
+        })
+      }
+      try {
+        yield* this.getRuntimeRegistry().compact({
+          key,
+          runId: options.assistantMessageId,
+          assistantMessageId: options.assistantMessageId,
+          customInstructions: options.customInstructions,
+          model: options.model,
+          thinkingLevel: options.reasoningEffort,
+          thinkingEnabled: options.thinkingEnabled,
+        })
+      } finally {
+        unregisterAbortHandler?.()
+      }
+      return
+    }
+
     await this.initPi()
 
     if (!this.piModule) {
@@ -2356,22 +2574,33 @@ export class PiService {
     prompt: string
     errorMessage: string
     sessionManager?: any
+    sessionFile?: string
     initialLeafId?: string | null
     model?: string
     assistantModel?: any
-  }): Promise<void> {
-    if (!options.conversationId || !options.branchId || !options.errorMessage) return
+  }): Promise<boolean> {
+    if (!options.conversationId || !options.branchId || !options.errorMessage) return false
 
     try {
       let sessionManager = options.sessionManager
       if (!sessionManager) {
         await this.initPi()
-        if (!this.piModule) return
-        sessionManager = await this.resolveSessionManager(
-          options.conversationId,
-          options.branchId,
-          config.dataDir
-        )
+        if (!this.piModule) return false
+        const agentWorkspace = await ensureAgentWorkspace()
+        if (options.sessionFile && await this.fileExists(options.sessionFile)) {
+          const { SessionManager } = this.piModule
+          sessionManager = SessionManager.open(
+            options.sessionFile,
+            join(config.dataDir, '.pi', 'agent', 'sessions'),
+            agentWorkspace.cwd,
+          )
+        } else {
+          sessionManager = await this.resolveSessionManager(
+            options.conversationId,
+            options.branchId,
+            agentWorkspace.cwd
+          )
+        }
       }
 
       let assistantModel = options.assistantModel
@@ -2401,20 +2630,21 @@ export class PiService {
         initialLeafId,
         options.prompt,
         options.errorMessage,
-        assistantModel
+        assistantModel,
       )
 
       const sessionFile = sessionManager.getSessionFile?.()
-      if (sessionFile) {
-        await savePiSessionMetadata(options.conversationId, options.branchId, {
-          sessionFile,
-          sessionId: sessionManager.getSessionId?.(),
-          leafEntryId: sessionManager.getLeafId?.() || null,
-          updatedAt: new Date().toISOString(),
-        })
-      }
+      if (!sessionFile) return false
+      await savePiSessionMetadata(options.conversationId, options.branchId, {
+        sessionFile,
+        sessionId: sessionManager.getSessionId?.(),
+        leafEntryId: sessionManager.getLeafId?.() || null,
+        updatedAt: new Date().toISOString(),
+      })
+      return true
     } catch (err) {
       console.warn('[PiService] Failed to persist errored turn:', (err as Error).message)
+      return false
     }
   }
 
@@ -2430,6 +2660,31 @@ export class PiService {
     thinkingEnabled?: boolean
     _cancelled?: string  // messageId to check for cancellation
   }): AsyncGenerator<ChatEvent> {
+    if (options.conversationId && options.branchId && options.assistantMessageId) {
+      const key = { conversationId: options.conversationId, branchId: options.branchId }
+      let unregisterAbortHandler: (() => void) | null = null
+      if (options._cancelled) {
+        unregisterAbortHandler = chatStreamControl.registerAbortHandler(options._cancelled, () => {
+          void this.getRuntimeRegistry().abort(key, options.assistantMessageId!)
+        })
+      }
+      try {
+        yield* this.getRuntimeRegistry().prompt({
+          key,
+          runId: options.assistantMessageId,
+          prompt: options.prompt,
+          userMessageId: options.userMessageId,
+          assistantMessageId: options.assistantMessageId,
+          model: options.model,
+          thinkingLevel: options.reasoningEffort,
+          thinkingEnabled: options.thinkingEnabled,
+        })
+      } finally {
+        unregisterAbortHandler?.()
+      }
+      return
+    }
+
     await this.initPi()
 
     if (!this.piModule) {
@@ -2443,6 +2698,7 @@ export class PiService {
     let emitInteractionEvent: ((event: ChatEvent) => void) | null = null
     const yarcTools = await this.createYarcTools({
       conversationId: options.conversationId,
+      branchId: options.branchId,
       streamMessageId: options.assistantMessageId,
       emit: (event) => emitInteractionEvent?.(event),
     })
@@ -2577,6 +2833,7 @@ export class PiService {
         await session.bindExtensions?.({
           uiContext: this.createWebUIContext({
             conversationId: options.conversationId,
+            branchId: options.branchId,
             streamMessageId: options.assistantMessageId,
             emit: push,
           }),

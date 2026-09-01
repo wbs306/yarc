@@ -11,6 +11,7 @@ import {
   type SessionEntry,
   type SessionMessageEntry,
   type CompactionEntry,
+  type BranchSummaryEntry,
   SessionManager,
 } from '@earendil-works/pi-coding-agent'
 import { getAllPiSessionMetadata } from '../lib/pi-metadata.js'
@@ -35,7 +36,7 @@ export interface ConversationMessage {
     searchResults?: Record<string, unknown>
   }>
   segments?: Array<{
-    type: 'text' | 'tool' | 'error' | 'thinking' | 'compaction'
+    type: 'text' | 'tool' | 'error' | 'thinking' | 'compaction' | 'branch_summary'
     text?: string
     toolCallId?: string
   }>
@@ -75,6 +76,9 @@ export interface ConversationMessage {
   // 状态标记
   isCompaction?: boolean
   compactionSummary?: string
+  isBranchSummary?: boolean
+  branchSummary?: string
+  branchSummaryLabel?: string
   isError?: boolean
   timestamp: string
 }
@@ -303,22 +307,33 @@ export class PiConversationService {
     branchId: string,
     sessionFile: string,
     leafEntryId?: string | null,
-    branchMeta: { parentBranchId?: string | null; forkMessageId?: string | null; forkParentEntryId?: string | null } = {}
+    branchMeta: { parentBranchId?: string | null; forkMessageId?: string | null; forkParentEntryId?: string | null } = {},
+    runtimeMeta: { sessionId?: string; model?: string; thinkingLevel?: string } = {}
   ): Promise<void> {
     const conv = await prisma.conversation.findUnique({
       where: { id: conversationId },
       select: { metadata: true },
     })
-    const meta = { ...((conv?.metadata || {}) as Record<string, unknown>) } as any
+    // A conversation can be deleted while a Runtime Worker is draining its
+    // final event. Treat that as a successful no-op instead of attempting an
+    // update that necessarily fails with Prisma P2025.
+    if (!conv) return
+
+    const meta = { ...((conv.metadata || {}) as Record<string, unknown>) } as any
     if (!meta.pi) meta.pi = {}
     if (!meta.pi.sessions) meta.pi.sessions = {}
+    const previous = meta.pi.sessions[branchId] || {}
 
     meta.pi.sessions[branchId] = {
+      ...previous,
       sessionFile,
       leafEntryId,
-      parentBranchId: branchMeta.parentBranchId ?? meta.pi.sessions[branchId]?.parentBranchId ?? null,
-      forkMessageId: branchMeta.forkMessageId ?? meta.pi.sessions[branchId]?.forkMessageId ?? null,
-      forkParentEntryId: branchMeta.forkParentEntryId ?? meta.pi.sessions[branchId]?.forkParentEntryId ?? null,
+      ...(runtimeMeta.sessionId !== undefined ? { sessionId: runtimeMeta.sessionId } : {}),
+      ...(runtimeMeta.model !== undefined ? { model: runtimeMeta.model } : {}),
+      ...(runtimeMeta.thinkingLevel !== undefined ? { thinkingLevel: runtimeMeta.thinkingLevel } : {}),
+      parentBranchId: branchMeta.parentBranchId ?? previous.parentBranchId ?? null,
+      forkMessageId: branchMeta.forkMessageId ?? previous.forkMessageId ?? null,
+      forkParentEntryId: branchMeta.forkParentEntryId ?? previous.forkParentEntryId ?? null,
       updatedAt: new Date().toISOString(),
     }
 
@@ -425,6 +440,21 @@ export class PiConversationService {
         isCompaction: true,
         compactionSummary: compaction.summary,
         segments: [{ type: 'compaction', text: compaction.summary }],
+        timestamp: entry.timestamp,
+      }
+    }
+
+    if (entry.type === 'branch_summary') {
+      const summary = entry as BranchSummaryEntry
+      return {
+        id: entry.id,
+        parentId: entry.parentId,
+        role: 'system',
+        content: '',
+        isBranchSummary: true,
+        branchSummary: summary.summary,
+        branchSummaryLabel: typeof (summary.details as any)?.label === 'string' ? (summary.details as any).label : undefined,
+        segments: [{ type: 'branch_summary', text: summary.summary }],
         timestamp: entry.timestamp,
       }
     }

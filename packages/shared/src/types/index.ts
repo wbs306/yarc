@@ -175,13 +175,66 @@ export type AgentInteractionKind =
   | 'confirm'
   | 'select'
   | 'input'
+  | 'editor'
   | 'questionnaire'
   | 'notification'
+
+export interface PiRuntimeKey {
+  conversationId: string
+  branchId: string
+}
+
+export interface PiExtensionCommandInfo {
+  name: string
+  description?: string
+  source: 'extension' | 'skill' | 'prompt' | 'builtin'
+}
+
+export interface PiComposerMirror {
+  conversationId: string
+  branchId: string
+  text: string
+  selectionStart: number
+  selectionEnd: number
+  revision: number
+  clientId: string
+}
+
+export type PiTuiSurfaceKind = 'custom' | 'widget' | 'header' | 'footer' | 'editor'
+
+export interface PiTuiSurfaceState {
+  surfaceId: string
+  conversationId: string
+  branchId: string
+  kind: PiTuiSurfaceKind
+  overlay: boolean
+  cols: number
+  rows: number
+  revision: number
+  ansi: string
+  plainText: string
+  hidden?: boolean
+  hostKey?: string
+  placement?: 'aboveEditor' | 'belowEditor'
+  overlayOptions?: {
+    width?: number | string
+    minWidth?: number
+    maxHeight?: number | string
+    anchor?: string
+    offsetX?: number
+    offsetY?: number
+    row?: number | string
+    col?: number | string
+    margin?: number | { top?: number; right?: number; bottom?: number; left?: number }
+    nonCapturing?: boolean
+  }
+}
 
 export interface AgentInteractionRequest {
   type: 'agent_interaction_request'
   requestId: string
   conversationId: string
+  branchId: string
   streamMessageId: string
   kind: AgentInteractionKind
   title?: string
@@ -196,6 +249,8 @@ export interface AgentInteractionResponse {
   action: 'submit' | 'cancel' | 'chat'
   value?: unknown
   conversationId?: string
+  branchId?: string
+  clientId?: string
 }
 
 export interface AgentInteractionResolved {
@@ -233,13 +288,16 @@ export interface ChatRequest {
 }
 
 export type ChatEvent =
-  | { type: 'text'; content: string }
-  | { type: 'thinking'; content: string }
-  | { type: 'tool_call'; toolCallId: string; toolName: string; input: string }
-  | { type: 'tool_call_delta'; toolCallId: string; toolName?: string; inputDelta: string }
-  | { type: 'tool_result'; toolCallId: string; result: string }
+  | { type: 'assistant_message_start'; messageId: string; runGroupId: string; source: 'user' | 'extension' | 'continuation'; conversationId: string; branchId: string }
+  | { type: 'text'; content: string; conversationId?: string; branchId?: string; assistantMessageId?: string; runGroupId?: string }
+  | { type: 'thinking'; content: string; conversationId?: string; branchId?: string; assistantMessageId?: string; runGroupId?: string }
+  | { type: 'tool_call'; toolCallId: string; toolName: string; input: string; conversationId?: string; branchId?: string; assistantMessageId?: string; runGroupId?: string }
+  | { type: 'tool_call_delta'; toolCallId: string; toolName?: string; inputDelta: string; conversationId?: string; branchId?: string; assistantMessageId?: string; runGroupId?: string }
+  | { type: 'tool_result'; toolCallId: string; result: string; conversationId?: string; branchId?: string; assistantMessageId?: string; runGroupId?: string }
   | {
       type: 'search_results'
+      conversationId?: string
+      branchId?: string
       toolCallId?: string
       query: string
       source: 'local' | 'ieee' | 'semantic_scholar'
@@ -254,27 +312,35 @@ export type ChatEvent =
       earlyAccess?: boolean
       publication?: string
     }
-  | { type: 'citation'; pageNumber: number; text: string }
-  | { type: 'session_state'; model: string; thinkingLevel: string; models: Array<{ id: string; name?: string; reasoning?: boolean }> }
-  | { type: 'context_usage'; tokens: number | null; contextWindow: number; percent: number | null; model?: string }
-  | { type: 'compaction_start' }
-  | { type: 'compaction_complete'; summary: string; tokensBefore: number; estimatedTokensAfter?: number }
+  | { type: 'citation'; pageNumber: number; text: string; conversationId?: string; branchId?: string }
+  | { type: 'session_state'; model: string; thinkingLevel: string; models: Array<{ id: string; name?: string; reasoning?: boolean }>; conversationId?: string; branchId?: string }
+  | { type: 'context_usage'; tokens: number | null; contextWindow: number; percent: number | null; model?: string; conversationId?: string; branchId?: string }
+  | { type: 'compaction_start'; conversationId?: string; branchId?: string }
+  | { type: 'compaction_complete'; summary: string; tokensBefore: number; estimatedTokensAfter?: number; conversationId?: string; branchId?: string }
+  | { type: 'branch_summary'; summary: string; entryId?: string; targetId?: string; sourceLeafId?: string; label?: string; conversationId?: string; branchId?: string }
+  | { type: 'runtime_state'; conversationId: string; branchId: string; state: 'starting' | 'idle' | 'running' | 'reloading' | 'failed'; commands?: PiExtensionCommandInfo[]; generation?: number; error?: string }
+  | { type: 'runtime_branch_changed'; conversationId: string; previousConversationId?: string; previousBranchId: string; branchId: string; sessionFile?: string; leafEntryId?: string | null }
   | AgentInteractionRequest
   | AgentInteractionResolved
   | { type: 'pi_user_entry'; conversationId: string; messageId: string; entryId: string; sessionFile: string }
   | { type: 'pi_assistant_entry'; conversationId: string; messageId: string; entryId: string; sessionFile: string }
   | { type: 'done' }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; conversationId?: string; branchId?: string; assistantMessageId?: string; runGroupId?: string }
   // UI Context bridge events (from Pi extensions via ctx.ui.*)
-  | { type: 'agent_ui_status'; key: string; text: string; conversationId?: string; streamMessageId?: string }
-  | { type: 'agent_ui_widget'; key: string; lines: string[]; placement: 'above' | 'below'; conversationId?: string }
-  | { type: 'agent_ui_footer'; text: string; conversationId?: string }
-  | { type: 'agent_ui_header'; lines: string[]; conversationId?: string }
-  | { type: 'agent_ui_title'; title: string; conversationId?: string }
-  | { type: 'agent_ui_editor_set_text'; text: string; conversationId?: string }
-  | { type: 'agent_ui_editor_paste'; text: string; conversationId?: string }
-  | { type: 'agent_ui_tools_expanded'; expanded: boolean; conversationId?: string }
-  | { type: 'agent_ui_theme_request'; theme: string; conversationId?: string }
+  | { type: 'agent_ui_status'; key: string; text?: string; conversationId: string; branchId: string; streamMessageId?: string }
+  | { type: 'agent_ui_widget'; key: string; lines?: string[]; surfaceId?: string; placement: 'aboveEditor' | 'belowEditor'; conversationId: string; branchId: string }
+  | { type: 'agent_ui_footer'; text?: string; surfaceId?: string; conversationId: string; branchId: string }
+  | { type: 'agent_ui_header'; lines?: string[]; surfaceId?: string; conversationId: string; branchId: string }
+  | { type: 'agent_ui_title'; title: string; conversationId: string; branchId: string }
+  | { type: 'agent_ui_editor_set_text'; text: string; revision: number; selectionStart?: number; selectionEnd?: number; conversationId: string; branchId: string }
+  | { type: 'agent_ui_editor_paste'; text: string; revision: number; selectionStart: number; selectionEnd: number; conversationId: string; branchId: string }
+  | { type: 'agent_ui_editor_submit'; text: string; conversationId: string; branchId: string }
+  | { type: 'agent_ui_tools_expanded'; expanded: boolean; conversationId: string; branchId: string }
+  | { type: 'agent_ui_theme_request'; theme: string; conversationId: string; branchId: string }
+  | { type: 'agent_ui_working'; message?: string; visible?: boolean; indicator?: { frames?: string[]; intervalMs?: number }; hiddenThinkingLabel?: string; reset?: boolean; conversationId: string; branchId: string }
+  | { type: 'agent_ui_tui_open'; surface: PiTuiSurfaceState }
+  | { type: 'agent_ui_tui_output'; surfaceId: string; conversationId: string; branchId: string; revision: number; ansi: string; plainText: string; hidden?: boolean }
+  | { type: 'agent_ui_tui_close'; surfaceId: string; conversationId: string; branchId: string; reason: 'done' | 'cancelled' | 'timeout' | 'reload' | 'disposed' | 'error' }
 
 // ── Search ───────────────────────────────────────────────────────────────────
 

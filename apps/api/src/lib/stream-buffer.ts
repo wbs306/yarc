@@ -21,7 +21,7 @@ export interface StreamUserMessage {
 }
 
 export interface StreamEntry {
-  events: unknown[]           // All events for replay
+  events: Array<unknown & { eventSequence?: number }> // All sequenced events for replay
   content: string             // Accumulated text content
   thinking: string            // Accumulated thinking content
   toolCalls: Array<{ id: string; name: string; input: unknown; result?: string }>
@@ -29,10 +29,21 @@ export interface StreamEntry {
   segments: Array<{ type: 'text' | 'thinking' | 'error'; text: string } | { type: 'tool'; toolCallId: string }>
   status: 'streaming' | 'completed' | 'failed'
   conversationId: string
+  originalConversationId: string
   branchId?: string
   userMessage?: StreamUserMessage
+  source: 'user' | 'extension' | 'command' | 'continuation'
+  initialLeafId?: string | null
+  sessionFile?: string
+  eventSequence: number
   createdAt: number           // Stream creation timestamp
   updatedAt: number           // Last producer activity / heartbeat timestamp
+}
+
+export interface StreamJournalContext {
+  source?: StreamEntry['source']
+  initialLeafId?: string | null
+  sessionFile?: string
 }
 
 export type FlushFn = (
@@ -69,8 +80,14 @@ export class StreamBuffer {
     this.timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000
   }
 
-  /** Start a new stream for a message. */
-  start(messageId: string, conversationId: string, branchId?: string, userMessage?: StreamUserMessage): void {
+  /** Start a new stream and durably create its in-flight journal. */
+  async start(
+    messageId: string,
+    conversationId: string,
+    branchId?: string,
+    userMessage?: StreamUserMessage,
+    journal: StreamJournalContext = {},
+  ): Promise<void> {
     this.streams.set(messageId, {
       events: [],
       content: '',
@@ -80,8 +97,13 @@ export class StreamBuffer {
       segments: [],
       status: 'streaming',
       conversationId,
+      originalConversationId: conversationId,
       branchId,
       userMessage,
+      source: journal.source || 'user',
+      initialLeafId: journal.initialLeafId,
+      sessionFile: journal.sessionFile,
+      eventSequence: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     })
@@ -93,57 +115,88 @@ export class StreamBuffer {
       this.flushTextBuffer(messageId).catch(() => {})
     }, this.flushIntervalMs)
     this.flushTimers.set(messageId, timer)
+
+    // A brand-new Pi Session may defer materializing its JSONL file until the
+    // first assistant message. Await this barrier before model/Worker setup.
+    try {
+      await this.persistSnapshot(messageId, 'streaming')
+    } catch (err) {
+      clearInterval(timer)
+      this.flushTimers.delete(messageId)
+      this.streams.delete(messageId)
+      this.textBuffers.delete(messageId)
+      this.thinkBuffers.delete(messageId)
+      this.persistedSnapshots.delete(messageId)
+      this.persistChains.delete(messageId)
+      throw err
+    }
   }
 
-  /** Append an event to the stream. */
-  append(messageId: string, event: unknown): void {
+  /** Append and sequence an event. Returns the exact replayable event. */
+  append(messageId: string, event: unknown): (unknown & { eventSequence?: number }) | undefined {
     const entry = this.streams.get(messageId)
-    if (!entry) return
+    if (!entry) return undefined
 
     entry.updatedAt = Date.now()
     const evt = event as any
 
-    if (evt.type === 'text') {
-      // Preserve replay order when providers switch from thinking to visible
-      // text before the periodic buffer flush runs.
-      this.flushThinkingBufferSync(messageId)
-      this.textBuffers.get(messageId)?.push(evt.content)
-      entry.content += evt.content
-      this.notify(messageId, event)
-    } else if (evt.type === 'thinking') {
-      // Likewise, visible text emitted before a later reasoning block must be
-      // materialized before that reasoning event.
-      this.flushTextOnlySync(messageId)
-      this.thinkBuffers.get(messageId)?.push(evt.content)
-      entry.thinking += evt.content
-      this.notify(messageId, event)
-    } else {
-      // A producer-level done only means its generator reached a terminal
-      // yield. The outer producer still has to drain cleanup and persist the Pi
-      // session, so complete()/fail() owns the replayable terminal signal.
-      this.flushTextBufferSync(messageId)
-      if (evt.type === 'done') return
+    // A producer-level done only means its generator reached a terminal yield.
+    // complete()/fail() owns the terminal signal after persistence.
+    if (evt.type === 'done') return undefined
 
-      entry.events.push(event)
+    const sequenced = this.sequenceEvent(entry, event)
+    entry.events.push(sequenced)
 
-      if (evt.type === 'tool_call') {
-        let input: unknown = evt.input
-        try { input = JSON.parse(evt.input) } catch {}
-        const existing = entry.toolCalls.find((t) => t.id === evt.toolCallId)
-        if (existing) { existing.name = evt.toolName; existing.input = input }
-        else entry.toolCalls.push({ id: evt.toolCallId, name: evt.toolName, input })
-        if (!entry.segments.some((s) => s.type === 'tool' && s.toolCallId === evt.toolCallId)) {
-          entry.segments.push({ type: 'tool', toolCallId: evt.toolCallId })
-        }
-      } else if (evt.type === 'tool_result') {
-        const tc = entry.toolCalls.find((t) => t.id === evt.toolCallId)
-        if (tc) tc.result = evt.result
-      } else if (evt.type === 'citation') {
-        entry.citations.push({ pageNumber: evt.pageNumber, text: evt.text })
-      }
-
-      this.notify(messageId, event)
+    if ((evt.type === 'pi_user_entry' || evt.type === 'pi_assistant_entry') && typeof evt.sessionFile === 'string') {
+      entry.sessionFile = evt.sessionFile
     }
+
+    if (evt.type === 'text') {
+      entry.content += evt.content
+      const lastSegment = entry.segments[entry.segments.length - 1]
+      if (lastSegment?.type === 'text') lastSegment.text += evt.content
+      else entry.segments.push({ type: 'text', text: evt.content })
+    } else if (evt.type === 'thinking') {
+      entry.thinking += evt.content
+      const lastSegment = entry.segments[entry.segments.length - 1]
+      if (lastSegment?.type === 'thinking') {
+        lastSegment.text += evt.content
+      } else {
+        let phaseThinking: { text: string } | undefined
+        for (let index = entry.segments.length - 1; index >= 0; index--) {
+          const segment = entry.segments[index]
+          if (segment.type === 'tool') break
+          if (segment.type === 'thinking') {
+            phaseThinking = segment
+            break
+          }
+        }
+        if (phaseThinking) phaseThinking.text += `\n\n${evt.content}`
+        else entry.segments.push({ type: 'thinking', text: evt.content })
+      }
+    } else if (evt.type === 'tool_call') {
+      let input: unknown = evt.input
+      try { input = JSON.parse(evt.input) } catch {}
+      const existing = entry.toolCalls.find((tool) => tool.id === evt.toolCallId)
+      if (existing) { existing.name = evt.toolName; existing.input = input }
+      else entry.toolCalls.push({ id: evt.toolCallId, name: evt.toolName, input })
+      if (!entry.segments.some(segment => segment.type === 'tool' && segment.toolCallId === evt.toolCallId)) {
+        entry.segments.push({ type: 'tool', toolCallId: evt.toolCallId })
+      }
+    } else if (evt.type === 'tool_result') {
+      const toolCall = entry.toolCalls.find(tool => tool.id === evt.toolCallId)
+      if (toolCall) toolCall.result = evt.result
+    } else if (evt.type === 'citation') {
+      entry.citations.push({ pageNumber: evt.pageNumber, text: evt.text })
+    }
+
+    this.notify(messageId, sequenced)
+    // Commit mappings are recovery barriers and must not wait for the periodic
+    // snapshot timer; recovery uses them to avoid duplicating canonical turns.
+    if (evt.type === 'pi_user_entry' || evt.type === 'pi_assistant_entry') {
+      void this.persistSnapshot(messageId, 'streaming').catch(() => {})
+    }
+    return sequenced
   }
 
   /** Complete the stream: flush everything to DB and clean up. */
@@ -162,7 +215,7 @@ export class StreamBuffer {
 
     await this.persistSnapshot(messageId, 'completed')
 
-    this.notify(messageId, { type: 'done' })
+    this.notify(messageId, this.sequenceEvent(entry, { type: 'done' }))
 
     // Clean up
     this.streams.delete(messageId)
@@ -187,13 +240,13 @@ export class StreamBuffer {
       const text = `❌ ${error}`
       entry.content += entry.content ? `\n\n${text}` : text
       entry.segments.push({ type: 'error', text })
-      const errorEvent = { type: 'error', message: error }
+      const errorEvent = this.sequenceEvent(entry, { type: 'error', message: error })
       entry.events.push(errorEvent)
       this.notify(messageId, errorEvent)
     }
     await this.persistSnapshot(messageId, 'failed')
 
-    this.notify(messageId, { type: 'done' })
+    this.notify(messageId, this.sequenceEvent(entry, { type: 'done' }))
 
     this.streams.delete(messageId)
     this.textBuffers.delete(messageId)
@@ -222,21 +275,29 @@ export class StreamBuffer {
     return this.streams.get(messageId)
   }
 
-  /** Get all events for a stream (for replay). */
-  getEvents(messageId: string): unknown[] {
+  /** Get a stable sequenced replay snapshot after the supplied cursor. */
+  getEvents(messageId: string, afterSequence = 0): Array<unknown & { eventSequence?: number }> {
     const entry = this.streams.get(messageId)
     if (!entry) return []
-
-    // Materialize buffered text/thinking before returning. This makes replay
-    // offsets stable across polling calls; otherwise an unflushed text event can
-    // grow in place and a reconnecting client may miss the later suffix.
-    this.flushTextBufferSync(messageId)
-    return [...entry.events]
+    return entry.events.filter(event => Number(event.eventSequence || 0) > afterSequence)
   }
 
   /** Check if a stream is active. */
   has(messageId: string): boolean {
     return this.streams.has(messageId)
+  }
+
+  /** Update the canonical owner after an extension-driven branch/session switch. */
+  updateContext(messageId: string, conversationId: string, branchId: string): void {
+    const entry = this.streams.get(messageId)
+    if (!entry) return
+    entry.conversationId = conversationId
+    entry.branchId = branchId
+    if (entry.userMessage) {
+      entry.userMessage.conversationId = conversationId
+      entry.userMessage.branchId = branchId
+    }
+    entry.updatedAt = Date.now()
   }
 
   /** Refresh producer liveness without emitting a user-visible event. */
@@ -255,6 +316,14 @@ export class StreamBuffer {
     }
   }
 
+  private sequenceEvent(entry: StreamEntry, event: unknown): unknown & { eventSequence: number } {
+    entry.eventSequence += 1
+    return {
+      ...((event && typeof event === 'object') ? event as Record<string, unknown> : { value: event }),
+      eventSequence: entry.eventSequence,
+    }
+  }
+
   private notify(messageId: string, event: unknown): void {
     const subscribers = this.subscribers.get(messageId)
     if (!subscribers?.size) return
@@ -269,7 +338,7 @@ export class StreamBuffer {
     if (!entry || !textBuf?.length) return
 
     const text = textBuf.join('')
-    entry.events.push({ type: 'text', content: text })
+    entry.events.push(this.sequenceEvent(entry, { type: 'text', content: text }))
     const lastSegment = entry.segments[entry.segments.length - 1]
     if (lastSegment?.type === 'text') lastSegment.text += text
     else entry.segments.push({ type: 'text', text })
@@ -282,7 +351,7 @@ export class StreamBuffer {
     if (!entry || !thinkBuf?.length) return
 
     const thinking = thinkBuf.join('')
-    entry.events.push({ type: 'thinking', content: thinking })
+    entry.events.push(this.sequenceEvent(entry, { type: 'thinking', content: thinking }))
     const lastSegment = entry.segments[entry.segments.length - 1]
     if (lastSegment?.type === 'thinking') {
       lastSegment.text += thinking
@@ -343,7 +412,7 @@ export class StreamBuffer {
       }
 
       const finalData = this.buildFinalData(entry, status)
-      const signature = JSON.stringify(finalData)
+      const signature = JSON.stringify({ finalData, eventSequence: entry.eventSequence })
       if (status === 'streaming' && this.persistedSnapshots.get(messageId) === signature) return
       await this.flushFn(entry.conversationId, messageId, entry.events, finalData)
       this.persistedSnapshots.set(messageId, signature)

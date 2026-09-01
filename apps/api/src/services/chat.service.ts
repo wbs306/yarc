@@ -104,10 +104,10 @@ export class ChatService {
       const userMessage = this.buildUserMessage(content, contextBlock)
       failedPrompt = userMessage
 
-      // Store context as CustomEntry in Pi session
-      if (context && branchId) {
-        await piConversationService.appendContextEntry(conversationId, branchId, context)
-      }
+      // The context block is part of the canonical user message. Do not append
+      // a second out-of-band SessionManager entry here: long-lived Runtime
+      // Workers own the active Session tree, and external JSONL mutation would
+      // leave their in-memory leaf stale.
 
       // Keep the fallback armed while entering PiService too. Its setup can
       // still throw before it obtains a SessionManager; the persistence helper

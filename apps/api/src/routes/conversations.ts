@@ -39,7 +39,23 @@ conversations.delete('/:id', async (c) => {
   const id = c.req.param('id')
   // Read metadata before deleting so we can clean up Pi session files.
   const conv = await prisma.conversation.findUnique({ where: { id }, select: { metadata: true } })
+  const activeStream = streamingRegistry.get(id)
+  if (activeStream) chatStreamControl.cancel(activeStream.messageId)
   agentInteractionRegistry.cancelByConversation(id, 'conversation_deleted')
+
+  // Stop Runtime Workers and drain any legacy producer before removing the
+  // Conversation row. Otherwise a final metadata event can race the delete
+  // and fail with Prisma P2025 while the stream is still running.
+  await piService.disposeConversationRuntime(id, 'conversation_deleted')
+  const remainingStream = streamingRegistry.get(id)
+  if (remainingStream) {
+    chatStreamControl.cancel(remainingStream.messageId)
+    await streamingRegistry.waitForMessage(remainingStream.messageId)
+    if (streamingRegistry.get(id)) {
+      throw new AppError('CONVERSATION_BUSY', 'Conversation is still processing a stream', 409)
+    }
+  }
+
   await conversationService.delete(id)
   // Best-effort cleanup of Pi session files on disk.
   await piService.deleteSessionFiles(conv?.metadata as Record<string, unknown>).catch(() => {})

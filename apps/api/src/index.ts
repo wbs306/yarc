@@ -242,6 +242,7 @@ app.get(
   upgradeWebSocket((c) => {
     let conversationId: string | null = null
     let streamMsgId: string | null = null
+    let streamStarted = false
     let clientClosed = false
     let unsubscribeAttachedStream: (() => void) | null = null
 
@@ -273,27 +274,58 @@ app.get(
             }
 
             const bufferedStream = streamBuffer.get(messageId)
+            const afterSequence = Math.max(0, Math.floor(Number(data.afterSequence || 0)))
+            let lastSequence = afterSequence
+            let replaying = true
+            let terminalSent = false
+            const pendingLive: unknown[] = []
+
+            // Subscribe before taking the replay snapshot. Live callbacks are
+            // queued until replay is sent, then de-duplicated by sequence.
+            unsubscribeAttachedStream?.()
+            unsubscribeAttachedStream = streamBuffer.subscribe(messageId, (event) => {
+              if (replaying) {
+                pendingLive.push(event)
+                return
+              }
+              const sequence = Number((event as any)?.eventSequence || 0)
+              if (sequence && sequence <= lastSequence) return
+              if (sequence) lastSequence = sequence
+              safeSend(event)
+              if ((event as any)?.type === 'done') {
+                terminalSent = true
+                unsubscribeAttachedStream?.()
+                unsubscribeAttachedStream = null
+              }
+            })
+
             safeSend({
               type: 'stream_start',
               messageId,
               branchId: bufferedStream?.branchId,
               userMessage: bufferedStream?.userMessage,
+              eventSequence: afterSequence,
             })
-            for (const evt of streamBuffer.getEvents(messageId)) safeSend(evt)
-
-            if (!streamBuffer.has(messageId)) {
-              safeSend({ type: 'done' })
-              return
+            for (const replayed of streamBuffer.getEvents(messageId, afterSequence)) {
+              const sequence = Number((replayed as any)?.eventSequence || 0)
+              if (sequence) lastSequence = Math.max(lastSequence, sequence)
+              safeSend(replayed)
+              if ((replayed as any)?.type === 'done') terminalSent = true
+            }
+            replaying = false
+            for (const live of pendingLive) {
+              const sequence = Number((live as any)?.eventSequence || 0)
+              if (sequence && sequence <= lastSequence) continue
+              if (sequence) lastSequence = sequence
+              safeSend(live)
+              if ((live as any)?.type === 'done') terminalSent = true
             }
 
-            unsubscribeAttachedStream?.()
-            unsubscribeAttachedStream = streamBuffer.subscribe(messageId, (evt) => {
-              safeSend(evt)
-              if ((evt as any)?.type === 'done') {
-                unsubscribeAttachedStream?.()
-                unsubscribeAttachedStream = null
-              }
-            })
+            if (!streamBuffer.has(messageId)) {
+              unsubscribeAttachedStream?.()
+              unsubscribeAttachedStream = null
+              if (!terminalSent) safeSend({ type: 'done', eventSequence: lastSequence + 1 })
+            }
             return
           }
 
@@ -340,11 +372,19 @@ app.get(
               },
               createdAt: new Date().toISOString(),
             }
-            streamBuffer.start(streamMsgId, conversationId, branchId, pendingUserMessage)
+            const [sessionFile, initialLeafId] = await Promise.all([
+              piConversationService.getSessionFile(conversationId, branchId),
+              piConversationService.getLeafEntryId(conversationId, branchId),
+            ])
+            await streamBuffer.start(streamMsgId, conversationId, branchId, pendingUserMessage, {
+              source: 'user',
+              initialLeafId,
+              sessionFile: sessionFile || undefined,
+            })
+            streamStarted = true
 
             // Fill in the reservation metadata used by stop/resume routes.
-            const sessionFile = await piConversationService.getSessionFile(conversationId, branchId) || ''
-            streamingRegistry.update(conversationId, streamMsgId, { branchId, sessionFile })
+            streamingRegistry.update(conversationId, streamMsgId, { branchId, sessionFile: sessionFile || '' })
 
             // In-flight IDs let replay metadata map pending messages to their
             // canonical Pi JSONL entries after persistence.
@@ -379,6 +419,18 @@ app.get(
                 conversationTitle,
               })
             }
+
+            // The originating browser consumes the same sequenced buffer as a
+            // reconnecting browser. This keeps live and replay event identities
+            // identical and removes the attach gap.
+            unsubscribeAttachedStream?.()
+            unsubscribeAttachedStream = streamBuffer.subscribe(streamMsgId, event => {
+              safeSend(event)
+              if ((event as any)?.type === 'done') {
+                unsubscribeAttachedStream?.()
+                unsubscribeAttachedStream = null
+              }
+            })
 
             // Detach the producer from this WebSocket handler. If the browser
             // refreshes, the socket closes but this background task keeps writing
@@ -426,15 +478,11 @@ app.get(
                   // immediately after stopping a turn. Assistant mappings stay
                   // internal because the stream ID is still needed by stop.
                   if (evt.type === 'pi_assistant_entry') continue
-
-                  safeSend(evt)
                 }
               } catch (err) {
                 failed = true
                 const message = (err as Error).message || 'Chat failed'
-                safeSend({ type: 'error', message })
                 await streamBuffer.fail(runMessageId, message).catch(() => {})
-                safeSend({ type: 'done' })
               } finally {
                 clearInterval(heartbeat)
 
@@ -445,12 +493,9 @@ app.get(
                   failed = true
                   const wasCancelled = cancellationObserved || chatStreamControl.isCancelled(runMessageId)
                   const message = wasCancelled ? 'Request aborted' : 'Chat stream ended unexpectedly'
-                  safeSend({ type: 'error', message })
                   await streamBuffer.fail(runMessageId, message).catch(() => {})
-                  safeSend({ type: 'done' })
                 } else if (completedNormally) {
                   await streamBuffer.complete(runMessageId).catch(() => {})
-                  safeSend({ type: 'done' })
                 }
 
                 agentInteractionRegistry.cancelByStream(runMessageId, completedNormally ? 'stream_completed' : 'stream_ended')
@@ -463,16 +508,20 @@ app.get(
           }
         } catch (err) {
           const message = (err as Error).message || 'Chat failed'
-          safeSend({ type: 'error', message })
           if (streamMsgId) {
-            await streamBuffer.fail(streamMsgId, message).catch(() => {})
+            if (streamStarted) await streamBuffer.fail(streamMsgId, message).catch(() => {})
+            else {
+              safeSend({ type: 'error', message })
+              safeSend({ type: 'done' })
+            }
             if (conversationId) streamingRegistry.unregister(conversationId, streamMsgId)
             chatStreamControl.clear(streamMsgId)
             streamMsgId = null
+            streamStarted = false
+          } else {
+            safeSend({ type: 'error', message })
+            safeSend({ type: 'done' })
           }
-          // Even failures before stream_start (notably stale edit entry IDs)
-          // must terminate the client-side stream state.
-          safeSend({ type: 'done' })
         }
       },
 
@@ -716,9 +765,14 @@ const server = serve(
     // Seed the agent workspace filesystem from DB once at startup.
     // This replaces the per-request ensureAgentWorkspace() in GET /api/settings
     // that caused repeated file writes and SSE pi-config-changed events.
-    ensureAgentWorkspaceFromDb().catch((err) => {
-      console.warn('[Startup] Agent workspace seed failed:', err)
-    })
+    ensureAgentWorkspaceFromDb()
+      .then(() => piService.recoverRuntimeJournals())
+      .then(({ recovered }) => {
+        if (recovered > 0) console.log(`[Startup] Recovered ${recovered} interrupted Pi Runtime run(s)`)
+      })
+      .catch((err) => {
+        console.warn('[Startup] Agent workspace seed or Runtime recovery failed:', err)
+      })
 
     // Expose chat bridge for WeChat extension
     setupChatBridge()
@@ -732,3 +786,23 @@ const server = serve(
 )
 
 injectWebSocket(server)
+
+let shuttingDown = false
+const shutdown = async (signal: string) => {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log(`[Shutdown] ${signal}: disposing Pi Runtime Workers`)
+  await piService.disposeRuntimes(signal).catch((err) => {
+    console.warn('[Shutdown] Pi Runtime disposal failed:', err)
+  })
+  server.close((err) => {
+    if (err && (err as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {
+      console.error('[Shutdown] HTTP server close failed:', err)
+      process.exit(1)
+    }
+    process.exit(0)
+  })
+}
+
+process.once('SIGTERM', () => { void shutdown('SIGTERM') })
+process.once('SIGINT', () => { void shutdown('SIGINT') })

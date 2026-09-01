@@ -33,9 +33,10 @@ export class ConversationService {
     return conv
   }
 
-  async create(data: { paperId?: string; title?: string; model?: string; systemPrompt?: string }) {
+  async create(data: { id?: string; paperId?: string; title?: string; model?: string; systemPrompt?: string }) {
     const conv = await prisma.conversation.create({
       data: {
+        ...(data.id ? { id: data.id } : {}),
         paperId: data.paperId,
         title: data.title || DEFAULT_CONVERSATION_TITLE,
         model: data.model,

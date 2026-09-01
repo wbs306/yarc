@@ -27,6 +27,7 @@ describe('PiService failed-turn fallback', () => {
     assert.equal(branch[1]?.message.role, 'assistant')
     assert.equal(branch[1]?.message.stopReason, 'error')
     assert.equal(branch[1]?.message.errorMessage, 'missing credentials')
+    assert.deepEqual(branch[1]?.message.content, [])
     assert.deepEqual(manager.buildSessionContext().model, { provider: 'openai', modelId: 'gpt-test' })
 
     persistFailedPromptIfMissing(

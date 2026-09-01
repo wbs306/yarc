@@ -32,6 +32,12 @@ export const config = {
   // config (including skill tools). Set PI_CHAT_TOOLS=none to disable all,
   // or comma-separated tool names to restrict to a specific set.
   piChatTools: process.env.PI_CHAT_TOOLS || 'all',
+  piRuntimeIdleTtlMs: parseInt(process.env.PI_RUNTIME_IDLE_TTL_MS || '900000'),
+  piRuntimeMaxActive: parseInt(process.env.PI_RUNTIME_MAX_ACTIVE || '12'),
+  piRuntimeStartTimeoutMs: parseInt(process.env.PI_RUNTIME_START_TIMEOUT_MS || '30000'),
+  piRuntimeJournalRetentionMs: parseInt(process.env.PI_RUNTIME_JOURNAL_RETENTION_MS || '86400000'),
+  piExtensionUiTimeoutMs: parseInt(process.env.PI_EXTENSION_UI_TIMEOUT_MS || '300000'),
+  piSessionDurability: process.env.PI_SESSION_DURABILITY === 'normal' ? 'normal' : 'strict',
   maxFileSize: 50 * 1024 * 1024, // 50MB
   pdfCacheDays: parseInt(process.env.PDF_CACHE_DAYS || '2'),
   cors: {

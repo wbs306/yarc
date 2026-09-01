@@ -14,7 +14,7 @@ export const persistFailedPromptIfMissing = (
   initialLeafId: string | null,
   prompt: string,
   errorMessage: string,
-  assistantModel?: FailureModel
+  assistantModel?: FailureModel,
 ): void => {
   if (!errorMessage || typeof sessionManager?.appendMessage !== 'function') return
 
