@@ -323,6 +323,10 @@ Prisma schema 位于 `packages/db/prisma/schema.prisma`。
 
 对话历史以 **Pi SessionManager JSONL** 为唯一数据源：用户消息、助手消息、工具调用、思考过程、compaction 和分支内容都从 Pi session 文件读取。数据库不再保存 `Message`、`MessageBranch` 或 `StreamEvent` 表；`Conversation.metadata.pi.sessions` 只保存各分支对应的 session 文件路径、叶子 entry、父分支和 fork 锚点等定位信息。
 
+Web 对话的 Pi Extension 由长生命周期 Runtime Worker 承载。每个活动的 `conversationId + branchId` 拥有独立 Worker、Extension module cache、Session runtime 和 Web TUI surface；不同 conversation 可并行，同一 conversation 仍只允许一个主生成 producer。最终消息在 Pi `message_end` 后同步写入 JSONL并执行提交屏障，Worker 回收不承担消息保存。生成中的 prompt/delta 临时记录到 `data/.pi/agent/runtime-streams`，正常提交后清理，API 重启时恢复为 aborted turn。
+
+浏览器刷新或切换对话只 detach WebSocket subscriber，后台 Runtime 和 StreamBuffer 继续生成。Pi package 安装、更新、启用、禁用或卸载后会重建空闲 Worker；正在生成的 Worker 在 settled 后重建，以清除 Extension module cache。Web 对话的模型和思考级别按 conversation 保存，不会因 `AgentSession.setModel()` 或 `setThinkingLevel()` 改写全局 `settings.json` 默认值；默认值仅由设置页显式修改。`pi-context` 的 `/acm` 启用标记会在同一 API 进程内的 Runtime 重建后自动恢复；API 完全重启后需要重新执行 `/acm`。
+
 修改 schema 后执行：
 
 ```bash
@@ -353,7 +357,7 @@ pnpm db:generate
 - `papers/` PDF 存储目录
 - 根目录和 `.pi` 关键目录
 
-文件变更 watcher 会通过 SSE 发出 `files-changed`，涉及 Pi 配置时会触发 Pi 服务重载。
+文件变更 watcher 会通过 SSE 发出 `files-changed`，只有 `AGENTS.md`、Pi settings/keybindings、prompt/skill/theme/extension 等实际被 Runtime 读取的资源变更时才触发 Pi 服务重载；普通工作区文件同步不会重建 Runtime。
 
 ## 环境变量
 
@@ -377,6 +381,12 @@ pnpm db:generate
 | `PI_CLI_COMMAND` | Pi CLI 命令 | `pi` |
 | `PI_CHAT_TOOLS` | Pi 聊天可用工具 | `all` |
 | `PI_CHAT_TIMEOUT_MS` | Pi 聊天超时 | `120000` |
+| `PI_RUNTIME_IDLE_TTL_MS` | 空闲 Runtime Worker 回收时间 | `900000` |
+| `PI_RUNTIME_MAX_ACTIVE` | 最大活动 Runtime Worker 数 | `12` |
+| `PI_RUNTIME_START_TIMEOUT_MS` | Runtime Worker 启动超时 | `30000` |
+| `PI_RUNTIME_JOURNAL_RETENTION_MS` | 已失活 Runtime journal 的保留时间；后台每小时清理 | `86400000` |
+| `PI_EXTENSION_UI_TIMEOUT_MS` | Extension UI 默认超时 | `300000` |
+| `PI_SESSION_DURABILITY` | Session 最终消息耐久级别：`strict`/`normal` | `strict` |
 | `SUMMARY_TIMEOUT_MS` | 总结生成超时 | `300000` |
 | `PDF_CACHE_DAYS` | PDF 缓存天数 | `2` |
 | `CORS_ORIGIN` | CORS origin | `http://localhost:3000` |
