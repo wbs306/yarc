@@ -410,6 +410,7 @@ extensions.post('/install', async (c) => {
       const dest = resolveUnder(extensionsDir, fileName)
       if (existsSync(dest)) throw new AppError('CONFLICT', `${fileName} 已存在`, 409)
       await copyFile(resolvedPath, dest)
+      await piService.reloadExtensions(`install:local:${fileName}`)
       return c.json({ ok: true, id: `local:${fileName}`, type: 'local' })
     }
 
@@ -440,6 +441,7 @@ extensions.post('/install', async (c) => {
       }
     }
 
+    await piService.reloadExtensions(`install:local:${extName}`)
     return c.json({ ok: true, id: `local:${extName}`, type: 'local' })
 
   } else if (type === 'npm') {
@@ -474,6 +476,7 @@ extensions.post('/install', async (c) => {
     // Add to settings.json packages
     settings.packages = [...existingPkgs, spec]
     await writeSettings(settings)
+    await piService.reloadExtensions(`install:${spec}`)
 
     return c.json({ ok: true, id: spec, type: 'npm' })
 
@@ -509,6 +512,7 @@ extensions.post('/install', async (c) => {
     // Add to settings.json packages
     settings.packages = [...existingPkgs, spec]
     await writeSettings(settings)
+    await piService.reloadExtensions(`install:${spec}`)
 
     return c.json({ ok: true, id: spec, type: 'git' })
   }
@@ -542,6 +546,7 @@ extensions.post('/:id/enable', async (c) => {
       throw new AppError('NOT_FOUND', `扩展 ${name} 未找到`, 404)
     }
     await rename(disabledPath, enabledPath)
+    await piService.reloadExtensions(`enable:${id}`)
     return c.json({ ok: true })
   }
 
@@ -553,6 +558,7 @@ extensions.post('/:id/enable', async (c) => {
   pkgs[idx] = pkgs[idx].replace(/^-/, '')
   settings.packages = pkgs
   await writeSettings(settings)
+  await piService.reloadExtensions(`enable:${id}`)
   return c.json({ ok: true })
 })
 
@@ -571,6 +577,7 @@ extensions.post('/:id/disable', async (c) => {
       throw new AppError('NOT_FOUND', `扩展 ${name} 未找到`, 404)
     }
     await rename(enabledPath, disabledPath)
+    await piService.reloadExtensions(`disable:${id}`)
     return c.json({ ok: true })
   }
 
@@ -582,6 +589,7 @@ extensions.post('/:id/disable', async (c) => {
   if (!pkgs[idx]!.startsWith('-')) pkgs[idx] = `-${pkgs[idx]}`
   settings.packages = pkgs
   await writeSettings(settings)
+  await piService.reloadExtensions(`disable:${id}`)
   return c.json({ ok: true })
 })
 
@@ -609,6 +617,7 @@ extensions.post('/upload', async (c) => {
       if (existsSync(dest)) throw new AppError('CONFLICT', `${originalName} 已存在`, 409)
       // writeFile already imported
       await writeFile(dest, buffer)
+      await piService.reloadExtensions(`upload:local:${originalName}`)
       return c.json({ ok: true, id: `local:${originalName.replace(/\.[^.]+$/, '')}`, type: 'local' })
     }
 
@@ -635,6 +644,7 @@ extensions.post('/upload', async (c) => {
 
       await cp(findExtensionRoot(extractDir), destDir, { recursive: true })
       await installDeps(destDir)
+      await piService.reloadExtensions(`upload:local:${extName}`)
       return c.json({ ok: true, id: `local:${extName}`, type: 'local' })
     }
 
@@ -661,6 +671,7 @@ extensions.post('/upload', async (c) => {
 
       await cp(findExtensionRoot(extractDir), destDir, { recursive: true })
       await installDeps(destDir)
+      await piService.reloadExtensions(`upload:local:${extName}`)
       return c.json({ ok: true, id: `local:${extName}`, type: 'local' })
     }
 
@@ -722,6 +733,7 @@ extensions.delete('/:id', async (c) => {
     else if (existsSync(disabledPath)) target = disabledPath
     else throw new AppError('NOT_FOUND', `扩展 ${name} 未找到`, 404)
     await rm(target, { recursive: true, force: true })
+    await piService.reloadExtensions(`uninstall:${id}`)
     return c.json({ ok: true })
   }
 
@@ -748,6 +760,7 @@ extensions.delete('/:id', async (c) => {
     } catch {}
   }
 
+  await piService.reloadExtensions(`uninstall:${id}`)
   return c.json({ ok: true })
 })
 
