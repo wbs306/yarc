@@ -8,6 +8,7 @@ import { confirm } from '@/composables/useConfirm'
 import ModelSelector from './ModelSelector.vue'
 import ReasoningEffort from './ReasoningEffort.vue'
 import AgentInteractionHost from '@/components/agent/AgentInteractionHost.vue'
+import ExtensionTuiSurface from '@/components/agent/ExtensionTuiSurface.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import type { CurrentChatResource } from '@yarc/shared'
 
@@ -27,6 +28,7 @@ const editingMessageId = ref('')
 const container = ref<HTMLDivElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
 const modelSelectorRef = ref<{ openDropdown: () => void }>()
+const customEditorSurface = computed(() => Object.values(chatStore.tuiSurfaces).find(surface => surface.kind === 'editor' && !surface.overlay) || null)
 
 // Sent-message history (up-arrow recall)
 const sentHistory = ref<string[]>([])
@@ -42,9 +44,30 @@ const autoResize = () => {
   el.style.height = Math.min(el.scrollHeight, 200) + 'px'
 }
 
-watch(inputText, () => nextTick(autoResize))
+let composerSyncTimer: number | null = null
+const syncComposerMirror = () => {
+  if (composerSyncTimer !== null) window.clearTimeout(composerSyncTimer)
+  composerSyncTimer = window.setTimeout(() => {
+    composerSyncTimer = null
+    const element = textareaRef.value
+    void chatStore.syncComposer(
+      inputText.value,
+      element?.selectionStart ?? inputText.value.length,
+      element?.selectionEnd ?? inputText.value.length,
+    )
+  }, 120)
+}
 
-const commandOptions = [
+watch(inputText, () => {
+  nextTick(autoResize)
+  syncComposerMirror()
+})
+
+onBeforeUnmount(() => {
+  if (composerSyncTimer !== null) window.clearTimeout(composerSyncTimer)
+})
+
+const baseCommandOptions = [
   // Web-native session commands
   { trigger: '/model', label: '/model [name]', hint: '打开或切换模型' },
   { trigger: '/thinking', label: '/thinking [level]', hint: '切换思考级别' },
@@ -64,6 +87,18 @@ const commandOptions = [
   { trigger: '@paper ', label: '@paper', hint: '引用论文' },
   { trigger: '@category ', label: '@category <name>', hint: '引用分类' },
 ]
+
+const commandOptions = computed(() => {
+  const existing = new Set(baseCommandOptions.map(option => option.trigger.trim().split(/\s+/)[0]))
+  const extensionOptions = chatStore.runtimeCommands
+    .filter(command => !existing.has(`/${command.name}`))
+    .map(command => ({
+      trigger: `/${command.name}${command.source === 'extension' ? '' : ' '}`,
+      label: `/${command.name}`,
+      hint: command.description || `Pi ${command.source} command`,
+    }))
+  return [...baseCommandOptions, ...extensionOptions]
+})
 
 // Paper picker for @paper command
 const paperPickerOpen = ref(false)
@@ -181,7 +216,33 @@ interface SuggestionItem {
   type: 'command' | 'current' | 'file' | 'paper' | 'category'
   matchStart: number
   matchEnd: number
+  completionItem?: { value: string; label: string; description?: string }
+  completionPrefix?: string
 }
+
+const extensionAutocomplete = ref<{ items: Array<{ value: string; label: string; description?: string }>; prefix: string; cursor: number } | null>(null)
+let autocompleteSeq = 0
+let autocompleteTimer: number | null = null
+
+const refreshExtensionAutocomplete = (text: string) => {
+  if (autocompleteTimer !== null) window.clearTimeout(autocompleteTimer)
+  const seq = ++autocompleteSeq
+  if (!text || !chatStore.runtimeState) {
+    extensionAutocomplete.value = null
+    return
+  }
+  const cursor = textareaRef.value?.selectionStart ?? text.length
+  autocompleteTimer = window.setTimeout(async () => {
+    autocompleteTimer = null
+    const result = await chatStore.getRuntimeAutocomplete(text, cursor)
+    if (seq !== autocompleteSeq || inputText.value !== text) return
+    extensionAutocomplete.value = result?.items?.length ? { ...result, cursor } : null
+  }, 120)
+}
+
+onBeforeUnmount(() => {
+  if (autocompleteTimer !== null) window.clearTimeout(autocompleteTimer)
+})
 
 const suggestions = computed<SuggestionItem[]>(() => {
   const text = inputText.value
@@ -260,13 +321,29 @@ const suggestions = computed<SuggestionItem[]>(() => {
     return items
   }
 
+  if (extensionAutocomplete.value?.items?.length) {
+    const prefix = extensionAutocomplete.value.prefix || ''
+    const cursor = extensionAutocomplete.value.cursor ?? text.length
+    const matchStart = Math.max(0, cursor - prefix.length)
+    return extensionAutocomplete.value.items.slice(0, 8).map(item => ({
+      label: item.label || item.value,
+      insert: item.value,
+      hint: item.description || 'Pi extension completion',
+      type: 'command' as const,
+      matchStart,
+      matchEnd: cursor,
+      completionItem: item,
+      completionPrefix: prefix,
+    }))
+  }
+
   // Slash commands at start of input
   const slashMatch = text.match(/^\/(\w*)$/)
   if (slashMatch) {
     const prefix = slashMatch[1].toLowerCase()
     const matchStart = slashMatch.index!
     const matchEnd = matchStart + slashMatch[0].length
-    return commandOptions
+    return commandOptions.value
       .filter(o => o.trigger.slice(1).startsWith(prefix))
       .map(o => ({ label: o.label, insert: o.trigger, hint: o.hint, type: 'command' as const, matchStart, matchEnd }))
       .slice(0, 6)
@@ -278,7 +355,23 @@ const suggestions = computed<SuggestionItem[]>(() => {
 const selectedSuggestion = ref(0)
 watch(suggestions, () => { selectedSuggestion.value = 0 })
 
-const applySuggestion = (item: SuggestionItem) => {
+const applySuggestion = async (item: SuggestionItem) => {
+  if (item.completionItem) {
+    const cursor = textareaRef.value?.selectionStart ?? extensionAutocomplete.value?.cursor ?? inputText.value.length
+    const result = await chatStore.applyRuntimeAutocomplete(inputText.value, cursor, item.completionItem, item.completionPrefix || '')
+    if (Array.isArray(result?.lines)) {
+      inputText.value = result.lines.join('\n')
+      extensionAutocomplete.value = null
+      nextTick(() => {
+        textareaRef.value?.focus()
+        const cursorLine = Math.max(0, Math.min(Number(result.cursorLine || 0), result.lines.length - 1))
+        const cursor = result.lines.slice(0, cursorLine).reduce((total: number, line: string) => total + line.length + 1, 0)
+          + Number(result.cursorCol ?? result.lines[cursorLine]?.length ?? inputText.value.length)
+        textareaRef.value?.setSelectionRange(cursor, cursor)
+      })
+      return
+    }
+  }
   // Replace only the matched @command part, preserving the rest of the input.
   // Suppress the palette for the completed value so the next Enter sends it
   // instead of selecting the same suggestion repeatedly.
@@ -304,6 +397,7 @@ const applySelectedSuggestion = () => {
 // Preload data when @ is typed
 watch(inputText, (val) => {
   if (dismissedSuggestionText.value && val !== dismissedSuggestionText.value) dismissedSuggestionText.value = ''
+  refreshExtensionAutocomplete(val)
   if (val.includes('@file')) loadFileTree()
   if (val.includes('@category')) loadCategories()
   if (val.includes('@paper') && !paperStore.papers.length) paperStore.fetchPapers()
@@ -442,6 +536,15 @@ watch(() => chatStore.messages?.length ?? 0, (newLen, oldLen) => {
 watch(streamLayoutVersion, () => scheduleScroll(), { flush: 'post' })
 watch(() => chatStore.pendingPrompt, (p) => {
   if (p) { inputText.value = p; chatStore.pendingPrompt = ''; scheduleScroll() }
+})
+watch(() => chatStore.composerUpdate, (update) => {
+  if (!update) return
+  inputText.value = update.text
+  chatStore.composerUpdate = null
+  nextTick(() => {
+    textareaRef.value?.focus()
+    textareaRef.value?.setSelectionRange(update.selectionStart, update.selectionEnd)
+  })
 })
 
 // ── Conversation menu ───────────────────────────────────────────────────────
@@ -970,7 +1073,7 @@ const sessionState = computed(() => {
           </div>
           <div v-else-if="item.error" class="btw-error">❌ {{ item.error }}</div>
           <div v-else-if="item.cancelled" class="btw-cancelled">已取消</div>
-          <details v-if="item.thinking" class="btw-thinking"><summary>思考记录</summary><pre>{{ item.thinking }}</pre></details>
+          <details v-if="item.thinking" class="btw-thinking"><summary>{{ chatStore.uiWorking.hiddenThinkingLabel || '思考记录' }}</summary><pre>{{ item.thinking }}</pre></details>
           <MarkdownContent v-if="item.answer" class="btw-answer" :content="item.answer" file-references @open-file="emit('openFile', $event)" />
           <div v-if="!item.loading && item.answer && !item.error" class="btw-actions">
             <button class="btw-action-btn" @click="chatStore.insertBtwAnswer(item.runId || item.id)" title="插入输入框">📋 插入</button>
@@ -984,6 +1087,11 @@ const sessionState = computed(() => {
     <!-- Header -->
     <div ref="headerRef" class="chat-header">
       <div class="conv-selector">
+        <ExtensionTuiSurface
+          v-if="chatStore.uiHeaderSurfaceId && chatStore.tuiSurfaces[chatStore.uiHeaderSurfaceId]"
+          :surface="chatStore.tuiSurfaces[chatStore.uiHeaderSurfaceId]"
+          embedded
+        />
         <div v-if="chatStore.uiHeaderLines.length" class="ui-header-banner">
           <span v-for="(line, i) in chatStore.uiHeaderLines" :key="i">{{ line }}</span>
         </div>
@@ -1031,7 +1139,12 @@ const sessionState = computed(() => {
     <div class="chat-messages-wrap">
     <!-- UI Context widgets (above) -->
     <template v-for="(widget, key) in chatStore.uiWidgets" :key="key">
-      <div v-if="widget.placement === 'above' && widget.lines.length" class="ui-widget">
+      <ExtensionTuiSurface
+        v-if="widget.placement === 'aboveEditor' && widget.surfaceId && chatStore.tuiSurfaces[widget.surfaceId]"
+        :surface="chatStore.tuiSurfaces[widget.surfaceId]"
+        embedded
+      />
+      <div v-else-if="widget.placement === 'aboveEditor' && widget.lines.length" class="ui-widget">
         <span v-for="(line, i) in widget.lines" :key="i">{{ line }}</span>
       </div>
     </template>
@@ -1058,7 +1171,7 @@ const sessionState = computed(() => {
             <div v-if="msg.metadata.context.selectedText">选中: "{{ msg.metadata.context.selectedText }}"</div>
           </template>
         </div>
-        <details v-if="msg.metadata?.thinking && !hasThinkingSegments(msg)" class="msg-thinking"><summary>💭 思考记录</summary><div>{{ msg.metadata.thinking }}</div></details>
+        <details v-if="msg.metadata?.thinking && !hasThinkingSegments(msg)" class="msg-thinking"><summary>💭 {{ chatStore.uiWorking.hiddenThinkingLabel || '思考记录' }}</summary><div>{{ msg.metadata.thinking }}</div></details>
 
         <!-- Compaction summary -->
         <details v-if="msg.metadata?.isCompaction" class="msg-compaction">
@@ -1081,7 +1194,7 @@ const sessionState = computed(() => {
 
         <template v-for="(seg, i) in messageSegments(msg)" :key="`${msg.id}-${i}`">
           <details v-if="seg.type === 'thinking'" class="msg-thinking">
-            <summary>💭 思考记录</summary>
+            <summary>💭 {{ chatStore.uiWorking.hiddenThinkingLabel || '思考记录' }}</summary>
             <div>{{ seg.text || '' }}</div>
           </details>
           <details v-else-if="seg.type === 'tool' && toolForSegment(msg, seg)" class="msg-tool" :class="{ subagent: isSubagentTool(toolForSegment(msg, seg)) }" :open="isSubagentTool(toolForSegment(msg, seg)) || chatStore.toolsExpanded">
@@ -1132,6 +1245,7 @@ const sessionState = computed(() => {
           </details>
           <MarkdownContent v-else-if="seg.type === 'error'" class="msg-body error" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
           <MarkdownContent v-else-if="seg.type === 'compaction'" class="msg-body compaction" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
+          <MarkdownContent v-else-if="seg.type === 'branch_summary'" class="msg-body compaction" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
           <MarkdownContent v-else class="msg-body" :class="{ placeholder: isPlaceholderSegment(seg) }" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
         </template>
 
@@ -1183,6 +1297,12 @@ const sessionState = computed(() => {
 
     <!-- Input -->
     <div class="chat-input-area">
+      <div v-if="chatStore.isStreaming && chatStore.uiWorking.visible !== false && (chatStore.uiWorking.message || chatStore.uiWorking.indicator?.frames?.length)" class="ui-status-bar">
+        <span class="ui-status-item">
+          <strong>{{ chatStore.uiWorking.indicator?.frames?.[0] || '●' }}</strong>
+          {{ chatStore.uiWorking.message || 'Agent 正在工作…' }}
+        </span>
+      </div>
       <div v-if="Object.keys(chatStore.uiStatus).length" class="ui-status-bar">
         <template v-for="(statusText, statusKey) in chatStore.uiStatus" :key="statusKey">
           <span v-if="statusText" class="ui-status-item">
@@ -1192,10 +1312,26 @@ const sessionState = computed(() => {
       </div>
       <!-- UI Context widgets (below) -->
       <template v-for="(widget, key) in chatStore.uiWidgets" :key="key">
-        <div v-if="widget.placement === 'below' && widget.lines.length" class="ui-widget">
+        <ExtensionTuiSurface
+          v-if="widget.placement === 'belowEditor' && widget.surfaceId && chatStore.tuiSurfaces[widget.surfaceId]"
+          :surface="chatStore.tuiSurfaces[widget.surfaceId]"
+          embedded
+        />
+        <div v-else-if="widget.placement === 'belowEditor' && widget.lines.length" class="ui-widget">
           <span v-for="(line, i) in widget.lines" :key="i">{{ line }}</span>
         </div>
       </template>
+      <ExtensionTuiSurface
+        v-if="chatStore.uiFooterSurfaceId && chatStore.tuiSurfaces[chatStore.uiFooterSurfaceId]"
+        :surface="chatStore.tuiSurfaces[chatStore.uiFooterSurfaceId]"
+        embedded
+      />
+      <div v-else-if="chatStore.uiFooterText" class="ui-widget">{{ chatStore.uiFooterText }}</div>
+      <ExtensionTuiSurface
+        v-if="customEditorSurface"
+        :surface="customEditorSurface"
+        embedded
+      />
       <div v-if="chatStore.pdfContext" class="context-badge">
         <span>📄 {{ chatStore.pdfContext.documentTitle || currentPaperTitle || (chatStore.pdfContext.temporaryPdf ? '临时 PDF' : '论文') }} · 第{{ chatStore.pdfContext.pageNumber }}页</span>
         <button @click="chatStore.pdfContext = null">✕</button>
@@ -1238,12 +1374,15 @@ const sessionState = computed(() => {
         </div>
       </div>
 
-      <div class="input-row">
-        <textarea ref="textareaRef" v-model="inputText" @keydown="onKeydown" placeholder="输入消息…" rows="1" class="chat-textarea" />
+      <div v-if="!customEditorSurface" class="input-row">
+        <textarea ref="textareaRef" v-model="inputText" @keydown="onKeydown" @select="syncComposerMirror(); refreshExtensionAutocomplete(inputText)" @click="syncComposerMirror(); refreshExtensionAutocomplete(inputText)" @keyup="syncComposerMirror(); refreshExtensionAutocomplete(inputText)" placeholder="输入消息…" rows="1" class="chat-textarea" />
         <button v-if="chatStore.isStreaming" class="send-btn stop" @click="chatStore.stopStreaming()"><span>■</span></button>
         <button v-else class="send-btn" :disabled="!inputText.trim()" @click="send">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
+      </div>
+      <div v-else-if="chatStore.isStreaming" class="input-row custom-editor-stop">
+        <button class="send-btn stop" @click="chatStore.stopStreaming()"><span>■</span></button>
       </div>
       <div class="input-footer">
         <ModelSelector ref="modelSelectorRef" :model-value="chatStore.currentModel" :models="chatStore.models" :disabled="!chatStore.models.length" @update:model-value="chatStore.setCurrentModel($event)" />

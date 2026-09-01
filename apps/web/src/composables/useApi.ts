@@ -248,8 +248,47 @@ export function useApi() {
     stopStreamingMessage: (convId: string, messageId: string) =>
       request<{ ok: boolean }>(`/conversations/${convId}/streaming-message/${messageId}/stop`, { method: 'POST' }),
 
-    respondAgentInteraction: (requestId: string, body: { requestId: string; action: 'submit' | 'cancel' | 'chat'; value?: unknown; conversationId?: string }) =>
+    respondAgentInteraction: (requestId: string, body: { requestId: string; action: 'submit' | 'cancel' | 'chat'; value?: unknown; conversationId?: string; branchId?: string; clientId?: string }) =>
       request<{ ok: boolean; resolved?: boolean; message?: string }>(`/agent-interactions/${requestId}/respond`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    getPiRuntime: (convId: string, branchId?: string) =>
+      request<{ runtime: any }>(`/agent-interactions/runtime/${convId}`, { params: branchId ? { branchId } : undefined }),
+
+    updatePiComposer: (convId: string, body: { branchId: string; text: string; selectionStart: number; selectionEnd: number; revision: number; clientId: string }) =>
+      request<{ ok: boolean; revision: number }>(`/agent-interactions/runtime/${convId}/composer`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    getPiAutocomplete: (convId: string, body: { branchId: string; lines: string[]; cursorLine: number; cursorCol: number; force?: boolean }) =>
+      request<{ result: any }>(`/agent-interactions/runtime/${convId}/autocomplete`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    applyPiAutocomplete: (convId: string, body: { branchId: string; lines: string[]; cursorLine: number; cursorCol: number; item: { value: string; label: string; description?: string }; prefix: string }) =>
+      request<{ result: any }>(`/agent-interactions/runtime/${convId}/autocomplete/apply`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    sendPiTuiInput: (convId: string, surfaceId: string, body: { branchId: string; data: string; revision?: number; clientId?: string }) =>
+      request<{ ok: boolean }>(`/agent-interactions/runtime/${convId}/tui/${surfaceId}/input`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    resizePiTui: (convId: string, surfaceId: string, body: { branchId: string; cols: number; rows: number; revision?: number; clientId?: string }) =>
+      request<{ ok: boolean }>(`/agent-interactions/runtime/${convId}/tui/${surfaceId}/resize`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    closePiTui: (convId: string, surfaceId: string, body: { branchId: string; clientId?: string }) =>
+      request<{ ok: boolean }>(`/agent-interactions/runtime/${convId}/tui/${surfaceId}/close`, {
         method: 'POST',
         body: JSON.stringify(body),
       }),

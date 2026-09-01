@@ -3,6 +3,7 @@ import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useChatStore, type AgentInteractionRequest, type AgentInteractionResponse } from '@/stores/chat'
 import QuestionnaireDialog from './QuestionnaireDialog.vue'
 import GenericInteractionDialog from './GenericInteractionDialog.vue'
+import ExtensionTuiSurface from './ExtensionTuiSurface.vue'
 
 const chatStore = useChatStore()
 const error = ref('')
@@ -10,6 +11,8 @@ const submitting = ref(false)
 
 const active = computed(() => chatStore.activeInteraction)
 const notifications = computed(() => chatStore.notificationInteractions)
+const overlaySurfaces = computed(() => Object.values(chatStore.tuiSurfaces)
+  .filter(surface => surface.overlay || surface.kind === 'custom'))
 
 // E1: Timeout countdown
 const now = ref(Date.now())
@@ -81,6 +84,12 @@ const notificationType = (request: AgentInteractionRequest) => {
 </script>
 
 <template>
+  <ExtensionTuiSurface
+    v-for="surface in overlaySurfaces"
+    :key="surface.surfaceId"
+    :surface="surface"
+  />
+
   <div class="agent-notifications" v-if="notifications.length">
     <button
       v-for="item in notifications"

@@ -22,7 +22,11 @@ const options = computed(() => Array.isArray(payload.value.options) ? payload.va
 const isMulti = computed(() => !!payload.value.multi)
 
 watch(() => props.request.requestId, () => {
-  inputValue.value = typeof payload.value.defaultValue === 'string' ? payload.value.defaultValue : ''
+  inputValue.value = typeof payload.value.defaultValue === 'string'
+    ? payload.value.defaultValue
+    : typeof payload.value.prefill === 'string'
+      ? payload.value.prefill
+      : ''
   selectedValue.value = ''
   selectedMany.value = []
 }, { immediate: true })
@@ -100,7 +104,7 @@ const submit = () => {
     emit('submit', isMulti.value ? { value: [...selectedMany.value] } : { value: selectedValue.value })
     return
   }
-  if (props.request.kind === 'input') {
+  if (props.request.kind === 'input' || props.request.kind === 'editor') {
     emit('submit', { value: inputValue.value })
   }
 }
@@ -138,9 +142,9 @@ const submit = () => {
         </div>
       </template>
 
-      <template v-else-if="request.kind === 'input'">
+      <template v-else-if="request.kind === 'input' || request.kind === 'editor'">
         <textarea
-          v-if="payload.multiline"
+          v-if="payload.multiline || request.kind === 'editor'"
           v-model="inputValue"
           rows="8"
           :placeholder="payload.placeholder || '请输入…'"

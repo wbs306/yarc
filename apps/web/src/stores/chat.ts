@@ -2,9 +2,9 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useApi } from '@/composables/useApi'
 import { createClientId } from '@/lib/id'
-import type { ChatThinkingLevel, CurrentChatResource, ThinkingLevel } from '@yarc/shared'
+import type { ChatThinkingLevel, CurrentChatResource, PiExtensionCommandInfo, PiTuiSurfaceState, ThinkingLevel } from '@yarc/shared'
 
-export interface ChatSegment { type: 'text' | 'thinking' | 'tool' | 'error' | 'compaction'; text?: string; toolCallId?: string }
+export interface ChatSegment { type: 'text' | 'thinking' | 'tool' | 'error' | 'compaction' | 'branch_summary'; text?: string; toolCallId?: string }
 export interface Message {
   id: string; conversationId: string; branchId?: string | null; parentId?: string | null
   role: 'user' | 'assistant' | 'system'; content: string; toolCalls: any[] | null
@@ -13,11 +13,12 @@ export interface Message {
 export interface Conversation { id: string; paperId: string | null; title: string; model: string | null; createdAt: string; updatedAt: string }
 export interface ModelInfo { id: string; name: string; provider: string; model?: string; reasoning?: boolean; images?: boolean; contextWindow?: string; maxTokens?: string; thinkingLevels?: string[]; source?: string }
 export interface BranchInfo { id: string; branchName: string; parentBranchId: string | null; forkMessageId: string | null }
-export type AgentInteractionKind = 'confirm' | 'select' | 'input' | 'questionnaire' | 'notification'
+export type AgentInteractionKind = 'confirm' | 'select' | 'input' | 'editor' | 'questionnaire' | 'notification'
 export interface AgentInteractionRequest {
   type: 'agent_interaction_request'
   requestId: string
   conversationId: string
+  branchId: string
   streamMessageId: string
   kind: AgentInteractionKind
   title?: string
@@ -30,6 +31,7 @@ export interface AgentInteractionResponse {
   requestId: string
   action: 'submit' | 'cancel' | 'chat'
   value?: unknown
+  clientId?: string
 }
 export interface BtwItem {
   id: string
@@ -92,6 +94,7 @@ export const useChatStore = defineStore('chat', () => {
   const modelsError = ref('')
   const chatError = ref('')
   const pendingPrompt = ref('')
+  const composerUpdate = ref<{ text: string; selectionStart: number; selectionEnd: number; revision: number } | null>(null)
   const currentContextUsage = ref<ContextUsageInfo | null>(null)
 
   // Branches
@@ -107,6 +110,7 @@ export const useChatStore = defineStore('chat', () => {
   const streamingContent = ref('')
   const activeStreams = new Map<string, string>()
   const abortControllers = new Map<string, AbortController>()
+  const streamEventSequences = new Map<string, number>()
   const textQueues = new Map<string, { buf: string; timer: number | null }>()
   const streamReconnectTimers = new Map<string, number>()
   let conversationSelectionSeq = 0
@@ -127,11 +131,19 @@ export const useChatStore = defineStore('chat', () => {
 
   // UI Context bridge state (from Pi extensions via ctx.ui.*)
   const uiStatus = ref<Record<string, string>>({})
-  const uiWidgets = ref<Record<string, { lines: string[]; placement: string }>>({})
+  const uiWidgets = ref<Record<string, { lines: string[]; placement: 'aboveEditor' | 'belowEditor'; surfaceId?: string }>>({})
   const uiFooterText = ref('')
+  const uiFooterSurfaceId = ref('')
   const uiHeaderLines = ref<string[]>([])
+  const uiHeaderSurfaceId = ref('')
   const uiTitle = ref('')
+  const uiWorking = ref<{ message?: string; visible?: boolean; indicator?: { frames?: string[]; intervalMs?: number }; hiddenThinkingLabel?: string }>({})
   const toolsExpanded = ref(false)
+  const runtimeCommands = ref<PiExtensionCommandInfo[]>([])
+  const runtimeState = ref<'starting' | 'idle' | 'running' | 'reloading' | 'failed' | ''>('')
+  const tuiSurfaces = ref<Record<string, PiTuiSurfaceState>>({})
+  const runtimeClientId = createClientId()
+  let composerRevision = 0
 
   // Subagent run tracking (real-time status from filesystem watcher)
   interface ActiveSubagentRun {
@@ -193,14 +205,20 @@ export const useChatStore = defineStore('chat', () => {
   }
   const activeInteraction = computed(() => {
     const current = activeInteractionId.value ? interactions.value[activeInteractionId.value] : null
-    if (current && current.kind !== 'notification' && (!currentConvId.value || current.conversationId === currentConvId.value)) return current
+    if (current && current.kind !== 'notification'
+      && (!currentConvId.value || current.conversationId === currentConvId.value)
+      && (!currentBranchId.value || current.branchId === currentBranchId.value)) return current
     const candidates = Object.values(interactions.value)
-      .filter((item) => item.kind !== 'notification' && (!currentConvId.value || item.conversationId === currentConvId.value))
+      .filter((item) => item.kind !== 'notification'
+        && (!currentConvId.value || item.conversationId === currentConvId.value)
+        && (!currentBranchId.value || item.branchId === currentBranchId.value))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     return candidates[0] || null
   })
   const notificationInteractions = computed(() => Object.values(interactions.value)
-    .filter((item) => item.kind === 'notification' && (!currentConvId.value || item.conversationId === currentConvId.value))
+    .filter((item) => item.kind === 'notification'
+      && (!currentConvId.value || item.conversationId === currentConvId.value)
+      && (!currentBranchId.value || item.branchId === currentBranchId.value))
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()))
 
   // /btw side questions. These are intentionally separate from branch messages.
@@ -227,7 +245,7 @@ export const useChatStore = defineStore('chat', () => {
     // repeated reasoning blocks within each tool phase into one display card.
     const segments: ChatSegment[] = mergeThinkingSegmentsByToolPhase(Array.isArray(piMsg.segments)
       ? piMsg.segments
-          .filter((segment: any) => ['text', 'thinking', 'tool', 'error', 'compaction'].includes(segment?.type))
+          .filter((segment: any) => ['text', 'thinking', 'tool', 'error', 'compaction', 'branch_summary'].includes(segment?.type))
           .map((segment: any) => ({
             type: segment.type,
             ...(typeof segment.text === 'string' ? { text: segment.text } : {}),
@@ -270,6 +288,9 @@ export const useChatStore = defineStore('chat', () => {
         isError,
         isCompaction: piMsg.isCompaction,
         compactionSummary: piMsg.compactionSummary,
+        isBranchSummary: piMsg.isBranchSummary,
+        branchSummary: piMsg.branchSummary,
+        branchSummaryLabel: piMsg.branchSummaryLabel,
         forkFromMessageId: piMsg.forkFromMessageId,
         streamStatus: 'completed',
       },
@@ -335,9 +356,13 @@ export const useChatStore = defineStore('chat', () => {
   }
   const refreshActiveInteraction = () => {
     const current = activeInteractionId.value ? interactions.value[activeInteractionId.value] : null
-    if (current && (!currentConvId.value || current.conversationId === currentConvId.value)) return
+    if (current
+      && (!currentConvId.value || current.conversationId === currentConvId.value)
+      && (!currentBranchId.value || current.branchId === currentBranchId.value)) return
     activeInteractionId.value = Object.values(interactions.value)
-      .filter((item) => item.kind !== 'notification' && (!currentConvId.value || item.conversationId === currentConvId.value))
+      .filter((item) => item.kind !== 'notification'
+        && (!currentConvId.value || item.conversationId === currentConvId.value)
+        && (!currentBranchId.value || item.branchId === currentBranchId.value))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]?.requestId || null
   }
   const dismissInteraction = (requestId: string) => {
@@ -347,6 +372,21 @@ export const useChatStore = defineStore('chat', () => {
   }
   const markActive = (c: string, m = '') => { activeStreams.set(c, m); syncStream() }
   const markInactive = (c: string, m?: string) => { const cur = activeStreams.get(c); if (m && cur && cur !== m) return; activeStreams.delete(c); syncStream() }
+  const acceptStreamEvent = (messageId: string, event: any) => {
+    const sequence = Number(event?.eventSequence || 0)
+    if (!sequence) return true
+    const previous = streamEventSequences.get(messageId) || 0
+    if (sequence <= previous) return false
+    streamEventSequences.set(messageId, sequence)
+    return true
+  }
+  const isCurrentRuntimeEvent = (event: any) => {
+    const eventConversationId = event?.conversationId || event?.surface?.conversationId
+    const eventBranchId = event?.branchId || event?.surface?.branchId
+    if (eventConversationId && currentConvId.value && eventConversationId !== currentConvId.value) return false
+    if (eventBranchId && currentBranchId.value && eventBranchId !== currentBranchId.value) return false
+    return true
+  }
   const detachConversationStream = (convId: string) => {
     abortControllers.get(convId)?.abort()
     abortControllers.delete(convId)
@@ -431,6 +471,45 @@ export const useChatStore = defineStore('chat', () => {
       if (currentConvId.value) scheduleStreamReconnect(currentConvId.value, 0)
     })
 
+    window.addEventListener('yarc-pi-extension-run-start', ((e: CustomEvent) => {
+      const detail = e.detail || {}
+      if (detail.conversationId !== currentConvId.value || detail.branchId !== currentBranchId.value) return
+      const currentMessageId = activeStreams.get(detail.conversationId)
+      if (currentMessageId && currentMessageId !== detail.messageId) {
+        abortControllers.get(detail.conversationId)?.abort()
+        abortControllers.delete(detail.conversationId)
+        markInactive(detail.conversationId, currentMessageId)
+      }
+      scheduleStreamReconnect(detail.conversationId, 0)
+    }) as EventListener)
+
+    window.addEventListener('yarc-pi-extension-run-complete', ((e: CustomEvent) => {
+      const detail = e.detail || {}
+      if (detail.conversationId !== currentConvId.value || detail.branchId !== currentBranchId.value) return
+      if (activeStreams.get(detail.conversationId) === detail.messageId) {
+        markInactive(detail.conversationId, detail.messageId)
+      }
+      void loadBranchMsgs(detail.conversationId, detail.branchId, true)
+        .then(() => loadContextUsage(detail.conversationId, detail.branchId))
+        .catch(() => {})
+    }) as EventListener)
+
+    window.addEventListener('yarc-pi-runtime-event', ((e: CustomEvent) => {
+      const detail = e.detail || {}
+      if (!detail.event || detail.conversationId !== currentConvId.value || detail.branchId !== currentBranchId.value) return
+      const placeholder: Message = {
+        id: 'runtime-sse',
+        conversationId: detail.conversationId,
+        branchId: detail.branchId,
+        role: 'system',
+        content: '',
+        toolCalls: null,
+        metadata: {},
+        createdAt: new Date().toISOString(),
+      }
+      applyEvent(detail.event, placeholder, detail.conversationId)
+    }) as EventListener)
+
     // Listen for /btw SSE events and forward to handleBtwEvent
     const btwEventTypes = ['btw_delta', 'btw_thinking', 'btw_done', 'btw_error', 'btw_cancelled', 'btw_start']
     for (const type of btwEventTypes) {
@@ -498,6 +577,97 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  const clearRuntimeUi = () => {
+    uiStatus.value = {}
+    uiWidgets.value = {}
+    uiFooterText.value = ''
+    uiFooterSurfaceId.value = ''
+    uiHeaderLines.value = []
+    uiHeaderSurfaceId.value = ''
+    uiTitle.value = ''
+    uiWorking.value = {}
+    runtimeCommands.value = []
+    runtimeState.value = ''
+    tuiSurfaces.value = {}
+  }
+
+  const loadRuntimeSnapshot = async (convId: string, branchId: string) => {
+    try {
+      const response = await api.getPiRuntime(convId, branchId)
+      if (currentConvId.value !== convId || currentBranchId.value !== branchId) return
+      const snapshot = response.runtime
+      clearRuntimeUi()
+      runtimeCommands.value = snapshot?.commands || []
+      runtimeState.value = snapshot?.state || ''
+      tuiSurfaces.value = Object.fromEntries((snapshot?.surfaces || []).map((surface: PiTuiSurfaceState) => [surface.surfaceId, surface]))
+      const placeholder: Message = { id: 'runtime-ui', conversationId: convId, branchId, role: 'system', content: '', toolCalls: null, metadata: {}, createdAt: new Date().toISOString() }
+      for (const surface of snapshot?.surfaces || []) applyEvent({ type: 'agent_ui_tui_open', surface }, placeholder, convId)
+      for (const event of snapshot?.uiEvents || []) applyEvent(event, placeholder, convId)
+    } catch {
+      if (currentConvId.value === convId && currentBranchId.value === branchId) runtimeState.value = 'failed'
+    }
+  }
+
+  const syncComposer = async (text: string, selectionStart: number, selectionEnd: number) => {
+    const convId = currentConvId.value
+    const branchId = currentBranchId.value
+    if (!convId || !branchId) return
+    composerRevision += 1
+    await api.updatePiComposer(convId, {
+      branchId,
+      text,
+      selectionStart,
+      selectionEnd,
+      revision: composerRevision,
+      clientId: runtimeClientId,
+    }).catch(() => {})
+  }
+
+  const getRuntimeAutocomplete = async (text: string, cursor: number, force = false) => {
+    const convId = currentConvId.value
+    const branchId = currentBranchId.value
+    if (!convId || !branchId) return null
+    const before = text.slice(0, cursor)
+    const lines = text.split('\n')
+    const cursorLine = before.split('\n').length - 1
+    const cursorCol = before.length - (before.lastIndexOf('\n') + 1)
+    const response = await api.getPiAutocomplete(convId, { branchId, lines, cursorLine, cursorCol, force }).catch(() => null)
+    return response?.result || null
+  }
+
+  const applyRuntimeAutocomplete = async (text: string, cursor: number, item: { value: string; label: string; description?: string }, prefix: string) => {
+    const convId = currentConvId.value
+    const branchId = currentBranchId.value
+    if (!convId || !branchId) return null
+    const before = text.slice(0, cursor)
+    const lines = text.split('\n')
+    const cursorLine = before.split('\n').length - 1
+    const cursorCol = before.length - (before.lastIndexOf('\n') + 1)
+    const response = await api.applyPiAutocomplete(convId, { branchId, lines, cursorLine, cursorCol, item, prefix }).catch(() => null)
+    return response?.result || null
+  }
+
+  const sendTuiInput = async (surfaceId: string, data: string) => {
+    const convId = currentConvId.value
+    const branchId = currentBranchId.value
+    if (!convId || !branchId) return
+    await api.sendPiTuiInput(convId, surfaceId, { branchId, data, revision: tuiSurfaces.value[surfaceId]?.revision, clientId: runtimeClientId }).catch(() => {})
+  }
+
+  const resizeTui = async (surfaceId: string, cols: number, rows: number) => {
+    const convId = currentConvId.value
+    const branchId = currentBranchId.value
+    if (!convId || !branchId) return
+    await api.resizePiTui(convId, surfaceId, { branchId, cols, rows, revision: tuiSurfaces.value[surfaceId]?.revision, clientId: runtimeClientId }).catch(() => {})
+  }
+
+  const closeTui = async (surfaceId: string) => {
+    const convId = currentConvId.value
+    const branchId = currentBranchId.value
+    if (!convId || !branchId) return
+    await api.closePiTui(convId, surfaceId, { branchId, clientId: runtimeClientId }).catch(() => {})
+  }
+
   const selectConversation = async (id: string) => {
     if (!id) return
     const selection = ++conversationSelectionSeq
@@ -525,6 +695,7 @@ export const useChatStore = defineStore('chat', () => {
       branches.value = []
       currentBranchId.value = null
       currentContextUsage.value = null
+      clearRuntimeUi()
     }
 
     currentConvId.value = id
@@ -542,6 +713,8 @@ export const useChatStore = defineStore('chat', () => {
       await loadBranchMsgs(id, target)
       if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
       await loadContextUsage(id, target)
+      if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
+      await loadRuntimeSnapshot(id, target)
     } else {
       currentBranchId.value = null
       currentContextUsage.value = null
@@ -569,6 +742,9 @@ export const useChatStore = defineStore('chat', () => {
     if (!branchCache.value.has(branchId)) await loadBranchMsgs(convId, branchId)
     if (selection !== branchSelectionSeq || currentConvId.value !== convId || currentBranchId.value !== branchId) return
     await loadContextUsage(convId, branchId)
+    if (selection !== branchSelectionSeq || currentConvId.value !== convId || currentBranchId.value !== branchId) return
+    clearRuntimeUi()
+    await loadRuntimeSnapshot(convId, branchId)
   }
 
   const createConversation = async (paperId?: string) => {
@@ -616,6 +792,8 @@ export const useChatStore = defineStore('chat', () => {
     await api.respondAgentInteraction(requestId, {
       ...response,
       conversationId: interaction?.conversationId,
+      branchId: interaction?.branchId,
+      clientId: runtimeClientId,
     })
     delete interactions.value[requestId]
     if (activeInteractionId.value === requestId) activeInteractionId.value = null
@@ -900,6 +1078,8 @@ export const useChatStore = defineStore('chat', () => {
             return
           }
 
+          if (d.type !== 'stream_start' && d.type !== 'runtime_branch_changed' && d.type !== 'branch_messages' && !isCurrentRuntimeEvent(d)) return
+
           if (d.type === 'stream_start') {
             if (typeof d.conversationTitle === 'string' && d.conversationTitle) {
               const conv = conversations.value.find(c => c.id === convId)
@@ -948,14 +1128,18 @@ export const useChatStore = defineStore('chat', () => {
             const created: Message = { id: d.messageId, conversationId: convId, branchId: d.branchId, role: 'assistant', content: '', toolCalls: null, metadata: { pending: true, segments: [], streamStatus: 'streaming' }, createdAt: new Date().toISOString() }
             appendToBranch(bid, created)
             msg = branchCache.value.get(bid)!.slice(-1)[0]!
+            if (!streamEventSequences.has(created.id)) streamEventSequences.set(created.id, 0)
             markActive(convId, created.id)
             return
           }
+
+          if (msg && !acceptStreamEvent(msg.id, d)) return
 
           if (d.type === 'done') {
             terminalReceived = true
             if (msg) flushTextQueue(msg, convId)
             const bid = msg?.branchId || currentBranchId.value
+            flushBranchTextQueues(bid, convId)
             if (streamFailed) {
               // The server sends `done` only after Pi has finished persisting
               // the session. Reload the failed branch as well as successful
@@ -975,6 +1159,7 @@ export const useChatStore = defineStore('chat', () => {
               // reconciliation request. The next normal branch load retries it.
             } finally {
               detectSubagentRuns().catch(() => {})
+              if (msg) streamEventSequences.delete(msg.id)
               resolveOnce(msg)
               ws.close()
             }
@@ -1075,6 +1260,11 @@ export const useChatStore = defineStore('chat', () => {
     if (queued.buf) appendText(m, queued.buf, c)
   }
 
+  const flushBranchTextQueues = (branchId: string | null | undefined, conversationId: string) => {
+    if (!branchId) return
+    for (const message of branchCache.value.get(branchId) || []) flushTextQueue(message, conversationId)
+  }
+
   const enqueue = (m: Message, t: string, c: string) => {
     const id = m.id; const q = textQueues.get(id) || { buf: '', timer: null }; q.buf += t; textQueues.set(id, q)
     if (q.timer !== null) return
@@ -1082,8 +1272,41 @@ export const useChatStore = defineStore('chat', () => {
     q.timer = window.setTimeout(tick, 16)
   }
 
-  const applyEvent = (d: any, m: Message, c: string) => {
+  const resolveEventAssistant = (d: any, fallback: Message, convId: string): Message => {
+    const messageId = typeof d.assistantMessageId === 'string'
+      ? d.assistantMessageId
+      : d.type === 'assistant_message_start' && typeof d.messageId === 'string'
+        ? d.messageId
+        : fallback.id
+    if (!messageId || messageId === fallback.id) return fallback
+
+    const branchId = d.branchId || fallback.branchId || currentBranchId.value || ''
+    const branch = ensureBranchMessages(branchId)
+    let target = branch.find(message => message.id === messageId)
+    if (!target) {
+      target = {
+        id: messageId,
+        conversationId: convId,
+        branchId,
+        role: 'assistant',
+        content: '',
+        toolCalls: null,
+        metadata: { pending: true, segments: [], streamStatus: 'streaming', runGroupId: d.runGroupId },
+        createdAt: new Date().toISOString(),
+      }
+      branch.push(target)
+      branchCache.value.set(branchId, [...branch])
+    }
+    return target
+  }
+
+  const applyEvent = (d: any, fallbackMessage: Message, c: string) => {
+    if (d.type !== 'runtime_branch_changed' && !isCurrentRuntimeEvent(d)) return
+    const m = resolveEventAssistant(d, fallbackMessage, c)
     switch (d.type) {
+      case 'assistant_message_start':
+        m.metadata.runGroupId = d.runGroupId
+        break
       case 'text': enqueue(m, d.content, c); break
       case 'thinking':
         flushTextQueue(m, c)
@@ -1136,6 +1359,14 @@ export const useChatStore = defineStore('chat', () => {
         m.metadata.segments = [{ type: 'text', text: m.content }]
         break
       }
+      case 'branch_summary': {
+        m.metadata.isBranchSummary = true
+        m.metadata.branchSummary = d.summary
+        m.metadata.branchSummaryLabel = d.label
+        m.content = d.summary || '分支摘要已创建'
+        m.metadata.segments = [{ type: 'branch_summary', text: d.summary || '' }]
+        break
+      }
       case 'context_usage':
         if (c === currentConvId.value) {
           currentContextUsage.value = {
@@ -1150,7 +1381,8 @@ export const useChatStore = defineStore('chat', () => {
         interactions.value[d.requestId] = d;
         if (d.kind === 'notification') {
           window.setTimeout(() => dismissInteraction(d.requestId), 6000)
-        } else if (!currentConvId.value || d.conversationId === currentConvId.value) activeInteractionId.value = d.requestId;
+        } else if ((!currentConvId.value || d.conversationId === currentConvId.value)
+          && (!currentBranchId.value || d.branchId === currentBranchId.value)) activeInteractionId.value = d.requestId;
         break;
       case 'agent_interaction_resolved':
         delete interactions.value[d.requestId];
@@ -1159,21 +1391,102 @@ export const useChatStore = defineStore('chat', () => {
         if (d.reason === 'timeout') chatError.value = 'Agent 交互请求已超时，已按取消处理。';
         break;
       case 'error': { flushTextQueue(m, c); const t = `❌ ${d.message}`; m.content += m.content ? `\n\n${t}` : t; if (c === currentConvId.value) chatError.value = d.message; appendSeg(m, t, 'error'); break }
+      case 'runtime_state':
+        runtimeState.value = d.state || ''
+        if (Array.isArray(d.commands)) runtimeCommands.value = d.commands
+        break
+      case 'runtime_branch_changed':
+        if (d.previousConversationId && d.previousConversationId !== d.conversationId && d.previousConversationId === currentConvId.value) {
+          void fetchConversations().then(() => selectConversation(d.conversationId))
+        } else if (d.conversationId === currentConvId.value) {
+          currentBranchId.value = d.branchId
+          convBranchPrefs.set(d.conversationId, d.branchId)
+          savePrefs()
+          void loadBranches(d.conversationId)
+          void loadBranchMsgs(d.conversationId, d.branchId, true)
+        }
+        break
       // UI Context bridge events
-      case 'agent_ui_status': if (d.key) uiStatus.value = { ...uiStatus.value, [d.key]: d.text || '' }; break
-      case 'agent_ui_widget': if (d.key) uiWidgets.value = { ...uiWidgets.value, [d.key]: { lines: d.lines || [], placement: d.placement || 'above' } }; break
-      case 'agent_ui_footer': uiFooterText.value = d.text || ''; break
-      case 'agent_ui_header': uiHeaderLines.value = d.lines || []; break
+      case 'agent_ui_status': {
+        if (!d.key) break
+        const next = { ...uiStatus.value }
+        if (d.text) next[d.key] = d.text
+        else delete next[d.key]
+        uiStatus.value = next
+        break
+      }
+      case 'agent_ui_widget': {
+        if (!d.key) break
+        const next = { ...uiWidgets.value }
+        if (d.lines?.length || d.surfaceId) next[d.key] = { lines: d.lines || [], placement: d.placement || 'aboveEditor', surfaceId: d.surfaceId }
+        else delete next[d.key]
+        uiWidgets.value = next
+        break
+      }
+      case 'agent_ui_footer': uiFooterText.value = d.text || ''; uiFooterSurfaceId.value = d.surfaceId || ''; break
+      case 'agent_ui_header': uiHeaderLines.value = d.lines || []; uiHeaderSurfaceId.value = d.surfaceId || ''; break
       case 'agent_ui_title': {
         uiTitle.value = d.title || ''
         if (d.title) document.title = `${d.title} - YARC`
         break
       }
-      case 'agent_ui_editor_set_text': if (typeof d.text === 'string') pendingPrompt.value = d.text; break
-      case 'agent_ui_editor_paste': if (typeof d.text === 'string') pendingPrompt.value = (pendingPrompt.value || '') + d.text; break
+      case 'agent_ui_editor_set_text':
+      case 'agent_ui_editor_paste':
+        if (typeof d.text === 'string' && Number(d.revision || 0) >= composerRevision) {
+          composerRevision = Number(d.revision || composerRevision)
+          composerUpdate.value = {
+            text: d.text,
+            selectionStart: Number.isFinite(d.selectionStart) ? Number(d.selectionStart) : d.text.length,
+            selectionEnd: Number.isFinite(d.selectionEnd) ? Number(d.selectionEnd) : d.text.length,
+            revision: composerRevision,
+          }
+        }
+        break
+      case 'agent_ui_editor_submit':
+        if (typeof d.text === 'string' && d.text.trim() && !isStreaming.value) void sendMessage(d.text)
+        break
       case 'agent_ui_tools_expanded': toolsExpanded.value = !!d.expanded; break
+      case 'agent_ui_working': uiWorking.value = d.reset ? {} : { ...uiWorking.value, ...d }; break
+      case 'agent_ui_tui_open':
+        if (d.surface?.surfaceId) {
+          tuiSurfaces.value = { ...tuiSurfaces.value, [d.surface.surfaceId]: d.surface }
+          if (d.surface.kind === 'header') uiHeaderSurfaceId.value = d.surface.surfaceId
+          else if (d.surface.kind === 'footer') uiFooterSurfaceId.value = d.surface.surfaceId
+          else if (d.surface.kind === 'widget' && d.surface.hostKey) {
+            uiWidgets.value = {
+              ...uiWidgets.value,
+              [d.surface.hostKey]: {
+                lines: [],
+                placement: d.surface.placement || 'aboveEditor',
+                surfaceId: d.surface.surfaceId,
+              },
+            }
+          }
+        }
+        break
+      case 'agent_ui_tui_output': {
+        const surface = tuiSurfaces.value[d.surfaceId]
+        if (surface && Number(d.revision || 0) >= surface.revision) {
+          tuiSurfaces.value = { ...tuiSurfaces.value, [d.surfaceId]: { ...surface, revision: d.revision, ansi: d.ansi, plainText: d.plainText, hidden: !!d.hidden } }
+        }
+        break
+      }
+      case 'agent_ui_tui_close': {
+        const next = { ...tuiSurfaces.value }
+        delete next[d.surfaceId]
+        tuiSurfaces.value = next
+        for (const [key, widget] of Object.entries(uiWidgets.value)) {
+          if (widget.surfaceId === d.surfaceId) {
+            const widgets = { ...uiWidgets.value }
+            delete widgets[key]
+            uiWidgets.value = widgets
+          }
+        }
+        if (uiFooterSurfaceId.value === d.surfaceId) uiFooterSurfaceId.value = ''
+        if (uiHeaderSurfaceId.value === d.surfaceId) uiHeaderSurfaceId.value = ''
+        break
+      }
       case 'agent_ui_theme_request': {
-        // Basic theme bridge: emit event for theme store to handle
         window.dispatchEvent(new CustomEvent('yarc-theme-request', { detail: { theme: d.theme } }))
         break
       }
@@ -1253,7 +1566,11 @@ export const useChatStore = defineStore('chat', () => {
         ws.close()
         return
       }
-      ws.send(JSON.stringify({ type: 'attach', messageId: sm.id }))
+      ws.send(JSON.stringify({
+        type: 'attach',
+        messageId: sm.id,
+        afterSequence: streamEventSequences.get(sm.id) || 0,
+      }))
     }
     ws.onmessage = (ev) => {
       try {
@@ -1262,9 +1579,13 @@ export const useChatStore = defineStore('chat', () => {
           ws.close()
           return
         }
+        if (d.type !== 'stream_start' && d.type !== 'runtime_branch_changed' && d.type !== 'branch_messages' && !isCurrentRuntimeEvent(d)) return
+        if (d.type !== 'stream_start' && !acceptStreamEvent(sm.id, d)) return
         if (d.type === 'done') {
           flushTextQueue(msgRef, convId)
+          flushBranchTextQueues(bid, convId)
           streamCompleted = true
+          streamEventSequences.delete(sm.id)
           ws.close(); return
         }
         if (d.type === 'pi_user_entry') {
@@ -1344,15 +1665,17 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   return {
-    conversations, currentConvId, messages, models, modelsError, chatError, pendingPrompt, currentContextUsage,
+    conversations, currentConvId, messages, models, modelsError, chatError, pendingPrompt, composerUpdate, currentContextUsage,
     currentModel, reasoningEffort, isStreaming, streamingConvId, streamingMessageId, streamingContent,
     pdfContext, branches, currentBranchId, branchCache, interactions, activeInteractionId, activeInteraction,
     notificationInteractions, btwItems, btwPanelOpen,
-    uiStatus, uiWidgets, uiFooterText, uiHeaderLines, uiTitle, toolsExpanded,
+    uiStatus, uiWidgets, uiFooterText, uiFooterSurfaceId, uiHeaderLines, uiHeaderSurfaceId, uiTitle, uiWorking, toolsExpanded,
+    runtimeCommands, runtimeState, tuiSurfaces,
     activeSubagentRuns,
     setCurrentModel, setReasoningEffort, fetchConversations, fetchModels,
     createConversation, renameConversation, deleteConversation, selectConversation,
     sendMessage, stopStreaming, switchBranch, respondInteraction, dismissInteraction,
+    loadRuntimeSnapshot, syncComposer, getRuntimeAutocomplete, applyRuntimeAutocomplete, sendTuiInput, resizeTui, closeTui,
     askBtw, cancelBtw, insertBtwAnswer, sendBtwAsMainMessage, handleBtwEvent, clearBtwItems,
   }
 })

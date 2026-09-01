@@ -2420,6 +2420,9 @@ const onRealtimeCategoriesChanged = () => refreshLibrarySoon()
 const onRealtimeSearchCategoriesChanged = () => refreshSearchCategoriesSoon()
 const onPiConfigChanged = () => {
   chatStore.fetchModels().catch(() => {})
+  if (chatStore.currentConvId && chatStore.currentBranchId) {
+    chatStore.loadRuntimeSnapshot(chatStore.currentConvId, chatStore.currentBranchId).catch(() => {})
+  }
 }
 const onRealtimeNotesChanged = (event: Event) => {
   const paperId = (event as CustomEvent)?.detail?.paperId
