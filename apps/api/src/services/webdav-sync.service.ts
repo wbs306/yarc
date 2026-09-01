@@ -792,6 +792,10 @@ export class WebDavSyncService {
   }
 
   private handleLocalChange(event: DataChangeEvent) {
+    // fs.watch can report the .pi/agent parent when ignored generated
+    // subtrees (sessions/runtime-streams) change. Concrete child file events
+    // are handled separately; do not turn that heartbeat into a WebDAV cycle.
+    if (event.signature === 'directory' && event.path === '.pi/agent') return
     if (event.source === 'webdav' || (event.kind === 'delete' && !this.config.propagateLocalDeletions)) return
     if (!this.config.enabled || !this.isRelevantLocalChange(event.path)) return
     if (this.config.paused) {

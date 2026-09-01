@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { isDefaultIgnoredDataPath } from '../lib/data-sync-policy.js'
+import { isDefaultIgnoredDataPath, isPiRuntimeResourcePath } from '../lib/data-sync-policy.js'
 import { DataChangeWatcher, type DataChangeEvent } from './data-change-watcher.js'
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 7_000) => {
@@ -20,12 +20,18 @@ describe('data sync path policy', () => {
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/agents/reviewer.md'), false)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/sessions/run.jsonl'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/subagent-results/result.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('.pi/agent/runtime-streams/conversation/run.jsonl'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/auth.json'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/models.json'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/npm/node_modules/pkg/index.js'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/.venv/bin/python'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/.cache/index.json'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/src/index.ts'), false)
+    assert.equal(isPiRuntimeResourcePath('AGENTS.md'), true)
+    assert.equal(isPiRuntimeResourcePath('.pi/agent/settings.json'), true)
+    assert.equal(isPiRuntimeResourcePath('.pi/agent/skills/context/SKILL.md'), true)
+    assert.equal(isPiRuntimeResourcePath('.pi/agent/notes/readme.md'), false)
+    assert.equal(isPiRuntimeResourcePath('.pi/agent/runtime-streams/run.jsonl'), false)
   })
 })
 

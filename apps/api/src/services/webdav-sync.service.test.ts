@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import {
   WebDavClient,
+  WebDavSyncService,
   isExcludedPath,
   isSafeToDeleteRemoteFile,
   isSelectedPath,
@@ -149,6 +150,53 @@ after(async () => {
 })
 
 describe('WebDAV path selection and exclusions', () => {
+  it('ignores ambiguous directory heartbeats for local-change sync', () => {
+    const service = new WebDavSyncService() as any
+    service.config = {
+      enabled: true,
+      paused: false,
+      direction: 'upload',
+      syncAll: true,
+      selectedPaths: [],
+      excludePatterns: [],
+      syncOnLocalChange: true,
+      propagateLocalDeletions: true,
+      localChangeDebounceSeconds: 2,
+    }
+    let armed = 0
+    service.armLocalChangeTimer = () => { armed += 1 }
+
+    service.handleLocalChange({
+      path: '.pi/agent',
+      kind: 'change',
+      source: 'filesystem',
+      signature: 'directory',
+      at: new Date().toISOString(),
+    })
+    assert.equal(armed, 0)
+    assert.equal(service.pendingLocalPaths.size, 0)
+
+    service.handleLocalChange({
+      path: 'works/note.md',
+      kind: 'change',
+      source: 'filesystem',
+      signature: 'file:10:1',
+      at: new Date().toISOString(),
+    })
+    assert.equal(armed, 1)
+    assert.equal(service.pendingLocalPaths.has('works/note.md'), true)
+
+    service.handleLocalChange({
+      path: 'works/new-directory',
+      kind: 'change',
+      source: 'filesystem',
+      signature: 'directory',
+      at: new Date().toISOString(),
+    })
+    assert.equal(armed, 2)
+    assert.equal(service.pendingLocalPaths.has('works/new-directory'), true)
+  })
+
   it('supports directory selection with exclusion patterns taking priority', () => {
     assert.equal(isSelectedPath('papers/a/file.pdf', false, ['papers/a']), true)
     assert.equal(isSelectedPath('papers/b/file.pdf', false, ['papers/a']), false)
@@ -171,6 +219,11 @@ describe('WebDAV path selection and exclusions', () => {
       excludePatterns: [],
     }), false)
     assert.equal(shouldSyncPath('.pi/agent/sessions/run.jsonl', {
+      syncAll: true,
+      selectedPaths: [],
+      excludePatterns: [],
+    }), false)
+    assert.equal(shouldSyncPath('.pi/agent/runtime-streams/conversation/run.jsonl', {
       syncAll: true,
       selectedPaths: [],
       excludePatterns: [],

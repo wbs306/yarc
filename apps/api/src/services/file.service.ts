@@ -2,6 +2,7 @@ import { readdir, stat, readFile, mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, extname, relative, resolve, sep, basename } from 'node:path'
 import { atomicWriteFile, atomicWriteTextFile } from '../lib/atomic-file.js'
 import { config } from '../lib/config.js'
+import { isPiRuntimeResourcePath } from '../lib/data-sync-policy.js'
 import { AppError } from '../lib/errors.js'
 import { sseHub } from '../lib/sse.js'
 import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
@@ -67,6 +68,7 @@ export class FileService {
     const relPath = this.normalizeRelativePath(filePath)
     if (!relPath) return false
     if (this.isSensitivePath(relPath)) return true
+    if (relPath === '.pi/agent/runtime-streams' || relPath.startsWith('.pi/agent/runtime-streams/')) return true
 
     const segments = relPath.split('/').filter(Boolean)
     if (segments[0] === '.pi') {
@@ -154,10 +156,7 @@ export class FileService {
   }
 
   private isPiConfigPath(filePath: string): boolean {
-    const relPath = this.normalizeRelativePath(filePath)
-    return relPath === 'AGENTS.md'
-      || relPath === '.pi'
-      || relPath.startsWith('.pi/')
+    return isPiRuntimeResourcePath(this.normalizeRelativePath(filePath))
   }
 
   private treeDepthForPath(filePath: string): number {
@@ -185,7 +184,7 @@ export class FileService {
         sseHub.emit({ type: 'files-changed', action, path, live: result === 'live', at: new Date().toISOString() })
         if (this.isPiConfigPath(path)) {
           void import('./pi.service.js')
-            .then(({ piService }) => piService.reload(`files:${action}`))
+            .then(({ piService }) => piService.reload(`files:${action}:${path}`))
             .catch((err) => console.warn('[FileService] Pi reload failed:', err))
         }
       } catch (err) {
@@ -217,12 +216,11 @@ export class FileService {
         return
       }
       if (event.signature === 'directory') {
+        // fs.watch may report a parent directory with no filename when an
+        // ignored generated subtree (sessions/runtime-streams) changes. Child
+        // file events carry the actionable path, so a directory heartbeat must
+        // not reload every Runtime Worker or erase extension module state.
         sseHub.emit({ type: 'files-changed', action: 'external-change', path, live: false, at: new Date().toISOString() })
-        if (this.isPiConfigPath(path)) {
-          void import('./pi.service.js')
-            .then(({ piService }) => piService.reload('files:external-change'))
-            .catch((error) => console.warn('[FileService] Pi reload failed:', error.message))
-        }
         return
       }
       await this.emitFilesChanged('external-change', path)

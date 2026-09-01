@@ -7,18 +7,14 @@ import { extname } from 'node:path'
 import { fileService } from '../services/file.service.js'
 import { liveFileService } from '../services/live-file.service.js'
 import { piService } from '../services/pi.service.js'
+import { isPiRuntimeResourcePath } from '../lib/data-sync-policy.js'
 import { AppError } from '../lib/errors.js'
 
 const files = new Hono()
 
 const normalizePath = (path = '') => path.replace(/\\/g, '/').replace(/^\/+/, '')
 
-const isPiConfigPath = (path = '') => {
-  const normalized = normalizePath(path)
-  return normalized === 'AGENTS.md'
-    || normalized === '.pi'
-    || normalized.startsWith('.pi/')
-}
+const isPiConfigPath = (path = '') => isPiRuntimeResourcePath(normalizePath(path))
 
 const reloadPiIfNeeded = async (reason: string, ...paths: Array<string | undefined | null>) => {
   if (paths.some((path) => path && isPiConfigPath(path))) {
