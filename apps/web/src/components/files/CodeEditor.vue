@@ -11,7 +11,7 @@ import {
   getSearchQuery, setSearchQuery, SearchQuery,
 } from '@codemirror/search'
 import type { Panel } from '@codemirror/view'
-import { bracketMatching, foldGutter, indentOnInput, indentUnit, HighlightStyle, syntaxHighlighting, LanguageDescription } from '@codemirror/language'
+import { bracketMatching, foldGutter, indentOnInput, indentUnit, HighlightStyle, syntaxHighlighting, LanguageDescription, StreamLanguage } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
@@ -146,6 +146,114 @@ const pairedStrongEditorExtension: MarkdownExtension = {
   }],
 }
 
+type LatexGroup = 'environment' | 'argument'
+type LatexParserState = {
+  pending: LatexGroup | null
+  groups: LatexGroup[]
+  math: boolean
+}
+
+// CodeMirror does not ship a first-party LaTeX grammar. This small stream
+// tokenizer covers the constructs that are useful while editing .tex files:
+// commands, environments, arguments, comments, delimiters, and math tokens.
+// It intentionally stays local so syntax highlighting does not add another
+// parser dependency to the web bundle.
+const LATEX_ARGUMENT_COMMANDS = new Set([
+  'documentclass', 'usepackage', 'RequirePackage', 'LoadClass',
+  'title', 'author', 'date', 'section', 'subsection', 'subsubsection',
+  'paragraph', 'subparagraph', 'chapter', 'part', 'caption',
+  'label', 'ref', 'pageref', 'eqref', 'cite', 'parencite', 'textcite', 'autoref',
+  'input', 'include', 'includeonly', 'includegraphics',
+  'bibliography', 'bibliographystyle', 'href', 'url',
+  'textbf', 'textit', 'texttt', 'textrm', 'textsf', 'textsc', 'emph', 'underline',
+  'footnote', 'frac', 'sqrt', 'mathbf', 'mathrm', 'mathcal', 'operatorname',
+  'newcommand', 'renewcommand', 'providecommand', 'newenvironment', 'renewenvironment', 'def',
+])
+
+const latexLanguage = StreamLanguage.define<LatexParserState>({
+  name: 'latex',
+  startState: () => ({ pending: null, groups: [], math: false }),
+  token(stream, state) {
+    if (stream.eatSpace()) return null
+
+    // A backslash consumes an escaped percent before this branch sees it, so
+    // every remaining percent starts a LaTeX line comment.
+    if (stream.peek() === '%') {
+      stream.skipToEnd()
+      return 'comment'
+    }
+
+    if (state.pending) {
+      if (stream.eat('{')) {
+        const group = state.pending
+        state.pending = null
+        state.groups.push(group)
+        return 'bracket'
+      }
+      state.pending = null
+    }
+
+    const activeGroup = state.groups[state.groups.length - 1]
+
+    if (activeGroup === 'environment') {
+      if (stream.eat('}')) {
+        state.groups.pop()
+        return 'bracket'
+      }
+      if (stream.match(/^[A-Za-z][A-Za-z0-9*:_-]*/)) return 'typeName'
+      stream.next()
+      return 'punctuation'
+    }
+
+    if (stream.match(/^\$(?:\$)?/)) {
+      state.math = !state.math
+      return 'operator'
+    }
+
+    if (stream.match(/^\\(?:\(|\)|\[|\])/)) {
+      const delimiter = stream.current()
+      state.math = delimiter.endsWith('(') || delimiter.endsWith('[')
+      return 'operator'
+    }
+
+    if (stream.match(/^\\[A-Za-z@]+/)) {
+      const command = stream.current().slice(1)
+      if (command === 'begin' || command === 'end') {
+        state.pending = 'environment'
+        return 'controlKeyword'
+      }
+      if (LATEX_ARGUMENT_COMMANDS.has(command)) state.pending = 'argument'
+      return 'keyword'
+    }
+
+    // Single-character control sequences such as \\%, \\_, and \\{.
+    if (stream.match(/^\\./)) return 'operator'
+
+    if (activeGroup === 'argument' && stream.eat('}')) {
+      state.groups.pop()
+      return 'bracket'
+    }
+    if (activeGroup === 'argument' && stream.eat('{')) {
+      state.groups.push('argument')
+      return 'bracket'
+    }
+
+    if (stream.match(/^[{}\[\]()]/)) return 'bracket'
+    if (stream.match(/^[&_^~#]/)) return 'operator'
+    if (stream.match(/^\d+(?:\.\d+)?/)) return 'number'
+    if (state.math && stream.match(/^[A-Za-z]+/)) return 'variableName'
+    if (state.math && stream.match(/^[+\-*=<>/|!,;:]+/)) return 'operator'
+
+    if (activeGroup === 'argument') {
+      stream.match(/^[^\\%{}\[\]$&_^~#]+/)
+      return 'string'
+    }
+
+    stream.next()
+    return null
+  },
+})
+
 function languageExtension(lang: string) {
   switch (lang) {
     case 'typescript': return javascript({ typescript: true, jsx: true })
@@ -156,6 +264,7 @@ function languageExtension(lang: string) {
       codeLanguages: mdCodeLanguages,
       extensions: pairedStrongEditorExtension,
     })
+    case 'latex': return latexLanguage
     case 'python': return python()
     case 'css':
     case 'scss': return css()
@@ -183,6 +292,9 @@ const highlightStyle = HighlightStyle.define([
   { tag: [t.emphasis], fontStyle: 'italic' },
   { tag: [t.strong], fontWeight: '700' },
   { tag: [t.meta, t.processingInstruction], color: 'var(--color-text-secondary)' },
+  { tag: [t.variableName], color: 'var(--color-primary-hover)' },
+  { tag: [t.operator, t.punctuation], color: 'var(--color-text-secondary)' },
+  { tag: [t.bracket, t.squareBracket, t.paren, t.brace], color: 'var(--color-warning)' },
   { tag: [t.invalid], color: 'var(--color-error)' },
 ])
 
