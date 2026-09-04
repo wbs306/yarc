@@ -297,6 +297,7 @@ const workspaceEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
 const latexBuildPanelRef = ref<InstanceType<typeof LatexBuildPanel> | null>(null)
 const markdownSplitLayoutRef = ref<HTMLElement | null>(null)
 const markdownSplitDividerRef = ref<HTMLElement | null>(null)
+const latexSplitDividerRef = ref<HTMLElement | null>(null)
 const markdownPreviewContent = ref('')
 const markdownPreviewPending = computed(() => !!currentLiveClient.value
   && !currentLiveClient.value.ready.value
@@ -311,6 +312,8 @@ const markdownSplitRatio = ref(50)
 const defaultMarkdownSplitEditorOnLeft = () => prefs.markdownSplitEditorPosition === 'left'
 const markdownSplitEditorOnLeft = ref(defaultMarkdownSplitEditorOnLeft())
 const markdownSplitResizeActive = ref(false)
+const latexSplitRatio = ref(50)
+const latexSplitResizeActive = ref(false)
 const pendingMarkdownScroll = new Map<MarkdownScrollPane, number>()
 let markdownScrollRestoreTimer: number | null = null
 let markdownPreviewContentTimer: number | null = null
@@ -318,6 +321,10 @@ const markdownLineCount = computed(() => Math.max(1, workspaceContent.value.spli
 const markdownSplitLayoutStyle = computed<Record<string, string>>(() => ({
   '--markdown-editor-flex': String(markdownSplitRatio.value),
   '--markdown-preview-flex': String(100 - markdownSplitRatio.value),
+}))
+const latexSplitLayoutStyle = computed<Record<string, string>>(() => ({
+  '--latex-editor-flex': String(latexSplitRatio.value),
+  '--latex-preview-flex': String(100 - latexSplitRatio.value),
 }))
 
 const clampMarkdownScrollLine = (line: number) => Math.min(markdownLineCount.value, Math.max(1, Math.round(line)))
@@ -513,6 +520,45 @@ const endMarkdownSplitResize = (event: PointerEvent) => {
 const adjustMarkdownSplitRatio = (delta: number) => {
   const editorDelta = markdownSplitEditorOnLeft.value ? delta : -delta
   markdownSplitRatio.value = clampMarkdownSplitRatio(markdownSplitRatio.value + editorDelta)
+}
+
+const clampLatexSplitRatio = (ratio: number) => Math.min(80, Math.max(20, ratio))
+const updateLatexSplitRatioFromPointer = (event: PointerEvent) => {
+  const layout = markdownSplitLayoutRef.value
+  if (!layout) return
+  const rect = layout.getBoundingClientRect()
+  const isVertical = markdownSplitIsVertical()
+  const dividerSize = latexSplitDividerRef.value
+    ? (isVertical ? latexSplitDividerRef.value.offsetHeight : latexSplitDividerRef.value.offsetWidth)
+    : 10
+  const totalSize = Math.max(1, (isVertical ? rect.height : rect.width) - dividerSize)
+  const pointerPosition = isVertical
+    ? event.clientY - rect.top - dividerSize / 2
+    : event.clientX - rect.left - dividerSize / 2
+  const editorSize = Math.min(totalSize, Math.max(0, pointerPosition))
+  latexSplitRatio.value = clampLatexSplitRatio(editorSize / totalSize * 100)
+}
+
+const startLatexSplitResize = (event: PointerEvent) => {
+  const divider = event.currentTarget as HTMLElement
+  divider.setPointerCapture(event.pointerId)
+  latexSplitResizeActive.value = true
+  updateLatexSplitRatioFromPointer(event)
+}
+
+const onLatexSplitResize = (event: PointerEvent) => {
+  if (!latexSplitResizeActive.value) return
+  updateLatexSplitRatioFromPointer(event)
+}
+
+const endLatexSplitResize = (event: PointerEvent) => {
+  latexSplitResizeActive.value = false
+  const divider = event.currentTarget as HTMLElement
+  if (divider.hasPointerCapture(event.pointerId)) divider.releasePointerCapture(event.pointerId)
+}
+
+const adjustLatexSplitRatio = (delta: number) => {
+  latexSplitRatio.value = clampLatexSplitRatio(latexSplitRatio.value + delta)
 }
 
 const swapMarkdownSplitPanes = () => {
@@ -4257,7 +4303,11 @@ const showSearchPaperPopup = (paper: any) => {
                     'workspace-latex-split': workspaceIsLatex && latexBuildVisible,
                   },
                 ]"
-                :style="markdownIsSplit ? markdownSplitLayoutStyle : undefined"
+                :style="markdownIsSplit
+                  ? markdownSplitLayoutStyle
+                  : workspaceIsLatex && latexBuildVisible
+                    ? latexSplitLayoutStyle
+                    : undefined"
               >
                 <div v-show="markdownPreviewVisible" class="workspace-md-preview-shell">
                   <div class="workspace-md-preview-column">
@@ -4364,6 +4414,29 @@ const showSearchPaperPopup = (paper: any) => {
                   </footer>
                 </template>
               </CodeEditor>
+              <div
+                v-if="workspaceIsLatex && latexBuildVisible"
+                ref="latexSplitDividerRef"
+                class="latex-split-divider"
+                :class="{ active: latexSplitResizeActive }"
+                role="separator"
+                tabindex="0"
+                :aria-orientation="markdownSplitIsVertical() ? 'horizontal' : 'vertical'"
+                aria-label="调整 LaTeX 编辑器和 PDF 预览大小"
+                aria-valuemin="20"
+                aria-valuemax="80"
+                :aria-valuenow="Math.round(latexSplitRatio)"
+                @pointerdown="startLatexSplitResize"
+                @pointermove="onLatexSplitResize"
+                @pointerup="endLatexSplitResize"
+                @pointercancel="endLatexSplitResize"
+                @keydown.left.prevent="adjustLatexSplitRatio(-5)"
+                @keydown.right.prevent="adjustLatexSplitRatio(5)"
+                @keydown.up.prevent="adjustLatexSplitRatio(-5)"
+                @keydown.down.prevent="adjustLatexSplitRatio(5)"
+              >
+                <span class="latex-split-divider-grip" aria-hidden="true" />
+              </div>
               <LatexBuildPanel
                 v-if="latexBuildVisible"
                 ref="latexBuildPanelRef"
@@ -5410,12 +5483,18 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .workspace-latex-split > .workspace-code-editor,
 .workspace-latex-split > .workspace-latex-preview-pane {
-  width: 50%;
+  width: auto;
   min-width: 0;
   min-height: 0;
-  flex: 1 1 0;
 }
+.workspace-latex-split > .workspace-code-editor {
+  order: 1;
+  flex: var(--latex-editor-flex) 1 0;
+}
+.workspace-latex-split > .latex-split-divider { order: 2; }
 .workspace-latex-split > .workspace-latex-preview-pane {
+  order: 3;
+  flex: var(--latex-preview-flex) 1 0;
   border-left: 1px solid var(--color-border);
   background: var(--color-bg-card);
 }
@@ -5601,7 +5680,8 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .md-view-swap:hover { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-soft); }
 .workspace-md-preview-shell { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: hidden; }
-.markdown-split-divider {
+.markdown-split-divider,
+.latex-split-divider {
   position: relative;
   z-index: 2;
   flex: 0 0 10px;
@@ -5615,14 +5695,16 @@ const showSearchPaperPopup = (paper: any) => {
   touch-action: none;
   user-select: none;
 }
-.markdown-split-divider::before {
+.markdown-split-divider::before,
+.latex-split-divider::before {
   content: '';
   position: absolute;
   inset: 0 4px;
   border-left: 1px solid var(--color-border);
   border-right: 1px solid var(--color-border);
 }
-.markdown-split-divider-grip {
+.markdown-split-divider-grip,
+.latex-split-divider-grip {
   position: relative;
   z-index: 1;
   width: 3px;
@@ -5634,11 +5716,15 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .markdown-split-divider:hover .markdown-split-divider-grip,
 .markdown-split-divider.active .markdown-split-divider-grip,
-.markdown-split-divider:focus-visible .markdown-split-divider-grip {
+.markdown-split-divider:focus-visible .markdown-split-divider-grip,
+.latex-split-divider:hover .latex-split-divider-grip,
+.latex-split-divider.active .latex-split-divider-grip,
+.latex-split-divider:focus-visible .latex-split-divider-grip {
   opacity: 0.9;
   background: var(--color-primary);
 }
-.markdown-split-divider:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+.markdown-split-divider:focus-visible,
+.latex-split-divider:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
 .workspace-md-preview-column { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .workspace-md-preview {
   flex: 1;
@@ -5725,7 +5811,8 @@ const showSearchPaperPopup = (paper: any) => {
     min-height: 0;
     flex-basis: 0;
   }
-  .workspace-editor-content-split > .markdown-split-divider {
+  .workspace-editor-content-split > .markdown-split-divider,
+  .workspace-latex-split > .latex-split-divider {
     flex: 0 0 10px;
     width: 100%;
     min-width: 0;
@@ -5733,14 +5820,16 @@ const showSearchPaperPopup = (paper: any) => {
     min-height: 10px;
     cursor: row-resize;
   }
-  .markdown-split-divider::before {
+  .markdown-split-divider::before,
+  .latex-split-divider::before {
     inset: 4px 0;
     border-top: 1px solid var(--color-border);
     border-right: none;
     border-bottom: 1px solid var(--color-border);
     border-left: none;
   }
-  .markdown-split-divider-grip { width: 34px; height: 3px; }
+  .markdown-split-divider-grip,
+  .latex-split-divider-grip { width: 34px; height: 3px; }
 }
 .paper-library.settings-workspace-panel {
   overflow-y: auto;
@@ -6595,12 +6684,28 @@ const showSearchPaperPopup = (paper: any) => {
   .workspace-latex-split > .workspace-code-editor,
   .workspace-latex-split > .workspace-latex-preview-pane {
     width: 100%;
-    flex: 1 1 50%;
+    flex-basis: 0;
+  }
+  .workspace-latex-split > .latex-split-divider {
+    flex: 0 0 10px;
+    width: 100%;
+    min-width: 0;
+    height: 10px;
+    min-height: 10px;
+    cursor: row-resize;
   }
   .workspace-latex-split > .workspace-latex-preview-pane {
     border-top: 1px solid var(--color-border);
     border-left: none;
   }
+  .latex-split-divider::before {
+    inset: 4px 0;
+    border-top: 1px solid var(--color-border);
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    border-left: none;
+  }
+  .latex-split-divider-grip { width: 34px; height: 3px; }
 }
 
 @media (max-width: 768px) {
