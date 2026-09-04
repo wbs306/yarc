@@ -12,7 +12,7 @@ import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-
 import { normalizeWorkspaceFileReferencePath } from '@/lib/workspace-file-reference'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
-import type { CurrentChatResource, IeeeJournalBrowserPreferences, ReparseAction, ReparsePaperInfo } from '@yarc/shared'
+import type { CurrentChatResource, IeeeJournalBrowserPreferences, LatexEngine, ReparseAction, ReparsePaperInfo } from '@yarc/shared'
 
 import PdfViewer from '@/components/pdf/PdfViewer.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
@@ -276,6 +276,19 @@ const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'fil
 const workspaceIsLatex = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension?.toLowerCase() === '.tex')
 const workspaceCanCompileLatex = computed(() => workspaceIsLatex.value && !workspaceIsOfflineCopy.value)
 const latexBuildVisible = ref(false)
+const latexEngine = ref<LatexEngine>('xelatex')
+type LatexBuildStatus = {
+  active: boolean
+  loading: boolean
+  completed: boolean
+  synctexAvailable: boolean
+}
+const latexBuildStatus = ref<LatexBuildStatus>({
+  active: false,
+  loading: false,
+  completed: false,
+  synctexAvailable: false,
+})
 const latexEntryPath = ref('')
 const latexEntryDirectoryPath = computed(() => {
   const parts = latexEntryPath.value.split('/').filter(Boolean)
@@ -1517,6 +1530,28 @@ const openLatexSourcePosition = async (position: LatexSourcePosition) => {
   } catch (err) {
     filesError.value = (err as Error).message || '无法打开 SyncTeX 源文件'
   }
+}
+
+const rebuildLatex = async () => {
+  if (!workspaceIsLatex.value || !latexBuildVisible.value || !workspaceCanCompileLatex.value) return
+  if (workspaceDirty.value) {
+    await saveWorkspaceFile()
+    if (workspaceDirty.value) return
+  }
+  await nextTick()
+  void latexBuildPanelRef.value?.startBuild()
+}
+
+const cancelLatexBuild = () => {
+  void latexBuildPanelRef.value?.cancelBuild()
+}
+
+const locateLatexSource = () => {
+  latexBuildPanelRef.value?.locateCurrentSource()
+}
+
+const onLatexBuildStatus = (status: LatexBuildStatus) => {
+  latexBuildStatus.value = status
 }
 
 const toggleLatexBuild = async () => {
@@ -4228,6 +4263,42 @@ const showSearchPaperPopup = (paper: any) => {
                   <button class="save-workspace-btn" :disabled="(!workspaceDirty && !currentLiveClient) || !workspaceCanEdit || workspaceSaving" title="立即保存（Ctrl/⌘+S）" @click="saveWorkspaceFile">
                     {{ workspaceSaving || currentLiveClient?.saving.value ? '保存中…' : currentLiveClient?.conflict.value ? '有冲突' : currentLiveClient ? '立即保存' : '保存' }}
                   </button>
+                  <template v-if="workspaceIsLatex && latexBuildVisible">
+                    <select
+                      v-model="latexEngine"
+                      class="latex-engine-workspace-select"
+                      :disabled="latexBuildStatus.active || latexBuildStatus.loading"
+                      aria-label="LaTeX 编译引擎"
+                      title="LaTeX 编译引擎"
+                    >
+                      <option value="xelatex">XeLaTeX</option>
+                      <option value="pdflatex">pdfLaTeX</option>
+                      <option value="lualatex">LuaLaTeX</option>
+                    </select>
+                    <button
+                      type="button"
+                      class="latex-workspace-tool-btn"
+                      :disabled="latexBuildStatus.active || latexBuildStatus.loading || !workspaceCanCompileLatex"
+                      title="重新编译当前 LaTeX 文件"
+                      @click="rebuildLatex"
+                    >
+                      {{ latexBuildStatus.loading ? '编译中…' : '重新编译' }}
+                    </button>
+                    <button
+                      v-if="latexBuildStatus.active"
+                      type="button"
+                      class="latex-workspace-tool-btn danger"
+                      title="取消当前编译"
+                      @click="cancelLatexBuild"
+                    >取消</button>
+                    <button
+                      v-if="latexBuildStatus.completed && latexBuildStatus.synctexAvailable"
+                      type="button"
+                      class="latex-workspace-tool-btn primary"
+                      title="将当前编辑器位置定位到 PDF"
+                      @click="locateLatexSource"
+                    >定位当前行</button>
+                  </template>
                 </template>
                 <button
                   v-if="workspaceIsLatex && !workspaceContentLoading"
@@ -4442,6 +4513,7 @@ const showSearchPaperPopup = (paper: any) => {
                 ref="latexBuildPanelRef"
                 class="workspace-latex-preview-pane"
                 :auto-start="false"
+                v-model:engine="latexEngine"
                 :path="latexEntryPath || selectedWorkspaceFile.path"
                 :name="latexEntryPath.split('/').pop() || selectedWorkspaceFile.name"
                 :source-file="latexSourceFile"
@@ -4449,6 +4521,7 @@ const showSearchPaperPopup = (paper: any) => {
                 :source-column="latexSourceColumn"
                 @close="latexBuildVisible = false"
                 @open-source="openLatexSourcePosition"
+                @status="onLatexBuildStatus"
               />
                 </div>
               </div>
@@ -5448,6 +5521,34 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .latex-compile-workspace-btn:hover:not(:disabled) { background: rgba(var(--color-primary-rgb), 0.18); }
 .latex-compile-workspace-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+.latex-engine-workspace-select,
+.latex-workspace-tool-btn {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 11px;
+}
+.latex-engine-workspace-select {
+  max-width: 96px;
+  cursor: pointer;
+}
+.latex-workspace-tool-btn { cursor: pointer; }
+.latex-workspace-tool-btn:hover:not(:disabled) {
+  border-color: rgba(var(--color-primary-rgb), 0.35);
+  color: var(--color-primary);
+  background: rgba(var(--color-primary-rgb), 0.08);
+}
+.latex-workspace-tool-btn.primary {
+  border-color: rgba(var(--color-primary-rgb), 0.35);
+  color: var(--color-primary);
+}
+.latex-workspace-tool-btn.danger { color: var(--color-error); }
+.latex-engine-workspace-select:disabled,
+.latex-workspace-tool-btn:disabled { cursor: wait; opacity: 0.5; }
 .workspace-editor-content {
   flex: 1;
   min-width: 0;

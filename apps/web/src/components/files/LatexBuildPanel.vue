@@ -11,17 +11,24 @@ const props = withDefaults(defineProps<{
   sourceLine?: number
   sourceColumn?: number
   autoStart?: boolean
+  engine?: LatexEngine
 }>(), {
   autoStart: false,
+  engine: 'xelatex',
 })
 
 const emit = defineEmits<{
   close: []
   openSource: [position: { file: string; line: number; column: number }]
+  status: [state: { active: boolean; loading: boolean; completed: boolean; synctexAvailable: boolean }]
+  'update:engine': [engine: LatexEngine]
 }>()
 
 const api = useApi()
-const engine = ref<LatexEngine>('xelatex')
+const engine = computed({
+  get: () => props.engine || 'xelatex',
+  set: (value: LatexEngine) => emit('update:engine', value),
+})
 const build = ref<LatexBuild | null>(null)
 const log = ref('')
 const loading = ref(false)
@@ -37,16 +44,6 @@ let requestSequence = 0
 let syncedBuildId = ''
 
 const isActive = computed(() => build.value?.status === 'queued' || build.value?.status === 'running')
-const statusText = computed(() => {
-  switch (build.value?.status) {
-    case 'queued': return '排队中'
-    case 'running': return '编译中'
-    case 'completed': return '编译成功'
-    case 'failed': return '编译失败'
-    case 'cancelled': return '已取消'
-    default: return '尚未编译'
-  }
-})
 const pdfUrl = computed(() => {
   if (!build.value?.pdfAvailable || build.value.status !== 'completed') return ''
   return api.getLatexPdfUrl(build.value.id, build.value.completedAt || build.value.id)
@@ -55,6 +52,17 @@ const pdfDocumentId = computed(() => build.value ? `latex-${build.value.id}` : '
 const diagnostics = computed<LatexDiagnostic[]>(() => build.value?.diagnostics || [])
 const errors = computed(() => diagnostics.value.filter((item) => item.severity === 'error'))
 const warnings = computed(() => diagnostics.value.filter((item) => item.severity === 'warning'))
+
+const emitBuildStatus = () => {
+  emit('status', {
+    active: isActive.value,
+    loading: loading.value,
+    completed: build.value?.status === 'completed',
+    synctexAvailable: !!build.value?.synctexAvailable,
+  })
+}
+
+watch([build, loading], emitBuildStatus, { immediate: true })
 
 const clearPoll = () => {
   if (pollTimer !== null) {
@@ -247,7 +255,7 @@ onMounted(() => {
   if (props.autoStart) void startBuild()
 })
 
-defineExpose({ startBuild })
+defineExpose({ startBuild, cancelBuild, locateCurrentSource })
 
 onBeforeUnmount(() => {
   clearPoll()
@@ -257,39 +265,6 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="latex-build-panel">
-    <header class="latex-build-toolbar">
-      <div class="latex-build-title">
-        <strong>LaTeX 编译</strong>
-        <span class="latex-build-entry">{{ name }}</span>
-        <span v-if="build" class="latex-build-status" :class="`status-${build.status}`">{{ statusText }}</span>
-      </div>
-      <div class="latex-build-actions">
-        <label class="latex-engine-select">
-          <span>引擎</span>
-          <select v-model="engine" :disabled="isActive || loading" aria-label="LaTeX 编译引擎">
-            <option value="xelatex">XeLaTeX</option>
-            <option value="pdflatex">pdfLaTeX</option>
-            <option value="lualatex">LuaLaTeX</option>
-          </select>
-        </label>
-        <button type="button" class="latex-build-button" :disabled="loading || isActive" @click="startBuild">
-          {{ loading ? '启动中…' : build?.status === 'completed' ? '重新编译' : '开始编译' }}
-        </button>
-        <button v-if="isActive" type="button" class="latex-cancel-button" @click="cancelBuild">取消</button>
-        <button
-          v-if="build?.status === 'completed' && build.synctexAvailable"
-          type="button"
-          class="latex-sync-button"
-          :disabled="syncLoading"
-          title="将当前编辑器位置定位到 PDF"
-          @click="locateCurrentSource"
-        >
-          {{ syncLoading ? '定位中…' : '定位当前行' }}
-        </button>
-        <button type="button" class="latex-close-button" title="返回编辑器" @click="emit('close')">返回编辑器</button>
-      </div>
-    </header>
-
     <div v-if="error" class="latex-build-error">{{ error }}</div>
     <div v-if="build?.error" class="latex-build-error">{{ build.error }}</div>
     <div v-if="syncError" class="latex-build-error">{{ syncError }}</div>
@@ -345,54 +320,6 @@ onBeforeUnmount(() => {
   min-height: 0;
   background: rgba(var(--color-bg-rgb), 0.72);
 }
-
-.latex-build-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-muted);
-}
-
-.latex-build-title,
-.latex-build-actions,
-.latex-build-meta,
-.latex-engine-select {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.latex-build-title { min-width: 0; color: var(--color-text); }
-.latex-build-entry { overflow: hidden; max-width: 260px; color: var(--color-text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.latex-build-status { padding: 3px 8px; border-radius: 999px; font-size: 11px; }
-.status-completed { color: var(--color-success); background: rgba(34, 197, 94, 0.12); }
-.status-failed, .status-cancelled { color: var(--color-error); background: rgba(239, 68, 68, 0.12); }
-.status-queued, .status-running { color: var(--color-warning); background: rgba(245, 158, 11, 0.14); }
-
-.latex-build-actions { flex-shrink: 0; }
-.latex-engine-select { color: var(--color-text-muted); font-size: 12px; }
-.latex-engine-select select,
-.latex-build-button,
-.latex-cancel-button,
-.latex-close-button {
-  min-height: 30px;
-  padding: 5px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-bg);
-  color: var(--color-text);
-  font: inherit;
-  cursor: pointer;
-}
-.latex-build-button { border-color: var(--color-primary); background: var(--color-primary); color: white; }
-.latex-build-button:disabled { cursor: wait; opacity: 0.65; }
-.latex-cancel-button { color: var(--color-error); }
-.latex-sync-button { border-color: rgba(var(--color-primary-rgb), 0.35); color: var(--color-primary); }
-.latex-sync-button:disabled { cursor: wait; opacity: 0.65; }
-.latex-close-button { color: var(--color-text-secondary); }
 
 .latex-build-error {
   margin: 10px 14px 0;
@@ -462,8 +389,4 @@ onBeforeUnmount(() => {
 .latex-build-log summary { padding: 8px 10px; color: var(--color-text-secondary); background: var(--color-bg-muted); cursor: pointer; font-size: 12px; }
 .latex-build-log pre { max-height: 170px; margin: 0; padding: 10px; overflow: auto; color: var(--color-text-secondary); font: 11px/1.55 'JetBrains Mono', monospace; white-space: pre-wrap; }
 
-@media (max-width: 900px) {
-  .latex-build-toolbar { align-items: flex-start; flex-direction: column; }
-  .latex-build-actions { flex-wrap: wrap; }
-}
 </style>
