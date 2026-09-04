@@ -50,6 +50,7 @@ import conversationsRoutes from './routes/conversations.js'
 import searchRoutes from './routes/search.js'
 import tasksRoutes from './routes/tasks.js'
 import filesRoutes from './routes/files.js'
+import latexRoutes from './routes/latex.js'
 import settingsRoutes from './routes/settings.js'
 import rankingsRoutes from './routes/rankings.js'
 import searchCategoriesRoutes from './routes/search-categories.js'
@@ -196,6 +197,7 @@ app.get(
 )
 
 app.route('/api/files', filesRoutes)
+app.route('/api/latex', latexRoutes)
 app.route('/api/settings', settingsRoutes)
 app.route('/api/rankings', rankingsRoutes)
 app.route('/api/search-categories', searchCategoriesRoutes)

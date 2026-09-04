@@ -24,6 +24,13 @@ import { yaml } from '@codemirror/lang-yaml'
 import { sql } from '@codemirror/lang-sql'
 import { vue } from '@codemirror/lang-vue'
 import { pairedStrongRule } from '@/lib/markdown-strong'
+import {
+  LATEX_COMMANDS,
+  LATEX_ENVIRONMENTS,
+  LATEX_PACKAGES,
+  filterLatexCompletionItems,
+  type LatexCompletionItem,
+} from '@/lib/latex-completion'
 
 const props = withDefaults(defineProps<{
   modelValue: string
@@ -47,6 +54,7 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
   save: []
   scroll: [line: number]
+  cursor: [line: number, column: number]
 }>()
 
 // Cursor position and selection size for the status bar. Doc-level counts are
@@ -56,8 +64,17 @@ const cursorColumn = ref(1)
 const selectedChars = ref(0)
 const selectedWords = ref(0)
 
+const editorOuter = ref<HTMLDivElement>()
 const host = ref<HTMLDivElement>()
 const minimap = ref<HTMLDivElement>()
+const latexCompletionMenu = ref<HTMLDivElement>()
+const latexCompletionVisible = ref(false)
+const latexCompletionItems = ref<LatexCompletionItem[]>([])
+const latexCompletionIndex = ref(0)
+const latexCompletionFrom = ref(0)
+const latexCompletionTo = ref(0)
+const latexCompletionTop = ref(0)
+const latexCompletionLeft = ref(0)
 const minimapCanvas = ref<HTMLCanvasElement>()
 const view = shallowRef<EditorView>()
 const minimapViewportStyle = ref<Record<string, string>>({ top: '0px', height: '100%' })
@@ -239,6 +256,205 @@ function handleSurroundSelectionKeydown(event: KeyboardEvent, view: EditorView) 
 
 function collabExtension() {
   return props.collabYText ? yCollab(props.collabYText, null) : []
+}
+
+// ── Lightweight LaTeX completion ─────────────────────────────────────────────
+// Keep this local instead of adding a second language package: CodeMirror does
+// not ship a stable LaTeX grammar, while command/environment completion can be
+// provided reliably from the current document and does not require a parser.
+type LatexCompletionContext = {
+  items: LatexCompletionItem[]
+  from: number
+  to: number
+}
+
+const latexKindLabel = (kind: LatexCompletionItem['kind']) => {
+  switch (kind) {
+    case 'command': return '命令'
+    case 'environment': return '环境'
+    case 'package': return '宏包'
+    case 'reference': return '标签'
+    case 'citation': return '文献'
+  }
+}
+
+const documentCompletionItems = (view: EditorView, kind: 'reference' | 'citation'): LatexCompletionItem[] => {
+  const text = view.state.doc.toString()
+  const pattern = kind === 'reference'
+    ? /\\label\{([^}]+)\}/g
+    : /(?:\\bibitem(?:\[[^\]]*\])?\{|@[A-Za-z]+\s*\{)([^,}\s]+)/g
+  const seen = new Set<string>()
+  const items: LatexCompletionItem[] = []
+  for (const match of text.matchAll(pattern)) {
+    const label = match[1]?.trim()
+    if (!label || seen.has(label)) continue
+    seen.add(label)
+    items.push({
+      label,
+      detail: kind === 'reference' ? '当前文档标签' : '当前文档文献键',
+      kind,
+      insert: label,
+    })
+  }
+  return items
+}
+
+const getLatexCompletionContext = (editor: EditorView, force = false): LatexCompletionContext | null => {
+  if (props.language !== 'latex' || props.readonly) return null
+
+  const position = editor.state.selection.main.head
+  const line = editor.state.doc.lineAt(position)
+  const before = editor.state.sliceDoc(line.from, position)
+
+  const environmentMatch = before.match(/\\begin\{([A-Za-z0-9*_-]*)$/)
+  if (environmentMatch) {
+    const query = environmentMatch[1]
+    return {
+      items: filterLatexCompletionItems(LATEX_ENVIRONMENTS, query).slice(0, 40),
+      from: position - query.length,
+      to: position,
+    }
+  }
+
+  const packageMatch = before.match(/\\usepackage(?:\[[^\]]*\])?\{([A-Za-z0-9_.-]*)$/)
+  if (packageMatch) {
+    const query = packageMatch[1]
+    return {
+      items: filterLatexCompletionItems(LATEX_PACKAGES, query).slice(0, 40),
+      from: position - query.length,
+      to: position,
+    }
+  }
+
+  const referenceMatch = before.match(/\\(?:ref|pageref)\{([^}]*)$/)
+  if (referenceMatch) {
+    const query = referenceMatch[1]
+    return {
+      items: filterLatexCompletionItems(documentCompletionItems(editor, 'reference'), query).slice(0, 40),
+      from: position - query.length,
+      to: position,
+    }
+  }
+
+  const citationMatch = before.match(/\\(?:cite|parencite|textcite)\{([^}]*)$/)
+  if (citationMatch) {
+    const query = citationMatch[1].split(',').pop()?.trim() || ''
+    return {
+      items: filterLatexCompletionItems(documentCompletionItems(editor, 'citation'), query).slice(0, 40),
+      from: position - query.length,
+      to: position,
+    }
+  }
+
+  const commandMatch = before.match(/\\([A-Za-z]*)$/)
+  if (commandMatch) {
+    const query = commandMatch[1]
+    return {
+      items: filterLatexCompletionItems(LATEX_COMMANDS, query).slice(0, 50),
+      from: position - query.length - 1,
+      to: position,
+    }
+  }
+
+  if (force) return { items: LATEX_COMMANDS.slice(0, 50), from: position, to: position }
+  return null
+}
+
+const positionLatexCompletion = () => {
+  const editor = view.value
+  const outer = editorOuter.value
+  if (!editor || !outer || !latexCompletionVisible.value) return
+  const coords = editor.coordsAtPos(editor.state.selection.main.head)
+  if (!coords) return
+
+  const outerRect = outer.getBoundingClientRect()
+  const menuWidth = Math.min(360, Math.max(250, outerRect.width - 20))
+  const menuHeight = latexCompletionMenu.value?.getBoundingClientRect().height || 260
+  const left = Math.max(8, Math.min(coords.left - outerRect.left, Math.max(8, outerRect.width - menuWidth - 8)))
+  let top = coords.bottom - outerRect.top + 4
+  if (top + menuHeight > outerRect.height) top = Math.max(8, coords.top - outerRect.top - menuHeight - 4)
+  latexCompletionLeft.value = left
+  latexCompletionTop.value = top
+}
+
+const hideLatexCompletion = () => {
+  latexCompletionVisible.value = false
+  latexCompletionItems.value = []
+  latexCompletionIndex.value = 0
+}
+
+const refreshLatexCompletion = (editor: EditorView, force = false) => {
+  const context = getLatexCompletionContext(editor, force)
+  if (!context || !context.items.length) {
+    hideLatexCompletion()
+    return false
+  }
+
+  latexCompletionItems.value = context.items
+  latexCompletionFrom.value = context.from
+  latexCompletionTo.value = context.to
+  latexCompletionIndex.value = Math.min(latexCompletionIndex.value, context.items.length - 1)
+  latexCompletionVisible.value = true
+  window.requestAnimationFrame(positionLatexCompletion)
+  return true
+}
+
+const applyLatexCompletion = (index = latexCompletionIndex.value) => {
+  const editor = view.value
+  const item = latexCompletionItems.value[index]
+  if (!editor || !item) return
+
+  const from = latexCompletionFrom.value
+  const to = latexCompletionTo.value
+  const cursor = from + Math.min(item.cursorOffset ?? item.insert.length, item.insert.length)
+  editor.dispatch({
+    changes: { from, to, insert: item.insert },
+    selection: EditorSelection.cursor(cursor),
+    scrollIntoView: true,
+    userEvent: 'input.complete',
+  })
+  hideLatexCompletion()
+  editor.focus()
+}
+
+const handleLatexCompletionKeydown = (event: KeyboardEvent, editor: EditorView) => {
+  const isLatex = props.language === 'latex' && !props.readonly
+  if (!isLatex) return false
+
+  if (latexCompletionVisible.value) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      latexCompletionIndex.value = (latexCompletionIndex.value + 1) % latexCompletionItems.value.length
+      return true
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      latexCompletionIndex.value = (latexCompletionIndex.value - 1 + latexCompletionItems.value.length) % latexCompletionItems.value.length
+      return true
+    }
+    if (event.key === 'Enter' || (event.key === 'Tab' && !event.shiftKey)) {
+      event.preventDefault()
+      applyLatexCompletion()
+      return true
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      hideLatexCompletion()
+      return true
+    }
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.code === 'Space') {
+    event.preventDefault()
+    refreshLatexCompletion(editor, true)
+    return true
+  }
+  return false
+}
+
+const handleEditorKeydown = (event: KeyboardEvent, editor: EditorView) => {
+  if (handleLatexCompletionKeydown(event, editor)) return true
+  return handleSurroundSelectionKeydown(event, editor)
 }
 
 // ── Custom find/replace panel ──
@@ -442,7 +658,7 @@ function buildExtensions() {
     bracketMatching(),
     highlightActiveLine(),
     syntaxHighlighting(highlightStyle),
-    EditorView.domEventHandlers({ keydown: handleSurroundSelectionKeydown }),
+    EditorView.domEventHandlers({ keydown: handleEditorKeydown }),
     search({ top: true, createPanel: createFindPanel }),
     keymap.of([
       {
@@ -482,7 +698,10 @@ function buildExtensions() {
         if (value !== props.modelValue) emit('update:modelValue', value)
         scheduleMinimapDraw()
       }
-      if (update.docChanged || update.selectionSet) updateCursorStats(update.state)
+      if (update.docChanged || update.selectionSet) {
+        updateCursorStats(update.state)
+        if (props.language === 'latex') refreshLatexCompletion(update.view)
+      }
     }),
   ]
 }
@@ -510,6 +729,7 @@ function updateCursorStats(state: EditorState) {
   }
   selectedChars.value = chars
   selectedWords.value = words
+  emit('cursor', cursorLine.value, cursorColumn.value)
 }
 
 const cssVar = (name: string, fallback: string) => {
@@ -628,6 +848,7 @@ function scrollToLine(line: number, behavior: ScrollBehavior = 'auto') {
 
 function handleEditorScroll() {
   updateMinimapViewport()
+  if (latexCompletionVisible.value) positionLatexCompletion()
   emit('scroll', getScrollLine())
 }
 
@@ -711,9 +932,11 @@ watch(() => props.collabYText, (ytext) => {
 
 watch(() => props.language, (lang) => {
   view.value?.dispatch({ effects: languageConf.reconfigure(languageExtension(lang)) })
+  if (lang !== 'latex') hideLatexCompletion()
 })
 
 watch(() => props.readonly, (ro) => {
+  if (ro) hideLatexCompletion()
   view.value?.dispatch({
     effects: editableConf.reconfigure([
       EditorView.editable.of(!ro),
@@ -738,11 +961,23 @@ watch(() => props.lineNumbers, (on) => {
   view.value?.dispatch({ effects: gutterConf.reconfigure(gutterExtension(on)) })
 })
 
+const setCursorPosition = (lineNumber: number, columnNumber = 1) => {
+  const editor = view.value
+  if (!editor) return
+  const line = editor.state.doc.line(Math.max(1, Math.min(editor.state.doc.lines, Math.round(lineNumber))))
+  const column = Math.max(1, Math.round(columnNumber))
+  const position = Math.min(line.to, line.from + column - 1)
+  editor.dispatch({ selection: EditorSelection.cursor(position), scrollIntoView: true })
+  editor.focus()
+}
+
 defineExpose({
   openSearch: () => openFindPanel(false),
   openReplace: () => openFindPanel(true),
   getScrollLine,
   scrollToLine,
+  getCursorPosition: () => ({ line: cursorLine.value, column: cursorColumn.value }),
+  setCursorPosition,
 })
 
 onBeforeUnmount(() => {
@@ -757,7 +992,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="code-editor-outer">
+  <div ref="editorOuter" class="code-editor-outer">
     <div class="code-editor-shell">
       <div ref="host" class="code-editor" />
       <div ref="minimap" class="code-minimap" title="拖动或点击可快速跳转" @pointerdown="handleMinimapPointerDown">
@@ -765,12 +1000,36 @@ onBeforeUnmount(() => {
         <div class="code-minimap-thumb" :style="minimapViewportStyle" />
       </div>
     </div>
+    <div
+      v-if="latexCompletionVisible"
+      ref="latexCompletionMenu"
+      class="latex-completion-menu"
+      :style="{ top: `${latexCompletionTop}px`, left: `${latexCompletionLeft}px` }"
+      role="listbox"
+      aria-label="LaTeX 补全"
+      @mousedown.stop
+    >
+      <button
+        v-for="(item, index) in latexCompletionItems"
+        :key="`${item.kind}-${item.label}`"
+        type="button"
+        class="latex-completion-item"
+        :class="{ active: index === latexCompletionIndex }"
+        role="option"
+        :aria-selected="index === latexCompletionIndex"
+        @mousedown.prevent="applyLatexCompletion(index)"
+      >
+        <span class="latex-completion-label">{{ item.label }}</span>
+        <span class="latex-completion-detail">{{ latexKindLabel(item.kind) }} · {{ item.detail }}</span>
+      </button>
+    </div>
     <slot name="statusbar" :line="cursorLine" :column="cursorColumn" :selected="selectedChars" :selected-words="selectedWords" />
   </div>
 </template>
 
 <style scoped>
 .code-editor-outer {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -962,5 +1221,52 @@ onBeforeUnmount(() => {
 .code-editor :deep(.cm-searchMatch-selected) {
   background: var(--color-warning);
   color: #18181b;
+}
+
+.latex-completion-menu {
+  position: absolute;
+  z-index: 30;
+  width: min(360px, calc(100% - 16px));
+  max-height: 260px;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
+  border-radius: 10px;
+  background: rgba(var(--color-bg-card-rgb), 0.96);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.18), 0 1px 4px rgba(15, 23, 42, 0.10);
+}
+.latex-completion-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.latex-completion-item:hover,
+.latex-completion-item.active {
+  background: rgba(var(--color-primary-rgb), 0.12);
+}
+.latex-completion-label {
+  overflow: hidden;
+  color: var(--color-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.latex-completion-detail {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+  font-size: 11px;
 }
 </style>

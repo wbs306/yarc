@@ -8,7 +8,7 @@
 
 // Preserve PDFs cached by the previous PDF-only worker across this upgrade.
 const PDF_CACHE = 'yarc-pdf-v1'
-const APP_CACHE = 'yarc-app-v2'
+const APP_CACHE = 'yarc-app-v3'
 const FILE_CACHE = 'yarc-files-v1'
 const ACTIVE_CACHES = new Set([PDF_CACHE, APP_CACHE, FILE_CACHE])
 

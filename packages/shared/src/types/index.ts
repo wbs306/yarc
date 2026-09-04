@@ -169,6 +169,66 @@ export interface Task {
   completedAt: string | null
 }
 
+// ── LaTeX workspace builds ───────────────────────────────────────────────────
+
+export type LatexEngine = 'pdflatex' | 'xelatex' | 'lualatex'
+export type LatexBuildStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export interface LatexDiagnostic {
+  severity: 'error' | 'warning' | 'info'
+  message: string
+  file?: string
+  line?: number
+  column?: number
+}
+
+export interface LatexBuild {
+  id: string
+  path: string
+  entry: string
+  engine: LatexEngine
+  status: LatexBuildStatus
+  createdAt: string
+  startedAt?: string
+  completedAt?: string
+  durationMs?: number
+  exitCode?: number | null
+  error?: string
+  pdfAvailable: boolean
+  synctexAvailable: boolean
+  diagnostics: LatexDiagnostic[]
+}
+
+export interface LatexBuildLog {
+  id: string
+  log: string
+  diagnostics: LatexDiagnostic[]
+}
+
+export interface LatexSyncTexForwardResult {
+  direction: 'forward'
+  file: string
+  line: number
+  column: number
+  page?: number
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  raw: string
+}
+
+export interface LatexSyncTexBackwardResult {
+  direction: 'backward'
+  page: number
+  x: number
+  y: number
+  file?: string
+  line?: number
+  column?: number
+  raw: string
+}
+
 // ── WebSocket Chat Protocol ──────────────────────────────────────────────────
 
 export type AgentInteractionKind =

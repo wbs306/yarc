@@ -18,6 +18,7 @@ import PdfViewer from '@/components/pdf/PdfViewer.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
 import FileTree from '@/components/files/FileTree.vue'
 import CodeEditor from '@/components/files/CodeEditor.vue'
+import LatexBuildPanel from '@/components/files/LatexBuildPanel.vue'
 import OfficePreview from '@/components/files/OfficePreview.vue'
 import SettingsContent from '@/components/settings/SettingsContent.vue'
 import IeeeJournalBrowser from '@/components/ieee/IeeeJournalBrowser.vue'
@@ -272,10 +273,28 @@ const workspaceImageVersion = computed(() => {
 const workspaceIsOffice = computed(() => isOfficeFile(selectedWorkspaceFile.value))
 const workspaceIsLegacyOffice = computed(() => isLegacyOfficeFile(selectedWorkspaceFile.value))
 const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension === '.pdf')
+const workspaceIsLatex = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension?.toLowerCase() === '.tex')
+const workspaceCanCompileLatex = computed(() => workspaceIsLatex.value && !workspaceIsOfflineCopy.value)
+const latexBuildVisible = ref(false)
+const latexEntryPath = ref('')
+const latexEntryDirectoryPath = computed(() => {
+  const parts = latexEntryPath.value.split('/').filter(Boolean)
+  parts.pop()
+  return parts.join('/')
+})
+const latexSourceFile = computed(() => {
+  const activePath = selectedWorkspacePath.value
+  const root = latexEntryDirectoryPath.value
+  if (root && activePath.startsWith(`${root}/`)) return activePath.slice(root.length + 1)
+  return selectedWorkspaceFile.value?.name || ''
+})
+const latexSourceLine = ref(1)
+const latexSourceColumn = ref(1)
 const workspaceIsMarkdown = computed(() => workspaceLanguage.value === 'markdown')
 const markdownViewMode = ref<MarkdownViewMode>('edit')
 const markdownPreviewRef = ref<HTMLElement | null>(null)
 const workspaceEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
+const latexBuildPanelRef = ref<InstanceType<typeof LatexBuildPanel> | null>(null)
 const markdownSplitLayoutRef = ref<HTMLElement | null>(null)
 const markdownSplitDividerRef = ref<HTMLElement | null>(null)
 const markdownPreviewContent = ref('')
@@ -978,6 +997,8 @@ const removeWorkspacePathLocally = (path: string) => {
 
 const clearWorkspaceEditor = () => {
   currentLiveClient.value = null
+  latexBuildVisible.value = false
+  latexEntryPath.value = ''
   workspaceContent.value = ''
   workspaceSavedContent.value = ''
   workspaceLanguage.value = 'plaintext'
@@ -1262,7 +1283,16 @@ const selectWorkspaceFile = async (node: FileNode) => {
   if (selectedWorkspacePath.value && selectedWorkspacePath.value !== node.path && !(await prepareWorkspaceSwitch())) return
   if (selectedWorkspacePath.value && selectedWorkspacePath.value === node.path) snapshotCurrentWorkspaceTab()
 
+  const nodeIsLatex = node.extension?.toLowerCase() === '.tex' || node.name.toLowerCase().endsWith('.tex')
+  // Once a LaTeX build is open, keep the compiled entry/PDF mounted while
+  // switching between source `.tex` files. SyncTeX may legitimately navigate
+  // from main.tex to an included file, and unmounting the panel here would
+  // discard the current build result before the target cursor is applied.
+  const keepLatexBuild = latexBuildVisible.value && nodeIsLatex && !!latexEntryPath.value
+
   selectedWorkspaceFile.value = node
+  latexBuildVisible.value = keepLatexBuild
+  if (!keepLatexBuild) latexEntryPath.value = ''
   touchWorkspaceFile(node)
   localStorage.setItem('yarc_workspace_file', node.path)
   filesError.value = ''
@@ -1377,6 +1407,78 @@ const saveWorkspaceFile = async () => {
   } finally {
     workspaceSaving.value = false
   }
+}
+
+const openLatexBuild = async () => {
+  const file = selectedWorkspaceFile.value
+  if (!file || !workspaceIsLatex.value) return
+  if (workspaceIsOfflineCopy.value) {
+    filesError.value = '当前处于离线模式，恢复连接后才能编译 LaTeX'
+    return
+  }
+
+  const cursor = workspaceEditorRef.value?.getCursorPosition()
+  if (workspaceDirty.value) {
+    await saveWorkspaceFile()
+    if (workspaceDirty.value) return
+  }
+  latexEntryPath.value = file.path
+  latexSourceLine.value = cursor?.line || 1
+  latexSourceColumn.value = cursor?.column || 1
+  filesError.value = ''
+  latexBuildVisible.value = true
+  await nextTick()
+  void latexBuildPanelRef.value?.startBuild()
+}
+
+const onWorkspaceEditorCursor = (line: number, column: number) => {
+  if (!workspaceIsLatex.value) return
+  latexSourceLine.value = Math.max(1, Math.round(line))
+  latexSourceColumn.value = Math.max(1, Math.round(column))
+}
+
+type LatexSourcePosition = { file: string; line?: number; column?: number }
+
+const openLatexSourcePosition = async (position: LatexSourcePosition) => {
+  const entryPath = latexEntryPath.value
+  if (!entryPath) return
+  const sourceFile = normalizeWorkspaceFilePath(position.file)
+    .split('/')
+    .filter((segment) => segment && segment !== '.')
+    .join('/')
+  if (!sourceFile || sourceFile.split('/').some((segment) => segment === '..')) {
+    filesError.value = 'SyncTeX 返回了无效的源文件路径'
+    return
+  }
+
+  const rootParts = entryPath.split('/').filter(Boolean)
+  rootParts.pop()
+  const targetPath = joinWorkspacePath(rootParts.join('/'), sourceFile)
+  try {
+    filesError.value = ''
+    const node = await ensureWorkspaceNodeLoaded(targetPath)
+    if (!node || node.type !== 'file') {
+      filesError.value = `SyncTeX 源文件不存在：${targetPath}`
+      return
+    }
+    await selectWorkspaceFile(node)
+    // Keep the compiled main entry independent from the source file opened by
+    // SyncTeX. Selecting intro.tex must not turn it into a new build entry.
+    latexEntryPath.value = entryPath
+    await nextTick()
+    latexBuildVisible.value = true
+    workspaceEditorRef.value?.setCursorPosition(position.line || 1, position.column || 1)
+  } catch (err) {
+    filesError.value = (err as Error).message || '无法打开 SyncTeX 源文件'
+  }
+}
+
+const toggleLatexBuild = async () => {
+  if (latexBuildVisible.value) {
+    latexBuildVisible.value = false
+    return
+  }
+  await openLatexBuild()
 }
 
 const resolveCurrentLiveConflict = async (strategy: 'use-live' | 'use-disk') => {
@@ -4082,6 +4184,15 @@ const showSearchPaperPopup = (paper: any) => {
                   </button>
                 </template>
                 <button
+                  v-if="workspaceIsLatex && !workspaceContentLoading"
+                  class="latex-compile-workspace-btn"
+                  :disabled="!workspaceCanCompileLatex"
+                  :title="latexBuildVisible ? '返回 LaTeX 编辑器' : '编译当前 LaTeX 文件'"
+                  @click="toggleLatexBuild"
+                >
+                  {{ latexBuildVisible ? '返回编辑器' : '编译 LaTeX' }}
+                </button>
+                <button
                   v-if="selectedWorkspaceFile.type === 'file' && !workspaceCanEdit"
                   class="open-system-btn"
                   :disabled="workspaceOpeningSystem"
@@ -4098,7 +4209,7 @@ const showSearchPaperPopup = (paper: any) => {
               <p>当前目录：{{ selectedWorkspaceFile.path || 'data/' }}</p>
             </div>
 
-            <div v-else-if="workspaceContentLoading" class="workspace-empty compact">正在读取文件…</div>
+            <div v-else-if="workspaceContentLoading && !latexBuildVisible" class="workspace-empty compact">正在读取文件…</div>
 
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
               <div v-if="workspaceIsOfflineCopy" class="workspace-offline-notice">
@@ -4143,6 +4254,7 @@ const showSearchPaperPopup = (paper: any) => {
                   {
                     'workspace-editor-content-split': markdownIsSplit,
                     'workspace-editor-content-editor-right': markdownIsSplit && !markdownSplitEditorOnLeft,
+                    'workspace-latex-split': workspaceIsLatex && latexBuildVisible,
                   },
                 ]"
                 :style="markdownIsSplit ? markdownSplitLayoutStyle : undefined"
@@ -4238,6 +4350,7 @@ const showSearchPaperPopup = (paper: any) => {
                 class="workspace-code-editor"
                 @save="saveWorkspaceFile"
                 @scroll="onMarkdownEditorScroll"
+                @cursor="onWorkspaceEditorCursor"
               >
                 <template #statusbar="{ line, column, selected, selectedWords }">
                   <footer class="workspace-status-bar">
@@ -4251,6 +4364,19 @@ const showSearchPaperPopup = (paper: any) => {
                   </footer>
                 </template>
               </CodeEditor>
+              <LatexBuildPanel
+                v-if="latexBuildVisible"
+                ref="latexBuildPanelRef"
+                class="workspace-latex-preview-pane"
+                :auto-start="false"
+                :path="latexEntryPath || selectedWorkspaceFile.path"
+                :name="latexEntryPath.split('/').pop() || selectedWorkspaceFile.name"
+                :source-file="latexSourceFile"
+                :source-line="latexSourceLine"
+                :source-column="latexSourceColumn"
+                @close="latexBuildVisible = false"
+                @open-source="openLatexSourcePosition"
+              />
                 </div>
               </div>
 
@@ -5237,6 +5363,18 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .workspace-offline-tree-note { color: var(--color-warning); }
 .workspace-text-editor-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
+.latex-compile-workspace-btn {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid rgba(var(--color-primary-rgb), 0.42);
+  border-radius: 8px;
+  background: rgba(var(--color-primary-rgb), 0.10);
+  color: var(--color-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.latex-compile-workspace-btn:hover:not(:disabled) { background: rgba(var(--color-primary-rgb), 0.18); }
+.latex-compile-workspace-btn:disabled { cursor: not-allowed; opacity: 0.5; }
 .workspace-editor-content {
   flex: 1;
   min-width: 0;
@@ -5266,6 +5404,21 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .workspace-editor-content-editor-right > .workspace-code-editor { order: 3; }
 .workspace-editor-content-editor-right > .workspace-md-preview-shell { order: 1; }
+.workspace-latex-split {
+  flex-direction: row;
+  align-items: stretch;
+}
+.workspace-latex-split > .workspace-code-editor,
+.workspace-latex-split > .workspace-latex-preview-pane {
+  width: 50%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+}
+.workspace-latex-split > .workspace-latex-preview-pane {
+  border-left: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+}
 .workspace-status-bar {
   display: flex;
   align-items: center;
@@ -6436,6 +6589,19 @@ const showSearchPaperPopup = (paper: any) => {
 }
 
 /* ── Responsive ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .workspace-latex-split { flex-direction: column; }
+  .workspace-latex-split > .workspace-code-editor,
+  .workspace-latex-split > .workspace-latex-preview-pane {
+    width: 100%;
+    flex: 1 1 50%;
+  }
+  .workspace-latex-split > .workspace-latex-preview-pane {
+    border-top: 1px solid var(--color-border);
+    border-left: none;
+  }
+}
 
 @media (max-width: 768px) {
   .app-header {

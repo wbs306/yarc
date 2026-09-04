@@ -38,6 +38,22 @@ export const config = {
   piRuntimeJournalRetentionMs: parseInt(process.env.PI_RUNTIME_JOURNAL_RETENTION_MS || '86400000'),
   piExtensionUiTimeoutMs: parseInt(process.env.PI_EXTENSION_UI_TIMEOUT_MS || '300000'),
   piSessionDurability: process.env.PI_SESSION_DURABILITY === 'normal' ? 'normal' : 'strict',
+  // LaTeX builds run in a short-lived Docker container. Keep the feature
+  // enabled by default for local installations, while allowing deployments
+  // without Docker to turn it off explicitly.
+  latexEnabled: process.env.LATEX_ENABLED !== 'false',
+  latexDockerCommand: process.env.LATEX_DOCKER_COMMAND || 'docker',
+  latexDockerImage: process.env.LATEX_DOCKER_IMAGE || 'texlive/texlive:latest',
+  latexBuildTimeoutMs: parseInt(process.env.LATEX_BUILD_TIMEOUT_MS || '120000'),
+  latexMaxConcurrent: parseInt(process.env.LATEX_MAX_CONCURRENT || '2'),
+  latexMaxSourceBytes: parseInt(process.env.LATEX_MAX_SOURCE_BYTES || String(100 * 1024 * 1024)),
+  latexMaxSourceFiles: parseInt(process.env.LATEX_MAX_SOURCE_FILES || '2000'),
+  latexMaxLogBytes: parseInt(process.env.LATEX_MAX_LOG_BYTES || String(4 * 1024 * 1024)),
+  latexMemoryMb: parseInt(process.env.LATEX_MEMORY_MB || '1024'),
+  latexCpus: process.env.LATEX_CPUS || '2',
+  latexPidsLimit: parseInt(process.env.LATEX_PIDS_LIMIT || '128'),
+  latexTmpfsMb: parseInt(process.env.LATEX_TMPFS_MB || '256'),
+  latexOutputDir: resolve(dataDir, process.env.LATEX_OUTPUT_DIR || '.latex-builds'),
   maxFileSize: 50 * 1024 * 1024, // 50MB
   pdfCacheDays: parseInt(process.env.PDF_CACHE_DAYS || '2'),
   cors: {

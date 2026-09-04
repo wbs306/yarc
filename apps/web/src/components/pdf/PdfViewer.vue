@@ -31,11 +31,13 @@ const props = defineProps<{
   sourceUrl?: string
   documentId?: string
   title?: string
+  sourceHighlight?: { page: number; x: number; y: number; width?: number; height?: number } | null
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   (e: 'back'): void
   (e: 'showDetails'): void
+  (e: 'pdf-position', position: { page: number; x: number; y: number }): void
 }>()
 
 // ── 状态 ─────────────────────────────────────────────────────────────────────
@@ -47,6 +49,7 @@ const activeDocId = ref('')
 const currentPage = ref(1)
 const totalPages = ref(0)
 const pendingGoToPage = ref<number | null>(null)
+const pendingGoToPosition = ref<{ page: number; x: number; y: number } | null>(null)
 const loadingDocument = ref(false)
 const documentError = ref('')
 const flashingNoteId = ref('')
@@ -778,12 +781,40 @@ const goToPage = (page: number) => {
   }
   const target = Math.min(totalPages.value, requested)
   pendingGoToPage.value = null
+  pendingGoToPosition.value = null
   currentPage.value = target
   getDocScroll()?.scrollToPage?.({ pageNumber: target, behavior: 'smooth', alignY: 0 })
 }
 
+const goToPosition = (page: number, x: number, y: number) => {
+  if (!Number.isFinite(page) || !Number.isFinite(x) || !Number.isFinite(y)) return
+  const requested = Math.max(1, Math.round(page))
+  const position = { page: requested, x, y }
+  if (!totalPages.value) {
+    pendingGoToPosition.value = position
+    return
+  }
+  const target = Math.min(totalPages.value, requested)
+  pendingGoToPage.value = null
+  pendingGoToPosition.value = null
+  currentPage.value = target
+  getDocScroll()?.scrollToPage?.({
+    pageNumber: target,
+    pageCoordinates: { x, y },
+    behavior: 'smooth',
+    alignX: 50,
+    alignY: 50,
+  })
+}
+
 watch(totalPages, (pages) => {
-  if (pages > 0 && pendingGoToPage.value) goToPage(pendingGoToPage.value)
+  if (pages <= 0) return
+  if (pendingGoToPosition.value) {
+    const position = pendingGoToPosition.value
+    goToPosition(position.page, position.x, position.y)
+  } else if (pendingGoToPage.value) {
+    goToPage(pendingGoToPage.value)
+  }
 })
 
 const previewToolbarZoom = (factor: number) => {
@@ -1326,6 +1357,19 @@ const getNoteTarget = (note: Note) => {
   }
 }
 
+const handlePdfDoubleClick = (page: { pageIndex: number; width: number; height: number }, event: MouseEvent) => {
+  const element = event.currentTarget as HTMLElement | null
+  if (!element || !page.width || !page.height) return
+  const rect = element.getBoundingClientRect()
+  if (!rect.width || !rect.height) return
+
+  emit('pdf-position', {
+    page: page.pageIndex + 1,
+    x: Math.max(0, Math.min(page.width, ((event.clientX - rect.left) / rect.width) * page.width)),
+    y: Math.max(0, Math.min(page.height, ((event.clientY - rect.top) / rect.height) * page.height)),
+  })
+}
+
 const scrollToNote = (note: Note) => {
   const target = getNoteTarget(note)
   if (!target) return
@@ -1346,7 +1390,7 @@ const scrollToNote = (note: Note) => {
   }, 1400)
 }
 
-defineExpose({ scrollToNote, goToPage })
+defineExpose({ scrollToNote, goToPage, goToPosition })
 </script>
 
 <template>
@@ -1462,7 +1506,22 @@ defineExpose({ scrollToNote, goToPage })
                     <ZoomGestureWrapper :documentId="activeDocumentId" :enableWheel="false" class="zoom-gesture">
                       <Scroller :documentId="activeDocumentId" class="pdf-scroller">
                         <template #default="{ page }">
-                          <div class="pdf-page" :style="{ width: page.width + 'px', height: page.height + 'px' }">
+                          <div
+                            class="pdf-page"
+                            :style="{ width: page.width + 'px', height: page.height + 'px' }"
+                            @dblclick="handlePdfDoubleClick(page, $event)"
+                          >
+                            <div
+                              v-if="sourceHighlight && sourceHighlight.page === page.pageIndex + 1"
+                              class="source-position-highlight"
+                              :style="{
+                                left: `${sourceHighlight.x}px`,
+                                top: `${sourceHighlight.y}px`,
+                                width: `${Math.max(1, sourceHighlight.width || 1)}px`,
+                                height: `${Math.max(4, sourceHighlight.height || 4)}px`,
+                              }"
+                              aria-hidden="true"
+                            />
                             <PagePointerProvider
                               :documentId="activeDocumentId"
                               :page-index="page.pageIndex"
@@ -1750,6 +1809,15 @@ defineExpose({ scrollToNote, goToPage })
 }
 .pdf-layer { pointer-events: none; }
 .pdf-pointer-layer { -webkit-touch-callout: none; user-select: none; }
+.source-position-highlight {
+  position: absolute;
+  z-index: 8;
+  border: 1px solid rgba(var(--color-primary-rgb), 0.72);
+  border-radius: 3px;
+  background: rgba(var(--color-primary-rgb), 0.18);
+  box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.08);
+  pointer-events: none;
+}
 .note-highlight-layer { position: absolute; inset: 0; pointer-events: none; z-index: 6; }
 .note-highlight {
   position: absolute;

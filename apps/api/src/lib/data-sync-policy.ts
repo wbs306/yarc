@@ -12,6 +12,11 @@ const IGNORED_SEGMENT_NAMES = new Set([
   '.ruff_cache',
 ])
 
+const IGNORED_GENERATED_PREFIXES = [
+  '.latex-builds',
+  '.yarc/latex-builds',
+  'generated/latex',
+] as const
 const IGNORED_PI_PREFIXES = [
   '.pi/agent/sessions',
   '.pi/agent/subagent-results',
@@ -69,6 +74,9 @@ export const DEFAULT_DATA_SYNC_EXCLUDE_PATTERNS = [
   '.pi/agent/sessions',
   '.pi/agent/subagent-results',
   '.pi/agent/runtime-streams',
+  '.latex-builds',
+  '.yarc/latex-builds',
+  'generated/latex',
   '.pi/agent/auth.json',
   '.pi/agent/models.json',
   '.pi/agent/run-history.jsonl',
@@ -90,6 +98,7 @@ export const isDefaultIgnoredDataPath = (value: string) => {
   const segments = path.split('/')
   if (segments.some(segment => IGNORED_SEGMENT_NAMES.has(segment))) return true
   if (IGNORED_EXACT_PATHS.has(path)) return true
+  if (IGNORED_GENERATED_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}/`))) return true
   if (IGNORED_PI_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}/`))) return true
 
   const name = basename(path)

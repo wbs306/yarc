@@ -26,6 +26,9 @@ describe('data sync path policy', () => {
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/npm/node_modules/pkg/index.js'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/.venv/bin/python'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/.cache/index.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('.latex-builds/job/out/main.synctex.gz'), true)
+    assert.equal(isDefaultIgnoredDataPath('.yarc/latex-builds/job/out/main.synctex.gz'), true)
+    assert.equal(isDefaultIgnoredDataPath('generated/latex/job/out/main.pdf'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/src/index.ts'), false)
     assert.equal(isPiRuntimeResourcePath('AGENTS.md'), true)
     assert.equal(isPiRuntimeResourcePath('.pi/agent/settings.json'), true)
@@ -70,6 +73,28 @@ describe('DataChangeWatcher', () => {
       await mkdir(join(directory, 'works'), { recursive: true })
       await writeFile(join(directory, 'works', 'external.md'), 'changed')
       await waitFor(() => events.some(event => event.source === 'filesystem' && event.path === 'works/external.md'))
+    } finally {
+      watcher.stop()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores LaTeX build snapshots and artifacts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yarc-data-watcher-'))
+    const watcher = new DataChangeWatcher(directory)
+    const events: DataChangeEvent[] = []
+    watcher.subscribe(event => { events.push(event) })
+
+    try {
+      await watcher.start()
+      await mkdir(join(directory, '.latex-builds', 'job', 'out'), { recursive: true })
+      await writeFile(join(directory, '.latex-builds', 'job', 'out', 'main.pdf'), 'generated')
+      await new Promise(resolve => setTimeout(resolve, 300))
+      assert.equal(events.some(event => event.path.startsWith('.latex-builds/')), false)
+
+      await mkdir(join(directory, 'works'), { recursive: true })
+      await writeFile(join(directory, 'works', 'source.tex'), 'user source')
+      await waitFor(() => events.some(event => event.source === 'filesystem' && event.path === 'works/source.tex'))
     } finally {
       watcher.stop()
       await rm(directory, { recursive: true, force: true })

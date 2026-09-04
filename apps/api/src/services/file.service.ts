@@ -81,6 +81,7 @@ export class FileService {
   private isExcludedPath(filePath: string): boolean {
     const relPath = this.normalizeRelativePath(filePath)
     if (!relPath) return false
+    if (relPath === 'generated/latex' || relPath.startsWith('generated/latex/')) return true
     const name = basename(relPath)
     return EXCLUDED_NAMES.has(name)
   }
@@ -494,6 +495,32 @@ export class FileService {
     if (!node) throw new AppError('UPLOAD_FAILED', 'Failed to upload file', 500)
     this.emitFilesChanged('upload', node.path)
     return node
+  }
+
+  async getLatexCompileContext(filePath: string): Promise<{
+    fullPath: string
+    sourceRoot: string
+    entryName: string
+    relativePath: string
+  }> {
+    const relativePath = this.normalizeRelativePath(filePath)
+    if (this.extensionFor(relativePath) !== '.tex') {
+      throw new AppError('UNSUPPORTED_FILE', 'Only .tex files can be compiled', 400)
+    }
+    if (this.isProtectedPath(relativePath)) {
+      throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
+    }
+
+    const fullPath = this.resolvePath(relativePath)
+    const entryStat = await this.assertExists(fullPath)
+    if (!entryStat.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
+
+    return {
+      fullPath,
+      sourceRoot: dirname(fullPath),
+      entryName: basename(fullPath),
+      relativePath,
+    }
   }
 
   async getFileForDownload(filePath: string): Promise<{ fullPath: string; size: number; mime: string; name: string }> {

@@ -56,6 +56,8 @@ Agent 的普通文件读写以 `data/` 工作区为根；论文内部数据和�
 - 拖放上传与拖放移动，图片预览，以及使用系统应用打开不适合网页编辑的文件
 - 基于 CodeMirror 的常见文本和代码编辑：TypeScript/JavaScript/Vue、JSON/YAML、Markdown、Python、CSS/HTML/XML、SQL、Shell、LaTeX 等
 - 语法高亮、行号、代码折叠、自动缩进、换行、查找/替换、选中文本包裹和编辑器显示设置
+- 选中 `.tex` 文件后可使用 Docker 中的 TeX Live 单文件编译，入口文件所在目录中的相对引用会一并参与构建，并在内置 PDF 阅读器中双栏查看源码与编译结果，支持源码行与 PDF 位置双向定位，同时查看日志和 SyncTeX 状态
+- LaTeX 编辑器提供命令、环境、宏包、标签和 BibTeX 键补全；使用 `Ctrl/Cmd+Space` 可强制打开补全
 - Markdown 预览、数学公式渲染，以及 DOCX/XLSX/PPTX 的 Office 预览（需要 `officecli`）
 - 基于 WebSocket + Yjs 的实时文件会话、自动保存、磁盘变更监听、冲突提示与解决、离线草稿和本地缓存
 
@@ -78,7 +80,8 @@ Agent 的普通文件读写以 `data/` 工作区为根；论文内部数据和�
 - 数据库：PostgreSQL + pgvector + Prisma
 - PDF 解析与向量化：MinerU + Embedding API
 - Office 预览：`officecli`（可选）
-- 运行方式：本地 Node.js 运行应用，Docker 只启动 PostgreSQL/pgvector
+- LaTeX 编译：TeX Live Docker（按需配置，API 为每次构建启动隔离容器）
+- 运行方式：本地 Node.js 运行应用，Docker 提供 PostgreSQL/pgvector 数据库和可选的 LaTeX 编译环境
 
 ## 快速开始
 
@@ -122,6 +125,8 @@ pnpm dev
 ```
 
 访问：<http://localhost:3000>
+
+当前 API 不会自动拉取 TeX Live 镜像，请先准备 `LATEX_DOCKER_IMAGE` 指定的镜像。
 
 也可以用一个命令启动数据库和开发服务：
 

@@ -1,5 +1,8 @@
 import type {
   IeeeJournalBrowserPreferences,
+  LatexBuild,
+  LatexBuildLog,
+  LatexEngine,
   IeeeSearchMode,
   IeeeSearchResponse,
   IeeeSearchSort,
@@ -523,6 +526,32 @@ export function useApi() {
 
     getOfficeView: (path: string, mode: OfficeViewMode) =>
       request<{ mode: OfficeViewMode; content: string }>('/files/office/view', { params: { path, mode } }),
+
+    // LaTeX builds
+    compileLatex: (path: string, engine: LatexEngine = 'xelatex') =>
+      request<{ build: LatexBuild }>('/latex/builds', {
+        method: 'POST',
+        body: JSON.stringify({ path, engine }),
+      }),
+
+    getLatexBuild: (id: string) =>
+      request<{ build: LatexBuild }>(`/latex/builds/${encodeURIComponent(id)}`),
+
+    getLatexBuildLog: (id: string) =>
+      request<LatexBuildLog>(`/latex/builds/${encodeURIComponent(id)}/log`),
+
+    cancelLatexBuild: (id: string) =>
+      request<{ build: LatexBuild }>(`/latex/builds/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+
+    getLatexPdfUrl: (id: string, version?: string | number) => {
+      const versionParam = version === undefined || version === '' ? '' : `?v=${encodeURIComponent(String(version))}`
+      return `${API_BASE}/latex/builds/${encodeURIComponent(id)}/pdf${versionParam}`
+    },
+
+    getLatexSyncTex: (id: string, params: Record<string, string | number>) =>
+      request<Record<string, unknown>>(`/latex/builds/${encodeURIComponent(id)}/synctex`, {
+        params: Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)])),
+      }),
 
     // Settings
     getSettings: () => request<{ settings: Record<string, any> }>('/settings'),
