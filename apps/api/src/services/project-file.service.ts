@@ -21,10 +21,31 @@ const TEXT_EXTENSIONS = new Set([
   '.tex', '.bib', '.sty', '.cls', '.bst', '.txt', '.md', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.ini', '.cfg',
   '.py', '.r', '.jl', '.m', '.c', '.h', '.cc', '.cpp', '.hpp', '.ts', '.tsx', '.js', '.jsx', '.vue', '.css', '.scss', '.html', '.sh', '.zsh', '.fish', '.sql', '.csv', '.tsv',
 ])
+const TEXT_FILE_NAMES = new Set(['.gitignore', '.gitattributes', 'Dockerfile', 'Makefile'])
 const MIME: Record<string, string> = {
   '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
   '.tex': 'text/x-tex; charset=utf-8', '.bib': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.txt': 'text/plain; charset=utf-8',
 }
+
+const isSensitiveProjectPath = (path: string) => {
+  const relative = normalizeProjectRelativePath(path)
+  if (!relative) return false
+  const segments = relative.split('/')
+  const name = segments[segments.length - 1] || ''
+  if (name !== '.env.example' && (name === '.env' || name.startsWith('.env.'))) return true
+  if (relative === '.pi/agent/auth.json' || relative.startsWith('.pi/agent/auth.json/')) return true
+  if (relative === '.pi/agent/models.json' || relative.startsWith('.pi/agent/models.json/')) return true
+  return relative.endsWith('.lock') || relative.includes('.lock/')
+}
+
+const assertProjectExposedPath = (path = '') => {
+  const relative = normalizeProjectRelativePath(path)
+  if (isSensitiveProjectPath(relative)) throw new AppError('FORBIDDEN', 'Access denied', 403)
+  return relative
+}
+
+const isEditableText = (path: string, size: number) =>
+  (TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || TEXT_FILE_NAMES.has(basename(path))) && size <= 2 * 1024 * 1024
 
 export class ProjectFileService {
   private emit(projectId: string, action: string, path?: string, live = false) {
@@ -32,7 +53,8 @@ export class ProjectFileService {
   }
 
   async getFileTree(projectId: string, path = ''): Promise<ProjectFileNode[]> {
-    const resolved = await resolveProjectPath(projectId, path)
+    const relativePath = assertProjectExposedPath(path)
+    const resolved = await resolveProjectPath(projectId, relativePath)
     const info = await lstat(resolved.fullPath)
     if (info.isSymbolicLink()) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Symlinks are not exposed by Project File API', 400)
     if (info.isFile()) return [await this.node(projectId, resolved.relativePath, resolved.fullPath, info)]
@@ -42,6 +64,7 @@ export class ProjectFileService {
     for (const entry of entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))) {
       if (HIDDEN_NAMES.has(entry.name)) continue
       const relative = normalizeProjectRelativePath([resolved.relativePath, entry.name].filter(Boolean).join('/'))
+      if (isSensitiveProjectPath(relative)) continue
       try {
         const child = await resolveProjectPath(projectId, relative)
         const childInfo = await lstat(child.fullPath)
@@ -67,10 +90,11 @@ export class ProjectFileService {
   }
 
   async getFileContent(projectId: string, path: string) {
-    const resolved = await resolveProjectPath(projectId, path)
+    const relativePath = assertProjectExposedPath(path)
+    const resolved = await resolveProjectPath(projectId, relativePath)
     const info = await lstat(resolved.fullPath)
     if (!info.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
-    if (!TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || info.size > 2 * 1024 * 1024) {
+    if (!isEditableText(resolved.relativePath, info.size)) {
       throw new AppError('UNSUPPORTED_FILE', 'Only supported text files up to 2MB are editable', 400)
     }
     const live = await projectLiveFileManager.get(projectId)
@@ -81,9 +105,13 @@ export class ProjectFileService {
   }
 
   async saveFileContent(projectId: string, path: string, content: string) {
-    const resolved = await resolveProjectPath(projectId, path)
+    const relativePath = assertProjectExposedPath(path)
+    const resolved = await resolveProjectPath(projectId, relativePath)
     const info = await lstat(resolved.fullPath)
     if (!info.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
+    if (!isEditableText(resolved.relativePath, Buffer.byteLength(content, 'utf-8'))) {
+      throw new AppError('UNSUPPORTED_FILE', 'Only supported text files up to 2MB are editable', 400)
+    }
     await projectHistoryService.ensureBaseline(projectId, resolved.relativePath)
 
     const live = await projectLiveFileManager.get(projectId)
@@ -102,13 +130,15 @@ export class ProjectFileService {
   }
 
   async createFile(projectId: string, path: string, content = '') {
-    const resolved = await resolveProjectPath(projectId, path, { allowMissing: true })
+    const relativePath = assertProjectExposedPath(path)
+    if (!relativePath) throw new AppError('MISSING_PATH', 'Path is required', 400)
+    const resolved = await resolveProjectPath(projectId, relativePath, { allowMissing: true })
     try { await lstat(resolved.fullPath); throw new AppError('ALREADY_EXISTS', 'Path already exists', 409) } catch (error: any) {
       if (error instanceof AppError) throw error
       if (error?.code !== 'ENOENT') throw error
     }
     await mkdir(dirname(resolved.fullPath), { recursive: true })
-    await projectHistoryService.ensureBaseline(projectId, path, { missing: true })
+    await projectHistoryService.ensureBaseline(projectId, relativePath, { missing: true })
     await writeFile(resolved.fullPath, content, { flag: 'wx' })
     await projectHistoryService.trackChange(projectId, resolved.relativePath, 'autosave')
     this.emit(projectId, 'create', resolved.relativePath)
@@ -116,15 +146,20 @@ export class ProjectFileService {
   }
 
   async createDirectory(projectId: string, path: string) {
-    const resolved = await resolveProjectPath(projectId, path, { allowMissing: true })
+    const relativePath = assertProjectExposedPath(path)
+    if (!relativePath) throw new AppError('MISSING_PATH', 'Path is required', 400)
+    const resolved = await resolveProjectPath(projectId, relativePath, { allowMissing: true })
     await mkdir(resolved.fullPath, { recursive: false })
     this.emit(projectId, 'mkdir', resolved.relativePath)
     return { path: resolved.relativePath }
   }
 
   async renamePath(projectId: string, from: string, to: string) {
-    const source = await resolveProjectPath(projectId, from)
-    const target = await resolveProjectPath(projectId, to, { allowMissing: true })
+    const sourcePath = assertProjectExposedPath(from)
+    const targetPath = assertProjectExposedPath(to)
+    if (!sourcePath || !targetPath) throw new AppError('VALIDATION_ERROR', 'Source and target paths are required', 400)
+    const source = await resolveProjectPath(projectId, sourcePath)
+    const target = await resolveProjectPath(projectId, targetPath, { allowMissing: true })
     const info = await lstat(source.fullPath)
     await projectLiveFileManager.flushProject(projectId, source.relativePath)
 
@@ -155,7 +190,8 @@ export class ProjectFileService {
   }
 
   async deletePath(projectId: string, path: string) {
-    const resolved = await resolveProjectPath(projectId, path)
+    const relativePath = assertProjectExposedPath(path)
+    const resolved = await resolveProjectPath(projectId, relativePath)
     if (!resolved.relativePath) throw new AppError('PROTECTED_PATH', 'Project root cannot be deleted through File API', 403)
     const info = await lstat(resolved.fullPath)
     await projectLiveFileManager.flushProject(projectId, resolved.relativePath)
@@ -180,8 +216,9 @@ export class ProjectFileService {
   }
 
   async upload(projectId: string, directory: string, file: File) {
+    const safeDirectory = assertProjectExposedPath(directory)
     const name = basename(file.name).replace(/[\\/]/g, '_')
-    const relative = normalizeProjectRelativePath([directory, name].filter(Boolean).join('/'))
+    const relative = assertProjectExposedPath([safeDirectory, name].filter(Boolean).join('/'))
     const resolved = await resolveProjectPath(projectId, relative, { allowMissing: true })
     try { await lstat(resolved.fullPath); throw new AppError('ALREADY_EXISTS', 'File already exists', 409) } catch (error: any) {
       if (error instanceof AppError) throw error
@@ -196,14 +233,16 @@ export class ProjectFileService {
   }
 
   async getDownload(projectId: string, path: string) {
-    const resolved = await resolveProjectPath(projectId, path)
+    const relativePath = assertProjectExposedPath(path)
+    const resolved = await resolveProjectPath(projectId, relativePath)
     const info = await stat(resolved.fullPath)
     if (!info.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
-    return { path: resolved.fullPath, name: basename(path), size: info.size, mime: MIME[extname(path).toLowerCase()] || 'application/octet-stream', stream: createReadStream(resolved.fullPath) }
+    return { path: resolved.fullPath, name: basename(relativePath), size: info.size, mime: MIME[extname(relativePath).toLowerCase()] || 'application/octet-stream', stream: createReadStream(resolved.fullPath) }
   }
 
   async getAbsolutePath(projectId: string, path: string, allowMissing = false) {
-    return (await resolveProjectPath(projectId, path, { allowMissing })).fullPath
+    const relativePath = assertProjectExposedPath(path)
+    return (await resolveProjectPath(projectId, relativePath, { allowMissing })).fullPath
   }
 
   async getProjectRoot(projectId: string) {
