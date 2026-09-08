@@ -129,6 +129,10 @@ export function useProjectLiveFiles() {
       if (origin === 'server') return
       localDirty = true
       dirty.value = true
+      // When reconnect detects diverged local/server state, keep editing the
+      // local buffer but do not stream those updates into the server document
+      // until the user explicitly chooses which side wins.
+      if (pendingServerContent !== null) return
       if (!send({ type: 'update', update: toBase64(update) })) scheduleReconnect()
     })
 
@@ -142,10 +146,12 @@ export function useProjectLiveFiles() {
         serverDoc.destroy()
         const nextEpoch = String(message.sessionEpoch || message.status?.sessionEpoch || '')
         const changedEpoch = !!sessionEpoch && !!nextEpoch && sessionEpoch !== nextEpoch
-        if (localDirty && changedEpoch && serverContent !== ytext.toString()) {
+        if (localDirty && serverContent !== ytext.toString()) {
           pendingServerContent = serverContent
           conflict.value = true
-          error.value = '工作区已切换或恢复，当前本地修改需要先选择保留本地或使用磁盘版本。'
+          error.value = changedEpoch
+            ? '工作区已切换或恢复，当前本地修改需要先选择保留本地或使用磁盘版本。'
+            : '重连后检测到服务器内容与未同步的本地修改不同，请先选择保留本地或使用磁盘版本。'
         } else {
           replaceText(serverContent, 'server')
           localDirty = false
@@ -160,7 +166,7 @@ export function useProjectLiveFiles() {
         return
       }
       if (message.type === 'update' && typeof message.update === 'string') {
-        Y.applyUpdate(ydoc, fromBase64(message.update), 'server')
+        if (pendingServerContent === null) Y.applyUpdate(ydoc, fromBase64(message.update), 'server')
         return
       }
       if (message.type === 'status') {
@@ -241,6 +247,7 @@ export function useProjectLiveFiles() {
       status,
       syncContent(next) { replaceText(next, 'client') },
       async flush() {
+        if (pendingServerContent !== null) throw new Error('请先解决重连后的文件冲突')
         saving.value = true
         try { await operation({ type: 'flush' }) }
         finally { saving.value = false }
@@ -248,19 +255,25 @@ export function useProjectLiveFiles() {
       async resolveConflict(strategy) {
         if (pendingServerContent !== null) {
           if (strategy === 'use-disk') {
-            replaceText(pendingServerContent, 'server')
+            const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/files/content?path=${encodeURIComponent(path)}`, { credentials: 'include' })
+            const data = await response.json().catch(() => ({}))
+            if (!response.ok || typeof data.content !== 'string') throw new Error(data?.error?.message || '无法读取服务器版本')
+            replaceText(data.content, 'server')
+            pendingServerContent = null
             localDirty = false
             dirty.value = false
             conflict.value = false
-            pendingServerContent = null
+            error.value = ''
             return
           }
+          await operation({ type: 'replace-content', content: ytext.toString() })
           pendingServerContent = null
           conflict.value = false
-          await operation({ type: 'replace-content', content: ytext.toString() })
+          error.value = ''
           return
         }
         await operation({ type: 'resolve-conflict', strategy })
+        error.value = ''
       },
       close() {
         if (closed) return
