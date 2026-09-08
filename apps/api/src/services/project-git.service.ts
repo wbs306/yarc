@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { realpath } from 'node:fs/promises'
 import type { ProjectGitBranch, ProjectGitCommit, ProjectGitStatus } from '@yarc/shared'
 import { AppError } from '../lib/errors.js'
+import { sseHub } from '../lib/sse.js'
 import { normalizeProjectRelativePath, resolveProjectRoot } from '../lib/project-path.js'
 import { projectHistoryService } from './project-history.service.js'
 import { projectLiveFileManager } from './project-live-file.service.js'
@@ -142,6 +143,7 @@ export class ProjectGitService {
     await this.run(projectId, ['switch', clean])
     await projectLiveFileManager.resetProjectSessions(projectId, 'git-branch-switch')
     await projectPiContextService.reloadProject(projectId, `git-branch-switch:${clean}`)
+    sseHub.emit({ type: 'project-files-changed', projectId, action: 'git-branch-switch', at: new Date().toISOString() })
     return this.status(projectId)
   }
 
