@@ -76,7 +76,6 @@ export class ProjectHistoryService {
     if (!relative || relative.startsWith('.git/')) return false
     const settings = await this.settings(projectId)
     if (!settings.enabled) return false
-    // Fast path preserves the v1 defaults even if malformed custom globs are supplied.
     const included = settings.include?.length ? matchesAny(relative, settings.include) : DEFAULT_EXTENSIONS.has(extname(relative).toLowerCase())
     return included && !matchesAny(relative, settings.exclude || [])
   }
@@ -187,7 +186,7 @@ export class ProjectHistoryService {
       revisions.push({ projectId, ...snapshot })
     }
     if (!revisions.length && !input.forceBoundary) return null
-    return prisma.projectHistoryCheckpoint.create({
+    const checkpoint = await prisma.projectHistoryCheckpoint.create({
       data: {
         projectId,
         kind: input.kind,
@@ -197,6 +196,8 @@ export class ProjectHistoryService {
       },
       include: { revisions: true },
     })
+    void this.runRetentionGc(projectId).catch(error => console.warn('[ProjectHistory] retention failed:', (error as Error).message))
+    return checkpoint
   }
 
   private async walkTracked(projectId: string, relative = ''): Promise<string[]> {
@@ -264,31 +265,48 @@ export class ProjectHistoryService {
 
   async restoreFileRevision(projectId: string, revisionId: string) {
     const revision = await this.getRevision(projectId, revisionId)
+    const { projectLiveFileManager } = await import('./project-live-file.service.js')
+    await projectLiveFileManager.flushProject(projectId, revision.path)
     await this.flushPending(projectId)
-    await this.checkpoint(projectId, { kind: 'pre-restore', paths: [revision.path], metadata: { targetRevisionId: revisionId } })
+    await this.checkpoint(projectId, {
+      kind: 'pre-restore',
+      paths: [revision.path],
+      metadata: { targetRevisionId: revisionId },
+      forceBoundary: true,
+    })
     await this.writeState(projectId, revision.path, revision)
+    await projectLiveFileManager.resetPaths(projectId, [revision.path], 'history-file-restore')
     const restored = await this.checkpoint(projectId, { kind: 'restore', paths: [revision.path], metadata: { targetRevisionId: revisionId }, forceBoundary: true })
     return { path: revision.path, checkpoint: restored }
   }
 
   async restoreWritingCheckpoint(projectId: string, checkpointId: string) {
     const target = await this.getCheckpoint(projectId, checkpointId)
+    const { projectLiveFileManager } = await import('./project-live-file.service.js')
+    await projectLiveFileManager.flushProject(projectId)
     await this.flushPending(projectId)
     const paths = await this.listTrackedPaths(projectId)
     await this.checkpoint(projectId, { kind: 'pre-restore', paths, metadata: { targetCheckpointId: checkpointId }, forceBoundary: true })
 
-    const all = await prisma.projectHistoryRevision.findMany({
-      where: { projectId, checkpoint: { createdAt: { lte: target.createdAt } } },
+    const earlier = await prisma.projectHistoryRevision.findMany({
+      where: { projectId, checkpoint: { createdAt: { lt: target.createdAt } } },
       include: { checkpoint: true },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     })
-    const state = new Map<string, typeof all[number]>()
-    for (const revision of all) state.set(revision.path, revision)
+    const targetRevisions = await prisma.projectHistoryRevision.findMany({
+      where: { projectId, checkpointId },
+      include: { checkpoint: true },
+      orderBy: { id: 'asc' },
+    })
+    const state = new Map<string, (typeof earlier)[number]>()
+    for (const revision of earlier) state.set(revision.path, revision)
+    for (const revision of targetRevisions) state.set(revision.path, revision as (typeof earlier)[number])
     for (const path of paths) {
       const revision = state.get(path)
       if (revision) await this.writeState(projectId, path, revision)
       else await this.writeState(projectId, path, { deleted: true, blobHash: null })
     }
+    await projectLiveFileManager.resetPaths(projectId, paths, 'history-checkpoint-restore')
     const restored = await this.checkpoint(projectId, { kind: 'restore', paths, metadata: { targetCheckpointId: checkpointId }, forceBoundary: true })
     return { checkpoint: restored, restoredPaths: paths }
   }
@@ -305,13 +323,50 @@ export class ProjectHistoryService {
     })
   }
 
+  private async projectStorageBytes(projectId: string) {
+    const revisions = await prisma.projectHistoryRevision.findMany({
+      where: { projectId, blobHash: { not: null } },
+      select: { blobHash: true },
+    })
+    const hashes = [...new Set(revisions.map(item => item.blobHash).filter((value): value is string => !!value))]
+    let total = 0
+    for (const hash of hashes) {
+      try { total += (await stat(this.objectPath(hash))).size } catch {}
+    }
+    return total
+  }
+
+  private async trimProjectStorage(projectId: string, maxStorageMb: number) {
+    const limit = Math.max(1, Number(maxStorageMb || 512)) * 1024 * 1024
+    if (await this.projectStorageBytes(projectId) <= limit) return
+
+    const checkpoints = await prisma.projectHistoryCheckpoint.findMany({
+      where: { projectId, pinned: false },
+      select: { id: true, kind: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    const tiers = [
+      checkpoints.filter(item => item.kind === 'autosave' || item.kind === 'external'),
+      checkpoints.filter(item => item.kind === 'build'),
+      checkpoints.filter(item => !['baseline', 'autosave', 'external', 'build'].includes(item.kind)),
+    ]
+
+    for (const tier of tiers) {
+      for (const checkpoint of tier) {
+        if (await this.projectStorageBytes(projectId) <= limit) return
+        await prisma.projectHistoryCheckpoint.delete({ where: { id: checkpoint.id } })
+      }
+    }
+  }
+
   async runRetentionGc(projectId: string, options: { projectDeleted?: boolean } = {}) {
     if (!options.projectDeleted) {
       const settings = await this.settings(projectId)
       const cutoff = new Date(Date.now() - Math.max(1, Number(settings.retentionDays || 180)) * 86_400_000)
       await prisma.projectHistoryCheckpoint.deleteMany({
-        where: { projectId, pinned: false, kind: 'autosave', createdAt: { lt: cutoff } },
+        where: { projectId, pinned: false, kind: { in: ['autosave', 'external'] }, createdAt: { lt: cutoff } },
       })
+      await this.trimProjectStorage(projectId, Number(settings.maxStorageMb || 512))
     }
     await this.gcObjects()
   }
