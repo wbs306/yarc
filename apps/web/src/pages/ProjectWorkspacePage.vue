@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import CodeEditor from '@/components/files/CodeEditor.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
 import { useProjectsStore } from '@/stores/projects'
@@ -80,6 +80,9 @@ const currentResource = computed(() => selectedPath.value
 watch(() => currentLive.value?.content.value, next => {
   if (typeof next === 'string' && next !== content.value) content.value = next
 })
+watch(() => currentLive.value?.error.value, next => {
+  if (next) error.value = next
+})
 watch(content, next => {
   const live = currentLive.value
   if (live && next !== live.content.value) live.syncContent(next)
@@ -94,20 +97,34 @@ async function loadFiles() {
   files.value = (await json<{ files: FileNode[] }>(`/api/projects/${projectId.value}/files`)).files
 }
 
-async function openFile(path: string) {
-  if (currentLive.value?.dirty.value || currentLive.value?.conflict.value) {
-    if (!window.confirm('当前文件仍有未落盘修改或冲突，仍然切换文件吗？')) return
-    await currentLive.value.flush().catch(() => undefined)
+async function settleCurrentLiveFile() {
+  const live = currentLive.value
+  if (!live) return true
+  if (live.conflict.value) {
+    error.value = '当前文件存在冲突；请先选择 Keep editor 或 Use disk，再切换文件。'
+    return false
   }
+  if (!live.dirty.value) return true
+  try {
+    await live.flush()
+    return true
+  } catch (err) {
+    error.value = (err as Error).message
+    return false
+  }
+}
+
+async function openFile(path: string) {
+  if (path === selectedPath.value && currentLive.value) return
+  if (!(await settleCurrentLiveFile())) return
   currentLive.value?.close()
   currentLive.value = null
   selectedPath.value = path
   content.value = ''
   historyPreview.value = null
   fileLoading.value = true
+  error.value = ''
   try {
-    // Opening the websocket creates the authoritative Project-scoped Yjs
-    // session. A REST read gives immediate content while that handshake occurs.
     const [disk, live] = await Promise.all([
       json<{ content: string }>(`/api/projects/${projectId.value}/files/content?path=${encodeURIComponent(path)}`),
       projectLiveFiles.open(projectId.value, path),
@@ -141,43 +158,50 @@ async function resolveLiveConflict(strategy: 'use-live' | 'use-disk') {
 async function createFile() {
   const path = newPath.value.trim() || window.prompt('新文件路径，例如 sections/intro.tex')?.trim()
   if (!path) return
-  await json(`/api/projects/${projectId.value}/files/file`, { method: 'POST', body: JSON.stringify({ path }) })
-  newPath.value = ''
-  await loadFiles()
-  await openFile(path)
+  try {
+    await json(`/api/projects/${projectId.value}/files/file`, { method: 'POST', body: JSON.stringify({ path }) })
+    newPath.value = ''
+    await loadFiles()
+    await openFile(path)
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function createDirectory() {
   const path = window.prompt('新目录路径')?.trim()
   if (!path) return
-  await json(`/api/projects/${projectId.value}/files/directory`, { method: 'POST', body: JSON.stringify({ path }) })
-  await loadFiles()
+  try {
+    await json(`/api/projects/${projectId.value}/files/directory`, { method: 'POST', body: JSON.stringify({ path }) })
+    await loadFiles()
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function renameSelected() {
-  if (!selectedPath.value) return
+  if (!selectedPath.value || !(await settleCurrentLiveFile())) return
   const from = selectedPath.value
   const to = window.prompt('重命名为', from)?.trim()
   if (!to || to === from) return
-  await currentLive.value?.flush()
-  currentLive.value?.close()
-  currentLive.value = null
-  await json(`/api/projects/${projectId.value}/files/path`, { method: 'PATCH', body: JSON.stringify({ from, to }) })
-  await loadFiles()
-  await openFile(to)
+  try {
+    currentLive.value?.close()
+    currentLive.value = null
+    await json(`/api/projects/${projectId.value}/files/path`, { method: 'PATCH', body: JSON.stringify({ from, to }) })
+    await loadFiles()
+    await openFile(to)
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function deleteSelected() {
-  if (!selectedPath.value || !window.confirm(`永久删除 ${selectedPath.value}？Writing History 会记录删除前状态。`)) return
+  if (!selectedPath.value || !(await settleCurrentLiveFile())) return
+  if (!window.confirm(`永久删除 ${selectedPath.value}？Writing History 会记录删除前状态。`)) return
   const path = selectedPath.value
-  await currentLive.value?.flush()
-  currentLive.value?.close()
-  currentLive.value = null
-  await json(`/api/projects/${projectId.value}/files/path?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
-  selectedPath.value = ''
-  content.value = ''
-  fileHistory.value = []
-  await Promise.all([loadFiles(), loadGit(), loadHistory()])
+  try {
+    currentLive.value?.close()
+    currentLive.value = null
+    await json(`/api/projects/${projectId.value}/files/path?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
+    selectedPath.value = ''
+    content.value = ''
+    fileHistory.value = []
+    await Promise.all([loadFiles(), loadGit(), loadHistory()])
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function uploadFile(event: Event) {
@@ -187,9 +211,11 @@ async function uploadFile(event: Event) {
   const form = new FormData()
   form.append('file', file)
   form.append('path', directory)
-  await json(`/api/projects/${projectId.value}/files/upload`, { method: 'POST', body: form })
-  if (uploadInput.value) uploadInput.value.value = ''
-  await Promise.all([loadFiles(), loadGit()])
+  try {
+    await json(`/api/projects/${projectId.value}/files/upload`, { method: 'POST', body: form })
+    await Promise.all([loadFiles(), loadGit()])
+  } catch (err) { error.value = (err as Error).message }
+  finally { if (uploadInput.value) uploadInput.value.value = '' }
 }
 
 async function loadGit() {
@@ -206,37 +232,53 @@ async function loadGit() {
 }
 
 async function stage(path: string) {
-  await json(`/api/projects/${projectId.value}/git/stage`, { method: 'POST', body: JSON.stringify({ paths: [path] }) })
-  await loadGit()
+  try {
+    await json(`/api/projects/${projectId.value}/git/stage`, { method: 'POST', body: JSON.stringify({ paths: [path] }) })
+    await loadGit()
+  } catch (err) { error.value = (err as Error).message }
 }
 async function unstage(path: string) {
-  await json(`/api/projects/${projectId.value}/git/unstage`, { method: 'POST', body: JSON.stringify({ paths: [path] }) })
-  await loadGit()
+  try {
+    await json(`/api/projects/${projectId.value}/git/unstage`, { method: 'POST', body: JSON.stringify({ paths: [path] }) })
+    await loadGit()
+  } catch (err) { error.value = (err as Error).message }
 }
 async function commit() {
   if (!commitMessage.value.trim()) return
-  await json(`/api/projects/${projectId.value}/git/commit`, { method: 'POST', body: JSON.stringify({ message: commitMessage.value }) })
-  commitMessage.value = ''
-  await loadGit()
+  try {
+    await json(`/api/projects/${projectId.value}/git/commit`, { method: 'POST', body: JSON.stringify({ message: commitMessage.value }) })
+    commitMessage.value = ''
+    await loadGit()
+  } catch (err) { error.value = (err as Error).message }
 }
 async function createBranch() {
   const name = window.prompt('新分支名称')?.trim()
   if (!name) return
-  await json(`/api/projects/${projectId.value}/git/branches`, { method: 'POST', body: JSON.stringify({ name }) })
-  await loadGit()
+  try {
+    await json(`/api/projects/${projectId.value}/git/branches`, { method: 'POST', body: JSON.stringify({ name }) })
+    await loadGit()
+  } catch (err) { error.value = (err as Error).message }
 }
 async function switchBranch(name: string) {
   if (!name || name === store.gitStatus?.branch) return
   if (!window.confirm(`切换到分支 ${name}？当前 LiveFile 会先落盘并创建 Writing checkpoint。`)) return
-  await json(`/api/projects/${projectId.value}/git/branches/switch`, { method: 'POST', body: JSON.stringify({ name }) })
-  currentLive.value?.close()
-  currentLive.value = null
-  const reopen = selectedPath.value
-  await Promise.all([loadFiles(), loadGit(), loadHistory()])
-  if (reopen) {
-    try { await openFile(reopen) }
-    catch { selectedPath.value = ''; content.value = '' }
+  try {
+    await json(`/api/projects/${projectId.value}/git/branches/switch`, { method: 'POST', body: JSON.stringify({ name }) })
+    currentLive.value?.close()
+    currentLive.value = null
+    const reopen = selectedPath.value
+    await Promise.all([loadFiles(), loadGit(), loadHistory()])
+    if (reopen) {
+      try { await openFile(reopen) }
+      catch { selectedPath.value = ''; content.value = '' }
+    }
+  } catch (err) {
+    error.value = (err as Error).message
+    await loadGit().catch(() => undefined)
   }
+}
+function onBranchChange(event: Event) {
+  void switchBranch((event.target as HTMLSelectElement).value)
 }
 
 async function loadHistory() {
@@ -249,35 +291,42 @@ async function loadFileHistory() {
 }
 
 async function previewRevision(revision: FileRevision) {
-  const data = await json<{ revision: FileRevision; content: string | null }>(`/api/projects/${projectId.value}/history/revisions/${revision.id}`)
-  historyPreview.value = data
+  try {
+    historyPreview.value = await json<{ revision: FileRevision; content: string | null }>(`/api/projects/${projectId.value}/history/revisions/${revision.id}`)
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function restoreRevision(revision: FileRevision) {
   if (!window.confirm(`恢复 ${revision.path} 到该版本？当前内容会先创建 pre-restore checkpoint。`)) return
-  await json(`/api/projects/${projectId.value}/history/revisions/${revision.id}/restore`, { method: 'POST' })
-  currentLive.value?.close()
-  currentLive.value = null
-  await openFile(revision.path)
-  await Promise.all([loadHistory(), loadGit(), loadFileHistory()])
+  try {
+    await json(`/api/projects/${projectId.value}/history/revisions/${revision.id}/restore`, { method: 'POST' })
+    currentLive.value?.close()
+    currentLive.value = null
+    await openFile(revision.path)
+    await Promise.all([loadHistory(), loadGit(), loadFileHistory()])
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function restoreCheckpoint(checkpointId: string) {
   if (!window.confirm('恢复该 Writing Checkpoint？当前写作状态会先自动创建 pre-restore checkpoint。')) return
-  await json(`/api/projects/${projectId.value}/history/checkpoints/${checkpointId}/restore`, { method: 'POST' })
-  currentLive.value?.close()
-  currentLive.value = null
-  const reopen = selectedPath.value
-  await loadFiles()
-  if (reopen) {
-    try { await openFile(reopen) } catch { selectedPath.value = ''; content.value = '' }
-  }
-  await Promise.all([loadHistory(), loadGit()])
+  try {
+    await json(`/api/projects/${projectId.value}/history/checkpoints/${checkpointId}/restore`, { method: 'POST' })
+    currentLive.value?.close()
+    currentLive.value = null
+    const reopen = selectedPath.value
+    await loadFiles()
+    if (reopen) {
+      try { await openFile(reopen) } catch { selectedPath.value = ''; content.value = '' }
+    }
+    await Promise.all([loadHistory(), loadGit()])
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function pinCheckpoint(checkpoint: ProjectHistoryCheckpoint) {
-  await json(`/api/projects/${projectId.value}/history/checkpoints/${checkpoint.id}/pin`, { method: 'POST', body: JSON.stringify({ pinned: !checkpoint.pinned }) })
-  await loadHistory()
+  try {
+    await json(`/api/projects/${projectId.value}/history/checkpoints/${checkpoint.id}/pin`, { method: 'POST', body: JSON.stringify({ pinned: !checkpoint.pinned }) })
+    await loadHistory()
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function loadLatexTargets() {
@@ -295,31 +344,37 @@ function addLatexTarget() {
 }
 
 async function saveLatexTargets() {
-  await json(`/api/projects/${projectId.value}/latex/targets`, {
-    method: 'PUT',
-    body: JSON.stringify({ defaultTarget: defaultLatexTargetDraft.value || undefined, targets: latexTargetsDraft.value }),
-  })
-  await loadLatexTargets()
+  try {
+    await json(`/api/projects/${projectId.value}/latex/targets`, {
+      method: 'PUT',
+      body: JSON.stringify({ defaultTarget: defaultLatexTargetDraft.value || undefined, targets: latexTargetsDraft.value }),
+    })
+    await loadLatexTargets()
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function startBuild() {
   const targetId = activeTargetId.value || defaultLatexTargetDraft.value || latexTargetsDraft.value[0]?.id
-  if (!targetId) throw new Error('请先配置 LaTeX target')
-  await currentLive.value?.flush()
-  activeBuild.value = (await json<{ build: any }>(`/api/projects/${projectId.value}/latex/builds`, { method: 'POST', body: JSON.stringify({ targetId }) })).build
-  buildLog.value = ''
-  pollBuild()
+  if (!targetId) { error.value = '请先配置 LaTeX target'; return }
+  try {
+    if (!(await settleCurrentLiveFile())) return
+    activeBuild.value = (await json<{ build: any }>(`/api/projects/${projectId.value}/latex/builds`, { method: 'POST', body: JSON.stringify({ targetId }) })).build
+    buildLog.value = ''
+    pollBuild()
+  } catch (err) { error.value = (err as Error).message }
 }
 function pollBuild() {
   if (!activeBuild.value) return
   if (buildTimer.value) window.clearTimeout(buildTimer.value)
   buildTimer.value = window.setTimeout(async () => {
-    activeBuild.value = (await json<{ build: any }>(`/api/projects/${projectId.value}/latex/builds/${activeBuild.value.id}`)).build
-    if (['queued','running'].includes(activeBuild.value.status)) pollBuild()
-    else {
-      buildLog.value = (await json<{ log: string }>(`/api/projects/${projectId.value}/latex/builds/${activeBuild.value.id}/log`)).log || ''
-      await loadHistory()
-    }
+    try {
+      activeBuild.value = (await json<{ build: any }>(`/api/projects/${projectId.value}/latex/builds/${activeBuild.value.id}`)).build
+      if (['queued','running'].includes(activeBuild.value.status)) pollBuild()
+      else {
+        buildLog.value = (await json<{ log: string }>(`/api/projects/${projectId.value}/latex/builds/${activeBuild.value.id}/log`)).log || ''
+        await loadHistory()
+      }
+    } catch (err) { error.value = (err as Error).message }
   }, 900)
 }
 
@@ -369,6 +424,19 @@ async function initialize() {
     }
   } catch (err) { error.value = (err as Error).message }
 }
+
+onBeforeRouteLeave(async () => {
+  const live = currentLive.value
+  if (!live) return true
+  if (live.conflict.value) {
+    return window.confirm('当前 Project 文件存在未解决冲突。离开会放弃浏览器中的本地冲突缓冲，确定离开吗？')
+  }
+  if (live.dirty.value) {
+    try { await live.flush() }
+    catch (err) { error.value = (err as Error).message; return false }
+  }
+  return true
+})
 
 onMounted(initialize)
 onBeforeUnmount(() => {
@@ -428,7 +496,7 @@ onBeforeUnmount(() => {
 
         <div v-else-if="sideTab==='git'" class="panel scroll">
           <div class="branch-row">
-            <select :value="store.gitStatus?.branch || ''" @change="switchBranch(($event.target as HTMLSelectElement).value)">
+            <select :value="store.gitStatus?.branch || ''" @change="onBranchChange">
               <option v-for="branch in branches" :key="branch.name" :value="branch.name">{{ branch.name }}</option>
             </select>
             <button @click="createBranch">+ Branch</button>
