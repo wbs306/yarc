@@ -5,6 +5,7 @@ import { sseHub } from '../lib/sse.js'
 import { AppError } from '../lib/errors.js'
 import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
 import { projectHistoryService } from './project-history.service.js'
+import { projectLiveFileManager } from './project-live-file.service.js'
 
 export interface ProjectFileNode {
   name: string
@@ -69,22 +70,34 @@ export class ProjectFileService {
     const resolved = await resolveProjectPath(projectId, path)
     const info = await lstat(resolved.fullPath)
     if (!info.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
-    if (!TEXT_EXTENSIONS.has(extname(path).toLowerCase()) && info.size > 2 * 1024 * 1024) {
-      throw new AppError('UNSUPPORTED_FILE', 'Binary/large files are not editable as text', 400)
+    if (!TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || info.size > 2 * 1024 * 1024) {
+      throw new AppError('UNSUPPORTED_FILE', 'Only supported text files up to 2MB are editable', 400)
     }
-    return { path: resolved.relativePath, content: await readFile(resolved.fullPath, 'utf-8'), size: info.size, modifiedAt: info.mtime.toISOString() }
+    const live = await projectLiveFileManager.get(projectId)
+    const content = live.hasSession(resolved.relativePath)
+      ? (await live.readAgentFile(resolved.fullPath)).toString('utf-8')
+      : await readFile(resolved.fullPath, 'utf-8')
+    return { path: resolved.relativePath, content, size: Buffer.byteLength(content, 'utf-8'), modifiedAt: info.mtime.toISOString() }
   }
 
   async saveFileContent(projectId: string, path: string, content: string) {
-    await projectHistoryService.ensureBaseline(projectId, path)
     const resolved = await resolveProjectPath(projectId, path)
     const info = await lstat(resolved.fullPath)
     if (!info.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
-    const tmp = `${resolved.fullPath}.yarc-${process.pid}-${Date.now()}.tmp`
-    await writeFile(tmp, content, 'utf-8')
-    await rename(tmp, resolved.fullPath)
-    await projectHistoryService.trackChange(projectId, resolved.relativePath, 'autosave')
-    this.emit(projectId, 'save', resolved.relativePath)
+    await projectHistoryService.ensureBaseline(projectId, resolved.relativePath)
+
+    const live = await projectLiveFileManager.get(projectId)
+    if (live.hasSession(resolved.relativePath)) {
+      await live.replaceContent(resolved.relativePath, content, 'api')
+      const result = await live.flush(resolved.relativePath)
+      if (result?.conflict) throw new AppError('PROJECT_FILE_CONFLICT', `Live file conflict: ${resolved.relativePath}`, 409)
+    } else {
+      const tmp = `${resolved.fullPath}.yarc-${process.pid}-${Date.now()}.tmp`
+      await writeFile(tmp, content, 'utf-8')
+      await rename(tmp, resolved.fullPath)
+      await projectHistoryService.trackChange(projectId, resolved.relativePath, 'autosave')
+    }
+    this.emit(projectId, 'save', resolved.relativePath, live.hasSession(resolved.relativePath))
     return this.getFileContent(projectId, resolved.relativePath)
   }
 
@@ -112,13 +125,30 @@ export class ProjectFileService {
   async renamePath(projectId: string, from: string, to: string) {
     const source = await resolveProjectPath(projectId, from)
     const target = await resolveProjectPath(projectId, to, { allowMissing: true })
-    await projectHistoryService.ensureBaseline(projectId, source.relativePath)
-    await projectHistoryService.ensureBaseline(projectId, target.relativePath, { missing: true })
+    const info = await lstat(source.fullPath)
+    await projectLiveFileManager.flushProject(projectId, source.relativePath)
+
+    let sourcePaths: string[] = []
+    let targetPaths: string[] = []
+    if (info.isDirectory()) {
+      sourcePaths = (await projectHistoryService.listTrackedPaths(projectId)).filter(path => path.startsWith(`${source.relativePath}/`))
+      targetPaths = sourcePaths.map(path => `${target.relativePath}${path.slice(source.relativePath.length)}`)
+      for (const path of sourcePaths) await projectHistoryService.ensureBaseline(projectId, path)
+      for (const path of targetPaths) await projectHistoryService.ensureBaseline(projectId, path, { missing: true })
+    } else {
+      sourcePaths = [source.relativePath]
+      targetPaths = [target.relativePath]
+      await projectHistoryService.ensureBaseline(projectId, source.relativePath)
+      await projectHistoryService.ensureBaseline(projectId, target.relativePath, { missing: true })
+    }
+
     await mkdir(dirname(target.fullPath), { recursive: true })
     await rename(source.fullPath, target.fullPath)
+    await projectLiveFileManager.resetPaths(projectId, [source.relativePath], 'project-file-rename')
     await projectHistoryService.checkpoint(projectId, {
-      kind: 'manual', paths: [source.relativePath, target.relativePath],
+      kind: 'manual', paths: [...sourcePaths, ...targetPaths],
       metadata: { operation: 'rename', from: source.relativePath, to: target.relativePath },
+      forceBoundary: true,
     })
     this.emit(projectId, 'rename', target.relativePath)
     return { from: source.relativePath, to: target.relativePath }
@@ -128,9 +158,23 @@ export class ProjectFileService {
     const resolved = await resolveProjectPath(projectId, path)
     if (!resolved.relativePath) throw new AppError('PROTECTED_PATH', 'Project root cannot be deleted through File API', 403)
     const info = await lstat(resolved.fullPath)
-    if (info.isFile()) await projectHistoryService.ensureBaseline(projectId, resolved.relativePath)
+    await projectLiveFileManager.flushProject(projectId, resolved.relativePath)
+
+    const trackedPaths = info.isDirectory()
+      ? (await projectHistoryService.listTrackedPaths(projectId)).filter(item => item.startsWith(`${resolved.relativePath}/`))
+      : [resolved.relativePath]
+    for (const trackedPath of trackedPaths) await projectHistoryService.ensureBaseline(projectId, trackedPath)
+
     await rm(resolved.fullPath, { recursive: info.isDirectory(), force: false })
-    if (info.isFile()) await projectHistoryService.checkpoint(projectId, { kind: 'manual', paths: [resolved.relativePath], metadata: { operation: 'delete' } })
+    await projectLiveFileManager.resetPaths(projectId, [resolved.relativePath], 'project-file-delete')
+    if (trackedPaths.length) {
+      await projectHistoryService.checkpoint(projectId, {
+        kind: 'manual',
+        paths: trackedPaths,
+        metadata: { operation: 'delete', path: resolved.relativePath },
+        forceBoundary: true,
+      })
+    }
     this.emit(projectId, 'delete', resolved.relativePath)
     return { deleted: true }
   }
