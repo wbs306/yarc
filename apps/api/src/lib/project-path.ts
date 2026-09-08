@@ -6,6 +6,10 @@ import { AppError } from './errors.js'
 
 const normalize = (value = '') => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
 const isInside = (root: string, target: string) => target === root || target.startsWith(`${root}${sep}`)
+const isCrossPlatformAbsolute = (value: string) => isAbsolute(value)
+  || /^[A-Za-z]:[\\/]/.test(value)
+  || value.startsWith('\\\\')
+  || value.startsWith('//')
 
 export const validateProjectDirectoryName = (value: string) => {
   const name = value.trim()
@@ -16,7 +20,7 @@ export const validateProjectDirectoryName = (value: string) => {
 }
 
 export const normalizeProjectRelativePath = (value = '') => {
-  if (value.includes('\0') || isAbsolute(value)) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Invalid project path', 400)
+  if (value.includes('\0') || isCrossPlatformAbsolute(value)) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Invalid project path', 400)
   const normalized = normalize(value)
   if (!normalized || normalized === '.') return ''
   const segments = normalized.split('/')
