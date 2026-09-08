@@ -18,7 +18,8 @@ export const validateProjectDirectoryName = (value: string) => {
 export const normalizeProjectRelativePath = (value = '') => {
   if (value.includes('\0') || isAbsolute(value)) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Invalid project path', 400)
   const normalized = normalize(value)
-  const segments = normalized ? normalized.split('/') : []
+  if (!normalized || normalized === '.') return ''
+  const segments = normalized.split('/')
   if (segments.some(segment => !segment || segment === '.' || segment === '..')) {
     throw new AppError('PROJECT_INVALID_DIRECTORY', 'Project path traversal is not allowed', 400)
   }
@@ -55,8 +56,6 @@ export const resolveProjectPath = async (projectId: string, relativePath = '', o
   const target = relative ? resolve(root, ...relative.split('/')) : root
   if (!isInside(root, target)) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Path escapes project root', 400)
 
-  // Walk existing path segments and reject symlinks. Missing suffixes are
-  // allowed only for create/rename destinations.
   let current = root
   for (const segment of relative ? relative.split('/') : []) {
     current = resolve(current, segment)
