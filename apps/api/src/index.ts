@@ -13,16 +13,12 @@ if (_require('node:fs').existsSync(_agentNpmModules)) {
 
 import 'dotenv/config'
 
-// Set --conditions=import AFTER dotenv so the server's own require() is unaffected.
-// This is inherited by child processes (pi-subagents async runner) where jiti needs
-// it to resolve ESM-only Pi SDK packages.
 if (_require('node:fs').existsSync(_agentNpmModules)) {
   if (!process.env.NODE_OPTIONS?.includes('--conditions=import')) {
     process.env.NODE_OPTIONS = (process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : '') + '--conditions=import'
   }
 }
 
-// Prevent unhandled errors from crashing the server
 process.on('uncaughtException', (err) => {
   console.error('[UncaughtException]', err.message)
 })
@@ -50,6 +46,7 @@ import conversationsRoutes from './routes/conversations.js'
 import searchRoutes from './routes/search.js'
 import tasksRoutes from './routes/tasks.js'
 import filesRoutes from './routes/files.js'
+import projectsRoutes from './routes/projects.js'
 import latexRoutes from './routes/latex.js'
 import settingsRoutes from './routes/settings.js'
 import rankingsRoutes from './routes/rankings.js'
@@ -73,6 +70,8 @@ import { prisma } from '@yarc/db'
 import { DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_PROMPT } from './lib/prompts.js'
 import { fileService } from './services/file.service.js'
 import { liveFileService } from './services/live-file.service.js'
+import { projectLiveFileManager } from './services/project-live-file.service.js'
+import { projectWorkspaceWatcherService } from './services/project-workspace-watcher.service.js'
 import { sseHub } from './lib/sse.js'
 import { streamBuffer } from './lib/stream-buffer-singleton.js'
 import { chatStreamControl } from './lib/chat-stream-control.js'
@@ -84,24 +83,13 @@ import type { ChatRequest } from '@yarc/shared'
 const app = new Hono()
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app })
 
-// ── Global Middleware ────────────────────────────────────────────────────────
-
 app.use('*', corsMiddleware(config.cors.origin))
 app.onError(errorHandler)
 
-// ── Public Routes ────────────────────────────────────────────────────────────
-
 app.route('/api/auth', authRoutes)
-
-// ── Health check ─────────────────────────────────────────────────────────────
-
 app.get('/api/health', (c) => c.json({ status: 'ok', version: '2.0.0' }))
 
-// ── Auth-protected API Routes ────────────────────────────────────────────────
-
-// Apply auth middleware to all /api/* routes except auth
 app.use('/api/*', async (c, next) => {
-  // Skip auth for login/logout and health
   const path = c.req.path
   if (
     path === '/api/auth/login' ||
@@ -123,7 +111,6 @@ app.route('/api/notes', notesRoutes)
 app.route('/api/conversations', conversationsRoutes)
 app.route('/api/search', searchRoutes)
 app.route('/api/tasks', tasksRoutes)
-// ── WebSocket live workspace files ──────────────────────────────────────────
 
 app.get(
   '/api/files/live',
@@ -155,30 +142,14 @@ app.get(
             await liveFileService.applyClientUpdate(path, msg.update, clientId)
           } else if (msg.type === 'flush') {
             const result = await liveFileService.flush(path)
-            if (msg.requestId && result) {
-              ws.send(JSON.stringify({ type: 'flush-ack', requestId: msg.requestId, ...result }))
-            }
+            if (msg.requestId && result) ws.send(JSON.stringify({ type: 'flush-ack', requestId: msg.requestId, ...result }))
           } else if (msg.type === 'resolve-conflict' && (msg.strategy === 'use-live' || msg.strategy === 'use-disk')) {
             const result = await liveFileService.resolveConflict(path, msg.strategy, clientId)
-            if (msg.requestId && result) {
-              ws.send(JSON.stringify({
-                type: 'flush-ack',
-                requestId: msg.requestId,
-                ...result,
-                update: liveFileService.getStateUpdate(path),
-              }))
-            }
+            if (msg.requestId && result) ws.send(JSON.stringify({ type: 'flush-ack', requestId: msg.requestId, ...result, update: liveFileService.getStateUpdate(path) }))
           } else if (msg.type === 'replace-content' && typeof msg.content === 'string') {
             await liveFileService.replaceContent(path, msg.content, 'client', clientId)
             const result = await liveFileService.flush(path)
-            if (msg.requestId && result) {
-              ws.send(JSON.stringify({
-                type: 'flush-ack',
-                requestId: msg.requestId,
-                ...result,
-                update: liveFileService.getStateUpdate(path),
-              }))
-            }
+            if (msg.requestId && result) ws.send(JSON.stringify({ type: 'flush-ack', requestId: msg.requestId, ...result, update: liveFileService.getStateUpdate(path) }))
           } else {
             ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', message: 'Unsupported live file message' }))
           }
@@ -186,17 +157,67 @@ app.get(
           ws.send(JSON.stringify({ type: 'error', code: 'MESSAGE_FAILED', message: (err as Error).message || 'Live file message failed' }))
         }
       },
-      onClose() {
-        if (clientId) liveFileService.detachClient(path, clientId)
+      onClose() { if (clientId) liveFileService.detachClient(path, clientId) },
+      onError() { if (clientId) liveFileService.detachClient(path, clientId) },
+    }
+  }),
+)
+
+app.get(
+  '/api/projects/:id/files/live',
+  upgradeWebSocket((c) => {
+    const projectId = c.req.param('id')
+    const path = c.req.query('path') || ''
+    let clientId: string | null = null
+    let service: Awaited<ReturnType<typeof projectLiveFileManager.get>> | null = null
+    return {
+      async onOpen(_event, ws) {
+        try {
+          if (!path) {
+            ws.send(JSON.stringify({ type: 'error', code: 'MISSING_PATH', message: 'Path is required' }))
+            ws.close()
+            return
+          }
+          service = await projectLiveFileManager.get(projectId)
+          const attached = await service.attachClient(path, ws)
+          clientId = attached.client.id
+        } catch (err) {
+          ws.send(JSON.stringify({ type: 'error', code: 'OPEN_FAILED', message: (err as Error).message || 'Failed to open project live file' }))
+          ws.close()
+        }
       },
-      onError() {
-        if (clientId) liveFileService.detachClient(path, clientId)
+      async onMessage(event, ws) {
+        try {
+          if (!service || !clientId) return
+          const raw = typeof event.data === 'string' ? event.data : Buffer.from(event.data as any).toString('utf-8')
+          const msg = JSON.parse(raw)
+          if (msg.type === 'update' && typeof msg.update === 'string') {
+            await service.applyClientUpdate(path, msg.update, clientId)
+          } else if (msg.type === 'flush') {
+            const result = await service.flush(path)
+            if (msg.requestId && result) ws.send(JSON.stringify({ type: 'flush-ack', requestId: msg.requestId, ...result }))
+          } else if (msg.type === 'resolve-conflict' && (msg.strategy === 'use-live' || msg.strategy === 'use-disk')) {
+            const result = await service.resolveConflict(path, msg.strategy, clientId)
+            if (msg.requestId && result) ws.send(JSON.stringify({ type: 'flush-ack', requestId: msg.requestId, ...result, update: service.getStateUpdate(path) }))
+          } else if (msg.type === 'replace-content' && typeof msg.content === 'string') {
+            await service.replaceContent(path, msg.content, 'client', clientId)
+            const result = await service.flush(path)
+            if (msg.requestId && result) ws.send(JSON.stringify({ type: 'flush-ack', requestId: msg.requestId, ...result, update: service.getStateUpdate(path) }))
+          } else {
+            ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', message: 'Unsupported live file message' }))
+          }
+        } catch (err) {
+          ws.send(JSON.stringify({ type: 'error', code: 'MESSAGE_FAILED', message: (err as Error).message || 'Project live file message failed' }))
+        }
       },
+      onClose() { if (service && clientId) service.detachClient(path, clientId) },
+      onError() { if (service && clientId) service.detachClient(path, clientId) },
     }
   }),
 )
 
 app.route('/api/files', filesRoutes)
+app.route('/api/projects', projectsRoutes)
 app.route('/api/latex', latexRoutes)
 app.route('/api/settings', settingsRoutes)
 app.route('/api/rankings', rankingsRoutes)
@@ -210,21 +231,16 @@ app.route('/api/settings/wechat', wechatRoutes)
 app.route('/api/webdav', webdavRoutes)
 app.get('/api/pi/models', async (c) => c.json(await piService.listModels(c.req.query('refresh') === '1')))
 
-// ── SSE: real-time paper/task status ─────────────────────────────────────────
-
 app.get('/api/events', () => {
   let clientId = crypto.randomUUID()
   const stream = new ReadableStream({
     start(controller) {
       const remove = sseHub.add(clientId, controller)
-      // Keepalive ping every 30s
       const timer = setInterval(() => {
         try { controller.enqueue(': keepalive\n\n') } catch { clearInterval(timer) }
       }, 30_000)
-      // Cleanup on close
       const origRemove = remove
       const cleanup = () => { clearInterval(timer); origRemove() }
-      // Hono doesn't expose close event directly, so we rely on write errors
       ;(controller as any)._cleanup = cleanup
     },
   })
@@ -236,8 +252,6 @@ app.get('/api/events', () => {
     },
   })
 })
-
-// ── WebSocket Chat ───────────────────────────────────────────────────────────
 
 app.get(
   '/api/chat',
@@ -282,8 +296,6 @@ app.get(
             let terminalSent = false
             const pendingLive: unknown[] = []
 
-            // Subscribe before taking the replay snapshot. Live callbacks are
-            // queued until replay is sent, then de-duplicated by sequence.
             unsubscribeAttachedStream?.()
             unsubscribeAttachedStream = streamBuffer.subscribe(messageId, (event) => {
               if (replaying) {
@@ -301,13 +313,7 @@ app.get(
               }
             })
 
-            safeSend({
-              type: 'stream_start',
-              messageId,
-              branchId: bufferedStream?.branchId,
-              userMessage: bufferedStream?.userMessage,
-              eventSequence: afterSequence,
-            })
+            safeSend({ type: 'stream_start', messageId, branchId: bufferedStream?.branchId, userMessage: bufferedStream?.userMessage, eventSequence: afterSequence })
             for (const replayed of streamBuffer.getEvents(messageId, afterSequence)) {
               const sequence = Number((replayed as any)?.eventSequence || 0)
               if (sequence) lastSequence = Math.max(lastSequence, sequence)
@@ -338,25 +344,14 @@ app.get(
               return
             }
 
-            // Reserve the conversation synchronously before branch creation or
-            // other awaited setup. This prevents two producers from opening the
-            // same Pi session concurrently and usually avoids orphan edit
-            // branches from a second send.
             streamMsgId = randomUUID()
             streamingRegistry.register(conversationId, streamMsgId, data.branchId || 'main', '')
 
-            // Prepare message (may create branch for edits).
             const prepared = await chatService.handleEditBranch(conversationId, data) as any
             const branchId = prepared?.branchId || data.branchId || 'main'
             data.branchId = branchId
 
-            // Generate stable in-flight user/assistant IDs. The pending user
-            // message is retained with the stream so an immediate refresh can
-            // restore the complete turn before Pi JSONL has persisted it.
             const isEditBranch = Boolean(data.editMessageId)
-            // The default title is derived only from the first new user message.
-            // Persist it before the agent starts so closing the page mid-stream
-            // cannot leave the conversation named "新对话".
             const conversationTitle = !isEditBranch && typeof data.content === 'string'
               ? await conversationService.updateDefaultTitleFromMessage(conversationId, data.content).catch(() => null)
               : null
@@ -379,52 +374,25 @@ app.get(
               piConversationService.getLeafEntryId(conversationId, branchId),
             ])
             await streamBuffer.start(streamMsgId, conversationId, branchId, pendingUserMessage, {
-              source: 'user',
-              initialLeafId,
-              sessionFile: sessionFile || undefined,
+              source: 'user', initialLeafId, sessionFile: sessionFile || undefined,
             })
             streamStarted = true
-
-            // Fill in the reservation metadata used by stop/resume routes.
             streamingRegistry.update(conversationId, streamMsgId, { branchId, sessionFile: sessionFile || '' })
-
-            // In-flight IDs let replay metadata map pending messages to their
-            // canonical Pi JSONL entries after persistence.
             data.userMessageId = pendingUserMessage.id
             data.assistantMessageId = streamMsgId
 
-            // For edits with new branch, send full message list
             if (isEditBranch) {
               let branchInfo: unknown = undefined
               try {
                 const fullMessages = await piConversationService.getBranchMessages(conversationId, branchId)
                 branchInfo = (await piConversationService.listBranches(conversationId)).find(b => b.id === branchId)
                 safeSend({ type: 'branch_messages', branchId, messages: fullMessages })
-              } catch { /* non-fatal */ }
-              // For edits, the new session is forked before the edited turn.
-              // Show the edited user message optimistically; Pi will persist it
-              // when prompt() starts, and refresh will load the Pi entry ID.
-              safeSend({
-                type: 'stream_start',
-                messageId: streamMsgId,
-                branchId,
-                branch: branchInfo,
-                userMessage: pendingUserMessage,
-              })
+              } catch {}
+              safeSend({ type: 'stream_start', messageId: streamMsgId, branchId, branch: branchInfo, userMessage: pendingUserMessage })
             } else {
-              // For new messages, send userMessage in stream_start
-              safeSend({
-                type: 'stream_start',
-                messageId: streamMsgId,
-                branchId,
-                userMessage: pendingUserMessage,
-                conversationTitle,
-              })
+              safeSend({ type: 'stream_start', messageId: streamMsgId, branchId, userMessage: pendingUserMessage, conversationTitle })
             }
 
-            // The originating browser consumes the same sequenced buffer as a
-            // reconnecting browser. This keeps live and replay event identities
-            // identical and removes the attach gap.
             unsubscribeAttachedStream?.()
             unsubscribeAttachedStream = streamBuffer.subscribe(streamMsgId, event => {
               safeSend(event)
@@ -434,9 +402,6 @@ app.get(
               }
             })
 
-            // Detach the producer from this WebSocket handler. If the browser
-            // refreshes, the socket closes but this background task keeps writing
-            // to streamBuffer; the refreshed page can attach to the same message.
             const runConversationId = conversationId
             const runMessageId = streamMsgId
             const heartbeat = setInterval(() => {
@@ -450,35 +415,20 @@ app.get(
               let cancellationObserved = false
               let terminalRecorded = false
               try {
-                // Always drain the generator. In particular, do not break on
-                // the first `done`: Pi's generator uses the next() after that
-                // yield to await prompt settlement and persist the session.
                 for await (const evt of chatService.processMessage(runConversationId, data, { persistUserMessage: false, cancelledMessageId: runMessageId })) {
                   if (chatStreamControl.isCancelled(runMessageId)) {
                     cancellationObserved = true
                     agentInteractionRegistry.cancelByStream(runMessageId, 'stream_cancelled')
                   }
-
                   if (evt.type === 'done') {
                     completedNormally = true
-                    // ChatService may add a final done after Pi already did.
-                    // Persist and send only one terminal event.
                     if (!terminalRecorded) {
                       streamBuffer.append(runMessageId, evt)
                       terminalRecorded = true
                     }
                     continue
                   }
-
                   streamBuffer.append(runMessageId, evt)
-
-                  // Pi entry IDs are applied by reloading the branch from
-                  // Pi JSONL when the stream completes, not by mutating
-                  // temporary in-flight IDs.
-                  // User entry mappings are needed by the live editor: the
-                  // pending user ID must be replaced before the user can edit
-                  // immediately after stopping a turn. Assistant mappings stay
-                  // internal because the stream ID is still needed by stop.
                   if (evt.type === 'pi_assistant_entry') continue
                 }
               } catch (err) {
@@ -487,10 +437,6 @@ app.get(
                 await streamBuffer.fail(runMessageId, message).catch(() => {})
               } finally {
                 clearInterval(heartbeat)
-
-                // A generator that exits without a terminal event is a
-                // failure, including a cancelled /compact operation that
-                // returns early. Make it visible and unblock the client.
                 if (!completedNormally && !failed) {
                   failed = true
                   const wasCancelled = cancellationObserved || chatStreamControl.isCancelled(runMessageId)
@@ -499,11 +445,8 @@ app.get(
                 } else if (completedNormally) {
                   await streamBuffer.complete(runMessageId).catch(() => {})
                 }
-
                 agentInteractionRegistry.cancelByStream(runMessageId, completedNormally ? 'stream_completed' : 'stream_ended')
                 chatStreamControl.clear(runMessageId)
-                // Resolve stop requests only after stream persistence and Pi
-                // generator cleanup have completed.
                 streamingRegistry.unregister(runConversationId, runMessageId)
               }
             })()
@@ -528,9 +471,6 @@ app.get(
       },
 
       onClose() {
-        // Do not fail the stream on client disconnect. A page refresh or route
-        // switch should only detach the client; the backend stream continues and
-        // can be replayed from /streaming-message while it is still active.
         clientClosed = true
         unsubscribeAttachedStream?.()
         unsubscribeAttachedStream = null
@@ -538,8 +478,6 @@ app.get(
     }
   })
 )
-
-// ── Serve Vue static files ───────────────────────────────────────────────────
 
 const runtimeDir =
   typeof import.meta.dirname === 'string'
@@ -549,15 +487,12 @@ const runtimeDir =
       : dirname(fileURLToPath(import.meta.url))
 const webDistDir = join(runtimeDir, '../../web/dist')
 
-// Hashed Vite assets are immutable. Missing assets must stay 404 instead of
-// falling through to index.html, so stale lazy imports can be detected reliably.
 app.use('/assets/*', serveStatic({
   root: webDistDir,
   onFound: (_path, c) => c.header('Cache-Control', 'public, max-age=31536000, immutable'),
 }))
 app.get('/assets/*', (c) => c.notFound())
 
-// Backgrounds are runtime user data, served outside the frontend build output.
 app.get('/bg/*', async (c) => {
   const bgDir = resolve(config.dataDir, 'backgrounds')
   const relativePath = c.req.path.slice('/bg/'.length)
@@ -568,11 +503,7 @@ app.get('/bg/*', async (c) => {
     const content = await readFile(filePath)
     const ext = extname(filePath).toLowerCase()
     const mimeTypes: Record<string, string> = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.webp': 'image/webp',
-      '.gif': 'image/gif',
+      '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif',
     }
     c.header('Content-Type', mimeTypes[ext] || 'application/octet-stream')
     c.header('Cache-Control', 'public, max-age=86400')
@@ -582,39 +513,23 @@ app.get('/bg/*', async (c) => {
   }
 })
 
-// SPA fallback: all non-API routes serve index.html
 app.get('*', async (c) => {
   const path = c.req.path
-
-  // Skip API routes
-  if (path.startsWith('/api/')) {
-    return c.json({ error: { code: 'NOT_FOUND', message: 'Not found' } }, 404)
-  }
-
-  // Try to serve the exact file first
+  if (path.startsWith('/api/')) return c.json({ error: { code: 'NOT_FOUND', message: 'Not found' } }, 404)
   const filePath = join(webDistDir, path)
   try {
     await access(filePath)
     const ext = extname(filePath).toLowerCase()
     const mimeTypes: Record<string, string> = {
-      '.html': 'text/html',
-      '.js': 'application/javascript',
-      '.css': 'text/css',
-      '.json': 'application/json',
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.svg': 'image/svg+xml',
-      '.ico': 'image/x-icon',
-      '.woff': 'font/woff',
-      '.woff2': 'font/woff2',
+      '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json',
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+      '.woff': 'font/woff', '.woff2': 'font/woff2',
     }
     const content = await readFile(filePath)
     c.header('Content-Type', mimeTypes[ext] || 'application/octet-stream')
     if (ext === '.html' || path === '/sw.js') c.header('Cache-Control', 'no-cache')
     return c.body(content)
   } catch {
-    // File not found, serve index.html (SPA fallback)
     try {
       const indexHtml = await readFile(join(webDistDir, 'index.html'), 'utf-8')
       c.header('Content-Type', 'text/html')
@@ -626,9 +541,6 @@ app.get('*', async (c) => {
   }
 })
 
-// ── Start Server ─────────────────────────────────────────────────────────────
-
-// Seed agent workspace filesystem from DB once at startup.
 async function ensureAgentWorkspaceFromDb() {
   const all = await prisma.setting.findMany()
   const settings: Record<string, unknown> = {}
@@ -641,90 +553,30 @@ async function ensureAgentWorkspaceFromDb() {
   })
 }
 
-// ── Expose chat bridge for WeChat extension ─────────────────────────────
-
 const setupChatBridge = () => {
   ;(globalThis as any).__yarcChatBridge = {
-    /**
-     * Get the current active conversation ID (from the most recent conversation).
-     */
     getCurrentConversationId: async () => {
       const convs = await conversationService.list()
       return convs[0]?.id || null
     },
-
-    /**
-     * Create a new conversation.
-     */
-    createConversation: async (paperId?: string) => {
-      return conversationService.create({ paperId, title: '新对话' })
-    },
-
-    /**
-     * List all conversations.
-     */
-    listConversations: async () => {
-      return conversationService.list()
-    },
-
-    /**
-     * Get messages for a conversation branch.
-     */
-    getMessages: async (conversationId: string, branchId?: string) => {
-      return piConversationService.getMessagesForContext(conversationId, branchId)
-    },
-
-    /**
-     * Send a chat message and yield events.
-     * This is an async generator that yields ChatEvent objects.
-     */
+    createConversation: async (paperId?: string) => conversationService.create({ paperId, title: '新对话' }),
+    listConversations: async () => conversationService.list(),
+    getMessages: async (conversationId: string, branchId?: string) => piConversationService.getMessagesForContext(conversationId, branchId),
     sendMessage: async function* (content: string, conversationId: string, options?: { model?: string; reasoningEffort?: string; thinkingEnabled?: boolean }) {
       const request: ChatRequest = { type: 'chat', content } as ChatRequest
       if (options?.model) (request as any).model = options.model
       if (options?.thinkingEnabled !== undefined) (request as any).thinking_enabled = options.thinkingEnabled
-      if (options?.reasoningEffort && options.reasoningEffort !== 'off') {
-        (request as any).reasoning_effort = options.reasoningEffort
-      } else if (options?.reasoningEffort === 'off') {
-        (request as any).thinking_enabled = false
-      }
-
-      for await (const event of chatService.processMessage(conversationId, request)) {
-        yield event
-      }
+      if (options?.reasoningEffort && options.reasoningEffort !== 'off') (request as any).reasoning_effort = options.reasoningEffort
+      else if (options?.reasoningEffort === 'off') (request as any).thinking_enabled = false
+      for await (const event of chatService.processMessage(conversationId, request)) yield event
     },
-
-    /**
-     * List branches for a conversation.
-     */
-    listBranches: async (conversationId: string) => {
-      return piConversationService.listBranches(conversationId)
-    },
-
-    /**
-     * Get the Pi session file for a conversation branch.
-     */
-    getSessionFile: async (conversationId: string, branchId: string) => {
-      return piConversationService.getSessionFile(conversationId, branchId)
-    },
-
-    /**
-     * Update conversation title.
-     */
-    updateTitle: async (conversationId: string, title: string) => {
-      return conversationService.updateTitle(conversationId, title)
-    },
-
-    /**
-     * Get conversation details.
-     */
-    getConversation: async (conversationId: string) => {
-      return conversationService.getById(conversationId)
-    },
+    listBranches: async (conversationId: string) => piConversationService.listBranches(conversationId),
+    getSessionFile: async (conversationId: string, branchId: string) => piConversationService.getSessionFile(conversationId, branchId),
+    updateTitle: async (conversationId: string, title: string) => conversationService.updateTitle(conversationId, title),
+    getConversation: async (conversationId: string) => conversationService.getById(conversationId),
   }
   console.log('[Startup] YARC chat bridge exposed on globalThis.__yarcChatBridge')
 }
-
-// ── Auto-start WeChat if credentials exist ──────────────────────────────────
 
 async function autoStartWechat() {
   const { existsSync } = await import('node:fs')
@@ -738,10 +590,7 @@ async function autoStartWechat() {
   }
 
   console.log('[Startup] WeChat credentials found, initializing Pi session for auto-reconnect…')
-
   try {
-    // Initialize Pi SDK and create a session to trigger extension loading
-    // The extension's session_start handler will detect credentials and auto-connect
     await piService.initForExtensions()
     console.log('[Startup] WeChat auto-start initiated')
   } catch (err) {
@@ -756,17 +605,15 @@ const server = serve(
     console.log(`   Environment: ${config.nodeEnv}`)
     console.log(`   Database: ${config.databaseUrl.replace(/\/\/.*@/, '//***@')}`)
 
-    // Recover pending jobs and start the shared data watcher used by the
-    // editable workspace and WebDAV local-change synchronization.
     recoverJobs()
     fileService.startWatcher()
+    projectWorkspaceWatcherService.start().catch((err) => {
+      console.warn('[Startup] Project workspace watcher failed to start:', err)
+    })
     webDavSyncService.start().catch((err) => {
       console.warn('[Startup] WebDAV sync scheduler failed to start:', err)
     })
 
-    // Seed the agent workspace filesystem from DB once at startup.
-    // This replaces the per-request ensureAgentWorkspace() in GET /api/settings
-    // that caused repeated file writes and SSE pi-config-changed events.
     ensureAgentWorkspaceFromDb()
       .then(() => piService.recoverRuntimeJournals())
       .then(({ recovered }) => {
@@ -776,11 +623,8 @@ const server = serve(
         console.warn('[Startup] Agent workspace seed or Runtime recovery failed:', err)
       })
 
-    // Expose chat bridge for WeChat extension
     setupChatBridge()
-
-    // Start subagent filesystem watcher for real-time status updates
-    subagentWatcher.start()    // Auto-start WeChat if credentials exist
+    subagentWatcher.start()
     autoStartWechat().catch((err) => {
       console.warn('[Startup] WeChat auto-start failed:', err)
     })
@@ -794,6 +638,8 @@ const shutdown = async (signal: string) => {
   if (shuttingDown) return
   shuttingDown = true
   console.log(`[Shutdown] ${signal}: disposing Pi Runtime Workers`)
+  projectWorkspaceWatcherService.stop()
+  await projectLiveFileManager.disposeAll().catch((err) => console.warn('[Shutdown] Project live file disposal failed:', err))
   await piService.disposeRuntimes(signal).catch((err) => {
     console.warn('[Shutdown] Pi Runtime disposal failed:', err)
   })
