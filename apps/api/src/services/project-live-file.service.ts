@@ -1,4 +1,5 @@
 import { relative, resolve, sep } from 'node:path'
+import { AppError } from '../lib/errors.js'
 import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
 import { LiveFileService, liveFileService } from './live-file.service.js'
 import { projectHistoryService } from './project-history.service.js'
@@ -138,8 +139,17 @@ export class ProjectLiveFileManager {
 
   async flushProject(projectId: string, prefix = '') {
     const service = await this.get(projectId)
-    if (prefix) await resolveProjectPath(projectId, normalizeProjectRelativePath(prefix), { allowMissing: true })
-    return service.flushAll(prefix)
+    const normalized = prefix ? normalizeProjectRelativePath(prefix) : ''
+    if (normalized) await resolveProjectPath(projectId, normalized, { allowMissing: true })
+    const paths = [...this.sessionMap(service).keys()].filter(path => !normalized || path === normalized || path.startsWith(`${normalized}/`))
+    const results = []
+    for (const path of paths) {
+      const result = await service.flush(path)
+      if (!result) continue
+      if (result.conflict) throw new AppError('PROJECT_FILE_CONFLICT', `Live file conflict: ${path}`, 409)
+      results.push(result)
+    }
+    return results
   }
 
   async hasSessions(projectId: string, prefix = '') {
@@ -184,14 +194,20 @@ export class ProjectLiveFileManager {
   async disposeProject(projectId: string) {
     const instance = this.instances.get(projectId)
     if (!instance) return
+    await this.flushProject(projectId).catch(() => undefined)
     this.instances.delete(projectId)
+    this.resetMatchingSessions(instance.service, () => true, 'project-dispose')
     await instance.service.disposeAll()
   }
 
   async disposeAll() {
-    const instances = [...this.instances.values()]
+    const entries = [...this.instances.entries()]
+    for (const [projectId] of entries) await this.flushProject(projectId).catch(() => undefined)
     this.instances.clear()
-    await Promise.allSettled(instances.map(instance => instance.service.disposeAll()))
+    for (const [, instance] of entries) {
+      this.resetMatchingSessions(instance.service, () => true, 'shutdown')
+      await instance.service.disposeAll().catch(() => undefined)
+    }
   }
 }
 
