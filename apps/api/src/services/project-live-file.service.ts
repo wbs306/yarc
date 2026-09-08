@@ -64,6 +64,18 @@ export class ProjectLiveFileManager {
     })
   }
 
+  private async ensureBaselineBeforeWrite(projectId: string, path: string) {
+    try {
+      await projectHistoryService.ensureBaseline(projectId, path)
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'NOT_FOUND') {
+        await projectHistoryService.ensureBaseline(projectId, path, { missing: true })
+        return
+      }
+      throw error
+    }
+  }
+
   async get(projectId: string) {
     const { root } = await resolveProjectRoot(projectId)
     const existing = this.instances.get(projectId)
@@ -73,7 +85,7 @@ export class ProjectLiveFileManager {
       rootDir: root,
       workspaceKind: 'project',
       projectId,
-      beforeWrite: async (path) => { await projectHistoryService.ensureBaseline(projectId, path) },
+      beforeWrite: async (path) => { await this.ensureBaselineBeforeWrite(projectId, path) },
       afterWrite: async (path, source) => { await projectHistoryService.trackChange(projectId, path, source === 'agent' || source === 'disk' ? 'external' : 'autosave') },
     })
     const service = this.guardService(projectId, root, raw)
