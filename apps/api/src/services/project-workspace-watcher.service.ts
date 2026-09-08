@@ -49,7 +49,8 @@ export class ProjectWorkspaceWatcherService {
     projectFileService.notifyExternalChange(projectId, relativePath, String(change?.type || change?.action || 'external'))
 
     if (isProjectPiRuntimeResourcePath(relativePath)) {
-      await piService.reloadProject(projectId, `project-file:${relativePath}`)
+      const registry = (piService as any).runtimeRegistry
+      if (registry?.reloadProject) await registry.reloadProject(projectId, `project-file:${relativePath}`)
     }
   }
 }
