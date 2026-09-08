@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useApi } from '@/composables/useApi'
 import PdfViewer from '@/components/pdf/PdfViewer.vue'
-import type { LatexBuild, LatexDiagnostic, LatexEngine } from '@yarc/shared'
+import type { LatexBuild, LatexDiagnostic, LatexEngine, LatexSyncTexRect } from '@yarc/shared'
 
 const props = withDefaults(defineProps<{
   path: string
@@ -38,11 +38,11 @@ const syncLoading = ref(false)
 const buildInfoOpen = ref(false)
 const pdfPage = ref<number | null>(null)
 const pdfPosition = ref<{ page: number; x?: number; y?: number } | null>(null)
-type PdfHighlight = { page: number; x: number; y: number; width?: number; height?: number }
-const pdfHighlight = ref<PdfHighlight | null>(null)
+const pdfHighlights = ref<LatexSyncTexRect[]>([])
 const pdfViewer = ref<InstanceType<typeof PdfViewer> | null>(null)
 let pollTimer: number | null = null
 let pdfHighlightTimer: number | null = null
+let pendingPdfHighlights: LatexSyncTexRect[] = []
 let requestSequence = 0
 let syncedBuildId = ''
 
@@ -81,20 +81,27 @@ const clearPoll = () => {
 }
 
 const clearPdfHighlight = () => {
+  pendingPdfHighlights = []
   if (pdfHighlightTimer !== null) {
     window.clearTimeout(pdfHighlightTimer)
     pdfHighlightTimer = null
   }
-  pdfHighlight.value = null
+  pdfHighlights.value = []
 }
 
-const flashPdfHighlight = (highlight: PdfHighlight) => {
+const flashPdfHighlight = (rectangles: LatexSyncTexRect[]) => {
   clearPdfHighlight()
-  pdfHighlight.value = highlight
+  pdfHighlights.value = rectangles
   pdfHighlightTimer = window.setTimeout(() => {
     pdfHighlightTimer = null
-    pdfHighlight.value = null
-  }, 1400)
+    pdfHighlights.value = []
+  }, 2200)
+}
+
+const handlePdfNavigationComplete = () => {
+  // Start the animation only after arrival, including an already-visible target.
+  // flashPdfHighlight clears the pending state so completion cannot replay it.
+  if (pendingPdfHighlights.length) flashPdfHighlight(pendingPdfHighlights)
 }
 
 const loadLog = async (id: string, sequence: number) => {
@@ -104,7 +111,7 @@ const loadLog = async (id: string, sequence: number) => {
   if (build.value) build.value.diagnostics = result.diagnostics
 }
 
-const syncToCurrentSource = async (id: string, sequence: number) => {
+const syncToCurrentSource = async (id: string, sequence: number, highlight = false) => {
   if (syncedBuildId === id || !build.value?.synctexAvailable) return
   clearPdfHighlight()
   syncedBuildId = id
@@ -129,16 +136,11 @@ const syncToCurrentSource = async (id: string, sequence: number) => {
           ...(Number.isFinite(y) ? { y } : {}),
         }
       : null
-    const highlight = pdfPage.value && Number.isFinite(x) && Number.isFinite(y)
-      ? {
-          page: pdfPage.value,
-          x,
-          y,
-          ...(Number.isFinite(Number(result.width)) ? { width: Number(result.width) } : {}),
-          ...(Number.isFinite(Number(result.height)) ? { height: Number(result.height) } : {}),
-        }
-      : null
-    if (highlight) flashPdfHighlight(highlight)
+    // Draw each matched line separately instead of dropping all but the first
+    // or merging boxes across columns/pages into one oversized rectangle.
+    // Automatic post-build synchronization is quiet; only explicit location
+    // requests should flash after arrival.
+    pendingPdfHighlights = highlight ? (result.rectangles || []) : []
     if (pdfPage.value) jumpToPdfPage()
     else syncError.value = 'SyncTeX 未返回 PDF 页码'
   } catch (err) {
@@ -206,7 +208,7 @@ const cancelBuild = async () => {
   }
 }
 
-const jumpToPdfPage = (attempt = 0) => {
+const jumpToPdfPage = () => {
   const position = pdfPosition.value
   if (!position) return
   if (position.x !== undefined && position.y !== undefined && pdfViewer.value?.goToPosition) {
@@ -217,8 +219,13 @@ const jumpToPdfPage = (attempt = 0) => {
     pdfViewer.value.goToPage(position.page)
     return
   }
-  if (attempt < 24) window.setTimeout(() => jumpToPdfPage(attempt + 1), 120)
 }
+
+// Hand the pending position to the viewer as soon as it mounts, rather than
+// polling every 120 ms (and potentially giving up before a large PDF is ready).
+watch(pdfViewer, (viewer) => {
+  if (viewer) jumpToPdfPage()
+}, { flush: 'post' })
 
 const handlePdfPosition = async (position: { page: number; x: number; y: number }) => {
   const current = build.value
@@ -256,7 +263,7 @@ const locateCurrentSource = () => {
   const current = build.value
   if (!current?.synctexAvailable) return
   syncedBuildId = ''
-  void syncToCurrentSource(current.id, requestSequence)
+  void syncToCurrentSource(current.id, requestSequence, true)
 }
 
 const formatLocation = (diagnostic: LatexDiagnostic) => {
@@ -352,9 +359,11 @@ onBeforeUnmount(() => {
         :source-url="pdfUrl"
         :document-id="pdfDocumentId"
         :title="`${name} 编译结果`"
-        :source-highlight="pdfHighlight"
+        :source-highlights="pdfHighlights"
         :show-back-button="false"
         @pdf-position="handlePdfPosition"
+        @navigation-complete="handlePdfNavigationComplete"
+        @navigation-cancelled="clearPdfHighlight"
       />
     </div>
     <div v-else-if="isActive" class="latex-build-placeholder">正在等待 TeX Live 编译结果…</div>

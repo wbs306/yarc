@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import type { Paper } from '@/stores/paper'
+import type { LatexSyncTexRect } from '@yarc/shared'
 import { useChatStore } from '@/stores/chat'
 import { useNoteStore, type Note } from '@/stores/note'
 import { usePdfUrl } from '@/composables/useApi'
@@ -15,7 +16,9 @@ import { createPluginRegistration, type PluginRegistry } from '@embedpdf/core'
 import { DocumentManagerPluginPackage, DocumentContent } from '@embedpdf/plugin-document-manager/vue'
 import { ViewportPluginPackage, Viewport } from '@embedpdf/plugin-viewport/vue'
 import { ScrollPluginPackage, Scroller, ScrollStrategy } from '@embedpdf/plugin-scroll/vue'
-import { RenderLayer, RenderPluginPackage } from '@embedpdf/plugin-render/vue'
+import { RenderPluginPackage, type RenderCapability } from '@embedpdf/plugin-render/vue'
+import PdfPagePreview from './PdfPagePreview.vue'
+import { PdfPagePreviewCache } from '@/lib/pdf-page-preview-cache'
 import { TilingLayer, TilingPluginPackage } from '@embedpdf/plugin-tiling/vue'
 import { InteractionManagerPluginPackage, GlobalPointerProvider, PagePointerProvider } from '@embedpdf/plugin-interaction-manager/vue'
 import { SelectionLayer, SelectionPluginPackage } from '@embedpdf/plugin-selection/vue'
@@ -31,7 +34,7 @@ const props = defineProps<{
   sourceUrl?: string
   documentId?: string
   title?: string
-  sourceHighlight?: { page: number; x: number; y: number; width?: number; height?: number } | null
+  sourceHighlights?: LatexSyncTexRect[]
   showBackButton?: boolean
 }>()
 
@@ -39,6 +42,8 @@ const emit = defineEmits<{
   (e: 'back'): void
   (e: 'showDetails'): void
   (e: 'pdf-position', position: { page: number; x: number; y: number }): void
+  (e: 'navigation-complete'): void
+  (e: 'navigation-cancelled'): void
 }>()
 
 // ── 状态 ─────────────────────────────────────────────────────────────────────
@@ -49,6 +54,8 @@ const noteStore = useNoteStore()
 const activeDocId = ref('')
 const currentPage = ref(1)
 const totalPages = ref(0)
+const layoutReady = ref(false)
+let navigationSequence = 0
 const pendingGoToPage = ref<number | null>(null)
 const pendingGoToPosition = ref<{ page: number; x: number; y: number } | null>(null)
 const loadingDocument = ref(false)
@@ -63,7 +70,7 @@ const activeHighlight = ref<{
 } | null>(null)
 
 const zoomLevel = ref(1)
-const showPreviewStrip = ref(true)
+const showPreviewStrip = ref(false)
 const viewerRootRef = ref<HTMLElement | null>(null)
 const viewportWrapRef = ref<HTMLElement | null>(null)
 
@@ -423,6 +430,8 @@ const plugins = computed(() => {
 
 let registryRef: PluginRegistry | null = null
 let zoomUnsub: Unsubscribe | null = null
+let navigationZoomUnsub: Unsubscribe | null = null
+let navigationEndUnsub: Unsubscribe | null = null
 let scrollUnsub: Unsubscribe | null = null
 let layoutUnsub: Unsubscribe | null = null
 let documentUnsubs: Unsubscribe[] = []
@@ -433,6 +442,16 @@ const getPluginProvides = (id: string): any => registryRef?.getPlugin(id)?.provi
 const getDocumentManager = () => getPluginProvides('document-manager')
 const getDocZoom = () => activeDocId.value ? getPluginProvides('zoom')?.forDocument?.(activeDocId.value) : null
 const getDocScroll = () => activeDocId.value ? getPluginProvides('scroll')?.forDocument?.(activeDocId.value) : null
+const pagePreviews = new PdfPagePreviewCache((pageIndex) => {
+  const render = getPluginProvides('render') as RenderCapability | undefined
+  if (!render || !activeDocId.value) return Promise.reject(new Error('PDF renderer is not ready'))
+  const task = render.forDocument(activeDocId.value).renderPage({
+    pageIndex,
+    options: { scaleFactor: 0.75, dpr: 1 },
+  })
+  return new Promise<Blob>((resolve, reject) => task.wait(resolve, reject))
+})
+const loadPagePreview = (pageIndex: number) => pagePreviews.get(pageIndex)
 const getSelectionScope = () => activeDocId.value ? getPluginProvides('selection')?.forDocument?.(activeDocId.value) : null
 const getSelectionCapability = () => getPluginProvides('selection')
 const getDocPan = () => activeDocId.value ? getPluginProvides('pan')?.forDocument?.(activeDocId.value) : null
@@ -440,12 +459,16 @@ const getInteractionScope = () => activeDocId.value ? getPluginProvides('interac
 
 const cleanupZoomListener = () => {
   zoomUnsub?.()
+  navigationZoomUnsub?.()
   zoomUnsub = null
+  navigationZoomUnsub = null
 }
 
 const cleanupScrollListener = () => {
   scrollUnsub?.()
   layoutUnsub?.()
+  navigationEndUnsub?.()
+  navigationEndUnsub = null
   scrollUnsub = null
   layoutUnsub = null
 }
@@ -482,6 +505,13 @@ const setupZoomListener = () => {
         zoomLevel.value = newState.currentZoomLevel
       }
     }) || null
+    // Auto-fit can issue an instant anchor-restoring scroll after viewport
+    // resize. Reapply an unfinished destination using the updated layout.
+    navigationZoomUnsub = docZoom.onZoomChange?.(() => {
+      // Viewport applies its anchor scroll in rAF. Resume on the following
+      // frame, otherwise Chromium can drop a smooth scroll issued alongside it.
+      requestAnimationFrame(() => { void runPendingNavigation() })
+    }) || null
   } catch (err) {
     console.warn('[YARC] Failed to subscribe to zoom changes:', err)
   }
@@ -506,8 +536,14 @@ const setupScrollListener = () => {
     totalPages.value = event.totalPages
   }) || null
 
+  navigationEndUnsub = scrollCapability?.onPageChangeState?.((event: { documentId: string; state: { isChanging: boolean } }) => {
+    if (event.documentId !== activeDocId.value || event.state.isChanging) return
+    if (isNavigationAtTarget()) completePendingNavigation()
+  }) || null
+
   layoutUnsub = scrollCapability?.onLayoutReady?.((event: any) => {
     if (event.documentId !== activeDocId.value) return
+    layoutReady.value = true
     currentPage.value = event.pageNumber
     totalPages.value = event.totalPages
   }) || null
@@ -691,6 +727,11 @@ const onInitialized = async (registry: PluginRegistry) => {
 }
 
 watch([pdfUrl, currentDocumentId], ([url, documentId]) => {
+  navigationSequence++
+  layoutReady.value = false
+  pendingGoToPage.value = null
+  pendingGoToPosition.value = null
+  pagePreviews.clear()
   openSequence++
   clearPendingOpen()
   clearActiveHighlight()
@@ -712,6 +753,9 @@ watch([pdfUrl, currentDocumentId], ([url, documentId]) => {
 })
 
 onBeforeUnmount(() => {
+  cancelPendingNavigation()
+  layoutReady.value = false
+  pagePreviews.clear()
   openSequence++
   clearPendingOpen()
   cleanupZoomListener()
@@ -734,8 +778,16 @@ const toolbarHidden = ref(false)
 let lastPdfScrollTop = 0
 const onPdfScroll = (e: Event) => {
   const el = e.target as HTMLElement | null
-  if (!el || typeof el.scrollTop !== 'number') return
+  // Thumbnail auto-scrolling must not resize the main PDF viewport either.
+  if (!el?.classList.contains('pdf-viewport')) return
   const st = el.scrollTop
+  // Hiding the toolbar resizes the viewport. FitWidth reacts with an instant
+  // scroll to preserve its zoom anchor, interrupting a long smooth page jump.
+  // Only manual scrolling should change the toolbar height.
+  if (getDocScroll()?.getPageChangeState?.().isChanging) {
+    lastPdfScrollTop = st
+    return
+  }
   if (st < 40) toolbarHidden.value = false
   else if (st > lastPdfScrollTop + 8) toolbarHidden.value = true
   else if (st < lastPdfScrollTop - 8) toolbarHidden.value = false
@@ -774,50 +826,84 @@ onMounted(() => {
 
 // ── 翻页与缩放 ────────────────────────────────────────────────────────────────
 
-const goToPage = (page: number) => {
-  if (!Number.isFinite(page)) return
-  const requested = Math.max(1, Math.round(page))
-  if (!totalPages.value) {
-    pendingGoToPage.value = requested
-    return
-  }
-  const target = Math.min(totalPages.value, requested)
+const clearPendingNavigation = () => {
+  navigationSequence++
   pendingGoToPage.value = null
   pendingGoToPosition.value = null
+}
+
+const cancelPendingNavigation = () => {
+  clearPendingNavigation()
+  emit('navigation-cancelled')
+}
+
+const completePendingNavigation = () => {
+  clearPendingNavigation()
+  emit('navigation-complete')
+}
+
+const isNavigationAtTarget = () => {
+  const position = pendingGoToPosition.value
+  const requested = position?.page ?? pendingGoToPage.value
+  const viewport = getViewportElement()
+  if (!requested || !viewport || !totalPages.value || !layoutReady.value) return false
+  const rect = getDocScroll()?.getRectPositionForPage?.(Math.min(totalPages.value, requested) - 1, {
+    origin: { x: position?.x ?? 0, y: position?.y ?? 0 },
+    size: { width: 0, height: 0 },
+  })
+  if (!rect) return false
+  const gap = getPluginProvides('viewport')?.getViewportGap?.() || 0
+  const clamp = (value: number, max: number) => Math.max(0, Math.min(max, value))
+  const x = clamp(rect.origin.x + gap - (position ? viewport.clientWidth / 2 : 0), viewport.scrollWidth - viewport.clientWidth)
+  const y = clamp(rect.origin.y + gap - (position ? viewport.clientHeight / 2 : 0), viewport.scrollHeight - viewport.clientHeight)
+  return Math.abs(viewport.scrollLeft - x) < 3 && Math.abs(viewport.scrollTop - y) < 3
+}
+
+const runPendingNavigation = async () => {
+  const position = pendingGoToPosition.value
+  const requested = position?.page ?? pendingGoToPage.value
+  if (!requested || !totalPages.value || !layoutReady.value || !getDocScroll()) return
+  const sequence = ++navigationSequence
+  const documentId = activeDocId.value
+  const target = Math.min(totalPages.value, requested)
+  // Render/decode only the destination before moving the viewport. The same
+  // cached image is used when its virtualized page mounts; tiles add detail.
+  await pagePreviews.get(target - 1, true)
+  if (sequence !== navigationSequence || documentId !== activeDocId.value) return
+  const scroll = getDocScroll()
+  if (!scroll || !layoutReady.value) return
   currentPage.value = target
-  getDocScroll()?.scrollToPage?.({ pageNumber: target, behavior: 'smooth', alignY: 0 })
+  if (isNavigationAtTarget()) {
+    completePendingNavigation()
+    return
+  }
+  scroll.scrollToPage({
+    pageNumber: target,
+    ...(position ? { pageCoordinates: { x: position.x, y: position.y }, alignX: 50 } : {}),
+    behavior: 'smooth',
+    alignY: position ? 50 : 0,
+  })
+}
+
+const goToPage = (page: number) => {
+  if (!Number.isFinite(page)) return
+  navigationSequence++
+  pendingGoToPosition.value = null
+  pendingGoToPage.value = Math.max(1, Math.round(page))
+  void runPendingNavigation()
 }
 
 const goToPosition = (page: number, x: number, y: number) => {
   if (!Number.isFinite(page) || !Number.isFinite(x) || !Number.isFinite(y)) return
-  const requested = Math.max(1, Math.round(page))
-  const position = { page: requested, x, y }
-  if (!totalPages.value) {
-    pendingGoToPosition.value = position
-    return
-  }
-  const target = Math.min(totalPages.value, requested)
+  navigationSequence++
   pendingGoToPage.value = null
-  pendingGoToPosition.value = null
-  currentPage.value = target
-  getDocScroll()?.scrollToPage?.({
-    pageNumber: target,
-    pageCoordinates: { x, y },
-    behavior: 'smooth',
-    alignX: 50,
-    alignY: 50,
-  })
+  pendingGoToPosition.value = { page: Math.max(1, Math.round(page)), x, y }
+  void runPendingNavigation()
 }
 
-watch(totalPages, (pages) => {
-  if (pages <= 0) return
-  if (pendingGoToPosition.value) {
-    const position = pendingGoToPosition.value
-    goToPosition(position.page, position.x, position.y)
-  } else if (pendingGoToPage.value) {
-    goToPage(pendingGoToPage.value)
-  }
-})
+// Page count can be known before Scroller mounts. Its layout-ready event also
+// restores the initial scroll offset, so do not send a jump ahead of that event.
+watch([totalPages, layoutReady], () => { void runPendingNavigation() }, { flush: 'post' })
 
 const previewToolbarZoom = (factor: number) => {
   const zoom = getDocZoom()
@@ -1396,7 +1482,9 @@ defineExpose({ scrollToNote, goToPage, goToPosition })
 </script>
 
 <template>
-  <div ref="viewerRootRef" class="pdf-viewer" :class="{ 'selection-mode': selectionMode }">
+  <div ref="viewerRootRef" class="pdf-viewer" :class="{ 'selection-mode': selectionMode }"
+    @pointerdown.capture="cancelPendingNavigation" @wheel.capture="cancelPendingNavigation" @keydown.capture="cancelPendingNavigation"
+  >
     <div class="pdf-toolbar" :class="{ hidden: toolbarHidden }">
       <div class="pdf-toolbar-left">
         <button v-if="showBackButton" class="tb-btn back-btn" @click="$emit('back')" title="返回文献列表">
@@ -1514,14 +1602,17 @@ defineExpose({ scrollToNote, goToPage, goToPosition })
                             :style="{ width: page.width + 'px', height: page.height + 'px' }"
                             @dblclick="handlePdfDoubleClick(page, $event)"
                           >
+                            <!-- SyncTeX reports unscaled PDF-point coordinates; page.width/height
+                                 are already scaled by EmbedPDF's current zoom level. -->
                             <div
-                              v-if="sourceHighlight && sourceHighlight.page === page.pageIndex + 1"
+                              v-for="(rect, index) in (sourceHighlights || []).filter(rect => rect.page === page.pageIndex + 1)"
+                              :key="index"
                               class="source-position-highlight"
                               :style="{
-                                left: `${sourceHighlight.x}px`,
-                                top: `${sourceHighlight.y}px`,
-                                width: `${Math.max(1, sourceHighlight.width || 1)}px`,
-                                height: `${Math.max(4, sourceHighlight.height || 4)}px`,
+                                left: `${rect.x * zoomLevel}px`,
+                                top: `${rect.y * zoomLevel}px`,
+                                width: `${rect.width * zoomLevel}px`,
+                                height: `${rect.height * zoomLevel}px`,
                               }"
                               aria-hidden="true"
                             />
@@ -1540,7 +1631,7 @@ defineExpose({ scrollToNote, goToPage, goToPosition })
                               @click="clearActiveHighlight"
                               @contextmenu.prevent
                             >
-                              <RenderLayer :documentId="activeDocumentId" :page-index="page.pageIndex" class="pdf-layer" />
+                              <PdfPagePreview :document-id="activeDocumentId" :page-index="page.pageIndex" :load="loadPagePreview" />
                               <TilingLayer :documentId="activeDocumentId" :page-index="page.pageIndex" class="pdf-layer" />
                               <SearchLayer :documentId="activeDocumentId" :page-index="page.pageIndex" />
                               <MarqueeZoom :documentId="activeDocumentId" :page-index="page.pageIndex" />
@@ -1819,8 +1910,9 @@ defineExpose({ scrollToNote, goToPage, goToPosition })
   border-radius: 3px;
   background: rgba(var(--color-primary-rgb), 0.18);
   box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.08);
+  box-sizing: border-box;
   pointer-events: none;
-  animation: source-position-highlight-flash 1.2s ease-in-out both;
+  animation: source-position-highlight-flash 2s ease-in-out both;
 }
 @keyframes source-position-highlight-flash {
   0%, 100% { opacity: 0; }

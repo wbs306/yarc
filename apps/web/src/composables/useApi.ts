@@ -3,6 +3,8 @@ import type {
   LatexBuild,
   LatexBuildLog,
   LatexEngine,
+  LatexSyncTexForwardResult,
+  LatexSyncTexBackwardResult,
   IeeeSearchMode,
   IeeeSearchResponse,
   IeeeSearchSort,
@@ -548,8 +550,8 @@ export function useApi() {
       return `${API_BASE}/latex/builds/${encodeURIComponent(id)}/pdf${versionParam}`
     },
 
-    getLatexSyncTex: (id: string, params: Record<string, string | number>) =>
-      request<Record<string, unknown>>(`/latex/builds/${encodeURIComponent(id)}/synctex`, {
+    getLatexSyncTex: <T extends 'forward' | 'backward'>(id: string, params: Record<string, string | number> & { direction: T }) =>
+      request<Extract<LatexSyncTexForwardResult | LatexSyncTexBackwardResult, { direction: T }>>(`/latex/builds/${encodeURIComponent(id)}/synctex`, {
         params: Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)])),
       }),
 

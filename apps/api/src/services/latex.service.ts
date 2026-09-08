@@ -13,6 +13,7 @@ import type {
   LatexEngine,
   LatexSyncTexBackwardResult,
   LatexSyncTexForwardResult,
+  LatexSyncTexRect,
 } from '@yarc/shared'
 
 const ENGINES: LatexEngine[] = ['pdflatex', 'xelatex', 'lualatex']
@@ -155,12 +156,42 @@ export const parseSyncTexForwardOutput = (
   line: number,
   column: number,
 ): LatexSyncTexForwardResult => {
-  const fields = parseSyncTexFields(raw)
+  // Each Page starts a result record. Keep fields within that record so a
+  // missing value cannot accidentally be borrowed from the next match.
+  const records = raw.split(/(?=^Page:)/m)
+    .filter((record) => record.startsWith('Page:'))
+    .map(parseSyncTexFields)
+  const rectangles: LatexSyncTexRect[] = []
+  let firstRect: LatexSyncTexRect | undefined
+  const seen = new Set<string>()
+  for (const [index, fields] of records.entries()) {
+    const page = firstNumber(fields, 'Page')
+    const h = firstNumber(fields, 'h')
+    const v = firstNumber(fields, 'v')
+    const w = firstNumber(fields, 'W')
+    const height = firstNumber(fields, 'H')
+    if (page === undefined || !Number.isInteger(page) || page < 1
+      || h === undefined || v === undefined || w === undefined
+      || height === undefined || height <= 0 || w === 0) continue
+    // SyncTeX CLI emits v = baseline + depth and H = height + depth:
+    // its box grows upwards, whereas CSS rectangles grow downwards.
+    // https://github.com/TeX-Live/texlive-source/blob/trunk/texk/web2c/synctexdir/synctex_main.c
+    const rect = { page, x: h, y: v - height, width: Math.abs(w), height }
+    if (index === 0) firstRect = rect
+    const key = JSON.stringify(rect)
+    if (!seen.has(key)) {
+      seen.add(key)
+      rectangles.push(rect)
+    }
+  }
+  const fields = records[0] || new Map<string, string[]>()
   const page = firstNumber(fields, 'Page')
   const x = firstNumber(fields, 'x', 'h')
   const y = firstNumber(fields, 'y', 'v')
-  const width = firstNumber(fields, 'W')
-  const height = firstNumber(fields, 'H')
+  const boxX = firstRect?.x
+  const boxY = firstRect?.y
+  const width = firstRect?.width
+  const height = firstRect?.height
   return {
     direction: 'forward',
     file,
@@ -169,8 +200,11 @@ export const parseSyncTexForwardOutput = (
     ...(page !== undefined ? { page } : {}),
     ...(x !== undefined ? { x } : {}),
     ...(y !== undefined ? { y } : {}),
+    ...(boxX !== undefined ? { boxX } : {}),
+    ...(boxY !== undefined ? { boxY } : {}),
     ...(width !== undefined ? { width } : {}),
     ...(height !== undefined ? { height } : {}),
+    rectangles,
     raw,
   }
 }

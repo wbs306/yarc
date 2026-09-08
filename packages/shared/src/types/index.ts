@@ -205,6 +205,15 @@ export interface LatexBuildLog {
   diagnostics: LatexDiagnostic[]
 }
 
+/** PDF points relative to the page's top-left corner; page is 1-based. */
+export interface LatexSyncTexRect {
+  page: number
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 export interface LatexSyncTexForwardResult {
   direction: 'forward'
   file: string
@@ -213,8 +222,13 @@ export interface LatexSyncTexForwardResult {
   page?: number
   x?: number
   y?: number
+  /** Top-left origin of the first enclosing box (v - H, not raw v). */
+  boxX?: number
+  boxY?: number
   width?: number
   height?: number
+  /** All distinct enclosing boxes, including wrapped lines and page breaks. */
+  rectangles: LatexSyncTexRect[]
   raw: string
 }
 
