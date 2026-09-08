@@ -79,7 +79,7 @@ export class ProjectService {
           name,
           directoryName,
           description: input.description?.trim() || null,
-          settings: input.settings || {},
+          settings: (input.settings || {}) as any,
         },
       })
     } catch (error) {
@@ -91,7 +91,7 @@ export class ProjectService {
 
   async update(id: string, input: { name?: string; description?: string | null; settings?: Record<string, unknown> }) {
     await this.get(id)
-    const data: Record<string, unknown> = { updatedAt: new Date() }
+    const data: any = { updatedAt: new Date() }
     if (input.name !== undefined) {
       const name = input.name.trim()
       if (!name) throw new AppError('VALIDATION_ERROR', 'Project name is required', 400)
@@ -118,15 +118,19 @@ export class ProjectService {
     const { piService } = await import('./pi.service.js')
     const { projectHistoryService } = await import('./project-history.service.js')
     const { projectLiveFileManager } = await import('./project-live-file.service.js')
+    const { projectPiContextService } = await import('./project-pi-context.service.js')
 
-    const runtimeRegistry = (piService as any).runtimeRegistry
-    if (runtimeRegistry?.disposeProject) await runtimeRegistry.disposeProject(id, 'project_deleted').catch(() => undefined)
+    // Preserve every writable Project buffer before deleting the workspace.
+    // A live conflict intentionally blocks permanent deletion rather than
+    // silently discarding one side of the edit.
+    await projectLiveFileManager.flushProject(id)
+    await projectHistoryService.flushPending(id)
+    await projectPiContextService.disposeProject(id, 'project_deleted').catch(() => undefined)
     await projectLiveFileManager.disposeProject(id).catch(() => undefined)
     for (const conversation of conversations) {
       await piService.disposeConversationRuntime(conversation.id, 'project_deleted').catch(() => undefined)
       await piService.deleteSessionFiles(conversation.metadata as Record<string, unknown>).catch(() => undefined)
     }
-    await projectHistoryService.flushPending(id).catch(() => undefined)
 
     const verified = await resolveProjectRoot(id)
     if (verified.root !== root) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Project root changed during deletion', 409)
