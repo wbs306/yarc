@@ -35,6 +35,7 @@ const loading = ref(false)
 const error = ref('')
 const syncError = ref('')
 const syncLoading = ref(false)
+const buildInfoOpen = ref(false)
 const pdfPage = ref<number | null>(null)
 const pdfPosition = ref<{ page: number; x?: number; y?: number } | null>(null)
 type PdfHighlight = { page: number; x: number; y: number; width?: number; height?: number }
@@ -54,6 +55,12 @@ const pdfDocumentId = computed(() => build.value ? `latex-${build.value.id}` : '
 const diagnostics = computed<LatexDiagnostic[]>(() => build.value?.diagnostics || [])
 const errors = computed(() => diagnostics.value.filter((item) => item.severity === 'error'))
 const warnings = computed(() => diagnostics.value.filter((item) => item.severity === 'warning'))
+const latexErrorCount = computed(() => errors.value.length
+  + (error.value ? 1 : 0)
+  + (build.value?.error ? 1 : 0)
+  + (syncError.value ? 1 : 0))
+const latexWarningCount = computed(() => warnings.value.length)
+const hasBuildInfo = computed(() => !!build.value || !!log.value || !!error.value || !!syncError.value)
 
 const emitBuildStatus = () => {
   emit('status', {
@@ -169,6 +176,7 @@ const startBuild = async () => {
   error.value = ''
   log.value = ''
   syncError.value = ''
+  buildInfoOpen.value = false
   pdfPage.value = null
   pdfPosition.value = null
   clearPdfHighlight()
@@ -263,6 +271,7 @@ watch(() => props.path, () => {
   log.value = ''
   error.value = ''
   syncError.value = ''
+  buildInfoOpen.value = false
   pdfPage.value = null
   pdfPosition.value = null
   clearPdfHighlight()
@@ -287,30 +296,53 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="latex-build-panel">
-    <div v-if="error" class="latex-build-error">{{ error }}</div>
-    <div v-if="build?.error" class="latex-build-error">{{ build.error }}</div>
-    <div v-if="syncError" class="latex-build-error">{{ syncError }}</div>
-
-    <div v-if="build" class="latex-build-meta">
-      <span v-if="build.durationMs !== undefined">耗时 {{ (build.durationMs / 1000).toFixed(1) }} 秒</span>
-      <span>{{ build.pdfAvailable ? 'PDF 已生成' : '暂无 PDF' }}</span>
-      <span>{{ build.synctexAvailable ? 'SyncTeX 已生成' : '暂无 SyncTeX' }}</span>
-      <span v-if="pdfPage">已定位到第 {{ pdfPage }} 页</span>
-      <span v-if="errors.length">{{ errors.length }} 个错误</span>
-      <span v-if="warnings.length">{{ warnings.length }} 个警告</span>
+    <div class="latex-build-toolbar">
+      <div v-if="build" class="latex-build-meta">
+        <span v-if="build.durationMs !== undefined">耗时 {{ (build.durationMs / 1000).toFixed(1) }} 秒</span>
+        <span>{{ build.pdfAvailable ? 'PDF 已生成' : '暂无 PDF' }}</span>
+        <span>{{ build.synctexAvailable ? 'SyncTeX 已生成' : '暂无 SyncTeX' }}</span>
+        <span v-if="pdfPage">已定位到第 {{ pdfPage }} 页</span>
+      </div>
+      <button
+        v-if="hasBuildInfo"
+        type="button"
+        class="latex-build-info-toggle"
+        :class="{ active: buildInfoOpen, 'has-errors': latexErrorCount > 0, 'has-warnings': latexWarningCount > 0 }"
+        :aria-expanded="buildInfoOpen"
+        aria-controls="latex-build-info-panel"
+        @click="buildInfoOpen = !buildInfoOpen"
+      >
+        <span>编译信息</span>
+        <span class="latex-build-info-badges" aria-hidden="true">
+          <span v-if="latexErrorCount" class="latex-build-count error">{{ latexErrorCount }}</span>
+          <span v-if="latexWarningCount" class="latex-build-count warning">{{ latexWarningCount }}</span>
+        </span>
+      </button>
     </div>
 
-    <div v-if="diagnostics.length" class="latex-diagnostics" aria-label="LaTeX 诊断信息">
-      <div
-        v-for="(diagnostic, index) in diagnostics"
-        :key="`${diagnostic.severity}-${diagnostic.file}-${diagnostic.line}-${index}`"
-        class="latex-diagnostic"
-        :class="`diagnostic-${diagnostic.severity}`"
-      >
-        <span class="latex-diagnostic-kind">{{ diagnostic.severity === 'error' ? '错误' : diagnostic.severity === 'warning' ? '警告' : '信息' }}</span>
-        <span v-if="formatLocation(diagnostic)" class="latex-diagnostic-location">{{ formatLocation(diagnostic) }}</span>
-        <span>{{ diagnostic.message }}</span>
+    <div v-if="buildInfoOpen" id="latex-build-info-panel" class="latex-build-info-panel">
+      <div v-if="error" class="latex-build-error">{{ error }}</div>
+      <div v-if="build?.error" class="latex-build-error">{{ build.error }}</div>
+      <div v-if="syncError" class="latex-build-error">{{ syncError }}</div>
+
+      <div v-if="diagnostics.length" class="latex-diagnostics" aria-label="LaTeX 诊断信息">
+        <div
+          v-for="(diagnostic, index) in diagnostics"
+          :key="`${diagnostic.severity}-${diagnostic.file}-${diagnostic.line}-${index}`"
+          class="latex-diagnostic"
+          :class="`diagnostic-${diagnostic.severity}`"
+        >
+          <span class="latex-diagnostic-kind">{{ diagnostic.severity === 'error' ? '错误' : diagnostic.severity === 'warning' ? '警告' : '信息' }}</span>
+          <span v-if="formatLocation(diagnostic)" class="latex-diagnostic-location">{{ formatLocation(diagnostic) }}</span>
+          <span>{{ diagnostic.message }}</span>
+        </div>
       </div>
+
+      <div v-if="log" class="latex-build-log">
+        <div class="latex-build-log-title">编译日志</div>
+        <pre>{{ log }}</pre>
+      </div>
+      <div v-if="!error && !build?.error && !syncError && !diagnostics.length && !log" class="latex-build-info-empty">暂无编译信息</div>
     </div>
 
     <div v-if="pdfUrl" class="latex-pdf-preview">
@@ -327,10 +359,6 @@ onBeforeUnmount(() => {
     </div>
     <div v-else-if="isActive" class="latex-build-placeholder">正在等待 TeX Live 编译结果…</div>
 
-    <details class="latex-build-log" :open="!!log && !pdfUrl">
-      <summary>编译日志</summary>
-      <pre>{{ log || '暂无日志' }}</pre>
-    </details>
   </section>
 </template>
 
@@ -343,8 +371,17 @@ onBeforeUnmount(() => {
   background: rgba(var(--color-bg-rgb), 0.72);
 }
 
+.latex-build-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 8px 14px;
+}
+
 .latex-build-error {
-  margin: 10px 14px 0;
+  margin: 0 0 8px;
   padding: 8px 10px;
   border: 1px solid rgba(239, 68, 68, 0.28);
   border-radius: 8px;
@@ -354,16 +391,74 @@ onBeforeUnmount(() => {
 }
 
 .latex-build-meta {
+  display: flex;
   flex-wrap: wrap;
-  padding: 8px 14px;
+  align-items: center;
+  gap: 6px 12px;
+  min-width: 0;
   color: var(--color-text-muted);
   font-size: 11px;
 }
 
+.latex-build-info-toggle {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.latex-build-info-toggle:hover,
+.latex-build-info-toggle.active {
+  border-color: rgba(var(--color-primary-rgb), 0.42);
+  background: rgba(var(--color-primary-rgb), 0.10);
+  color: var(--color-primary);
+}
+.latex-build-info-toggle.has-errors { border-color: rgba(239, 68, 68, 0.42); }
+.latex-build-info-toggle.has-warnings:not(.has-errors) { border-color: rgba(245, 158, 11, 0.42); }
+.latex-build-info-badges {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  display: flex;
+  gap: 2px;
+  pointer-events: none;
+}
+.latex-build-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 2px solid var(--color-bg-card);
+  border-radius: 999px;
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 12px;
+  text-align: center;
+}
+.latex-build-count.error { background: var(--color-error); }
+.latex-build-count.warning { background: var(--color-warning); }
+
+.latex-build-info-panel {
+  flex: 0 0 auto;
+  max-height: min(42vh, 360px);
+  margin: 0 14px 10px;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-muted);
+}
+
 .latex-diagnostics {
   max-height: 150px;
+  margin: 0 0 8px;
   overflow: auto;
-  padding: 0 14px 8px;
+  padding: 0;
 }
 .latex-diagnostic {
   display: flex;
@@ -401,14 +496,19 @@ onBeforeUnmount(() => {
 }
 
 .latex-build-log {
-  flex: 0 0 auto;
   max-height: 220px;
-  margin: 0 14px 14px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   overflow: hidden;
+  background: var(--color-bg-card);
 }
-.latex-build-log summary { padding: 8px 10px; color: var(--color-text-secondary); background: var(--color-bg-muted); cursor: pointer; font-size: 12px; }
+.latex-build-log-title {
+  padding: 8px 10px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-muted);
+  font-size: 12px;
+}
 .latex-build-log pre { max-height: 170px; margin: 0; padding: 10px; overflow: auto; color: var(--color-text-secondary); font: 11px/1.55 'JetBrains Mono', monospace; white-space: pre-wrap; }
+.latex-build-info-empty { color: var(--color-text-muted); font-size: 12px; }
 
 </style>
