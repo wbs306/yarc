@@ -88,10 +88,43 @@ describe('Project LiveFile isolation', () => {
       assert.equal(await readFile(join(rootA, 'main.tex'), 'utf-8'), 'project A edited\n')
       assert.equal(await readFile(join(rootB, 'main.tex'), 'utf-8'), 'project B edited\n')
 
-      await assert.rejects(() => a.open('.git/config'), /Access denied|protected/i)
+      await assert.rejects(() => a.open('.git/config'), /managed only through Project Git|protected/i)
     } finally {
       await Promise.allSettled([a.disposeAll(), b.disposeAll()])
       await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('allows project-local Pi and skill resources while blocking sensitive files', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'yarc-project-live-resources-'))
+    const skill = join(root, '.agents', 'skills', 'reviewer', 'SKILL.md')
+    const systemPrompt = join(root, '.pi', 'SYSTEM.md')
+    await mkdir(join(root, '.agents', 'skills', 'reviewer'), { recursive: true })
+    await mkdir(join(root, '.pi'), { recursive: true })
+    await writeFile(skill, '# Reviewer\n')
+    await writeFile(systemPrompt, 'Project system\n')
+    await writeFile(join(root, '.gitignore'), '*.aux\n')
+    await writeFile(join(root, '.env'), 'SECRET=do-not-read\n')
+
+    const live = new LiveFileService({ rootDir: root, workspaceKind: 'project', projectId: 'resources' })
+    try {
+      await live.replaceContent('.agents/skills/reviewer/SKILL.md', '# Reviewer\nUpdated\n', 'api')
+      await live.flush('.agents/skills/reviewer/SKILL.md')
+      assert.equal(await readFile(skill, 'utf-8'), '# Reviewer\nUpdated\n')
+
+      await live.replaceContent('.pi/SYSTEM.md', 'Project system updated\n', 'api')
+      await live.flush('.pi/SYSTEM.md')
+      assert.equal(await readFile(systemPrompt, 'utf-8'), 'Project system updated\n')
+
+      await live.replaceContent('.gitignore', '*.aux\n*.log\n', 'api')
+      await live.flush('.gitignore')
+      assert.equal(await readFile(join(root, '.gitignore'), 'utf-8'), '*.aux\n*.log\n')
+
+      await assert.rejects(() => live.open('.env'), /Access denied/i)
+      await assert.rejects(() => live.open('.git/config'), /managed only through Project Git|protected/i)
+    } finally {
+      await live.disposeAll()
+      await rm(root, { recursive: true, force: true })
     }
   })
 })
