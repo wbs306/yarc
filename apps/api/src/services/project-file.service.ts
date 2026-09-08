@@ -132,6 +132,9 @@ export class ProjectFileService {
   async createFile(projectId: string, path: string, content = '') {
     const relativePath = assertProjectExposedPath(path)
     if (!relativePath) throw new AppError('MISSING_PATH', 'Path is required', 400)
+    if (!isEditableText(relativePath, Buffer.byteLength(content, 'utf-8'))) {
+      throw new AppError('UNSUPPORTED_FILE', 'Only supported text files up to 2MB can be created through the text File API', 400)
+    }
     const resolved = await resolveProjectPath(projectId, relativePath, { allowMissing: true })
     try { await lstat(resolved.fullPath); throw new AppError('ALREADY_EXISTS', 'Path already exists', 409) } catch (error: any) {
       if (error instanceof AppError) throw error
