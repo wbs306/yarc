@@ -1,5 +1,5 @@
-import { resolve, sep } from 'node:path'
-import { resolveProjectRoot } from '../lib/project-path.js'
+import { relative, resolve, sep } from 'node:path'
+import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
 import { LiveFileService, liveFileService } from './live-file.service.js'
 import { projectHistoryService } from './project-history.service.js'
 
@@ -7,18 +7,75 @@ export class ProjectLiveFileManager {
   private instances = new Map<string, { root: string; service: LiveFileService }>()
   private agentRoutingInstalled = false
 
+  private guardService(projectId: string, root: string, raw: LiveFileService): LiveFileService {
+    const guardRelative = async (path: string, allowMissing = false) => {
+      const normalized = normalizeProjectRelativePath(path)
+      await resolveProjectPath(projectId, normalized, { allowMissing })
+      return normalized
+    }
+    const relativeFromAbsolute = (absolutePath: string) => {
+      const target = resolve(absolutePath)
+      if (target === root) return ''
+      if (!target.startsWith(`${root}${sep}`)) return null
+      return relative(root, target).replace(/\\/g, '/')
+    }
+    const guardAbsolute = async (absolutePath: string, allowMissing = false) => {
+      const path = relativeFromAbsolute(absolutePath)
+      if (path === null) return
+      await resolveProjectPath(projectId, path, { allowMissing })
+    }
+
+    return new Proxy(raw, {
+      get(target, property) {
+        if (property === 'open' || property === 'attachClient' || property === 'replaceContent') {
+          return async (path: string, ...args: any[]) => {
+            const safe = await guardRelative(path)
+            return (target as any)[property](safe, ...args)
+          }
+        }
+        if (property === 'applyClientUpdate' || property === 'flush' || property === 'resolveConflict' || property === 'handleDiskChange') {
+          return async (path: string, ...args: any[]) => {
+            const safe = await guardRelative(path, true)
+            return (target as any)[property](safe, ...args)
+          }
+        }
+        if (property === 'readAgentFile') {
+          return async (absolutePath: string) => {
+            await guardAbsolute(absolutePath)
+            return target.readAgentFile(absolutePath)
+          }
+        }
+        if (property === 'accessAgentFile') {
+          return async (absolutePath: string) => {
+            await guardAbsolute(absolutePath, true)
+            return target.accessAgentFile(absolutePath)
+          }
+        }
+        if (property === 'writeAgentFile') {
+          return async (absolutePath: string, content: string, baseContent?: string) => {
+            await guardAbsolute(absolutePath, true)
+            return target.writeAgentFile(absolutePath, content, baseContent)
+          }
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  }
+
   async get(projectId: string) {
     const { root } = await resolveProjectRoot(projectId)
     const existing = this.instances.get(projectId)
     if (existing?.root === root) return existing.service
     if (existing) await existing.service.disposeAll().catch(() => undefined)
-    const service = new LiveFileService({
+    const raw = new LiveFileService({
       rootDir: root,
       workspaceKind: 'project',
       projectId,
       beforeWrite: async (path) => { await projectHistoryService.ensureBaseline(projectId, path) },
       afterWrite: async (path, source) => { await projectHistoryService.trackChange(projectId, path, source === 'agent' || source === 'disk' ? 'external' : 'autosave') },
     })
+    const service = this.guardService(projectId, root, raw)
     this.instances.set(projectId, { root, service })
     return service
   }
@@ -81,12 +138,13 @@ export class ProjectLiveFileManager {
 
   async flushProject(projectId: string, prefix = '') {
     const service = await this.get(projectId)
+    if (prefix) await resolveProjectPath(projectId, normalizeProjectRelativePath(prefix), { allowMissing: true })
     return service.flushAll(prefix)
   }
 
   async hasSessions(projectId: string, prefix = '') {
     const service = await this.get(projectId)
-    const normalized = prefix.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+    const normalized = prefix ? normalizeProjectRelativePath(prefix) : ''
     return [...this.sessionMap(service).keys()].some(path => !normalized || path === normalized || path.startsWith(`${normalized}/`))
   }
 
@@ -109,7 +167,7 @@ export class ProjectLiveFileManager {
 
   async resetPaths(projectId: string, paths: string[], reason = 'workspace-reset') {
     const service = await this.get(projectId)
-    const normalized = [...new Set(paths.map(path => path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')).filter(Boolean))]
+    const normalized = [...new Set(paths.map(path => normalizeProjectRelativePath(path)).filter(Boolean))]
     this.resetMatchingSessions(service, path => normalized.some(prefix => path === prefix || path.startsWith(`${prefix}/`)), reason)
   }
 
