@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { parentPort } from 'node:worker_threads'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
@@ -844,8 +845,6 @@ const handleSessionEvent = (event: any) => {
   }
   if (event.type === 'message_start' && event.message?.role === 'assistant') {
     beginAutoExtensionRun()
-    // A follow-up/retry assistant means a prior aborted turn was an internal
-    // control-flow boundary, not a terminal user-visible cancellation.
     if (assistantCount > 0) deferredAssistantAborts.supersedeWithContinuation()
     assistantCount += 1
     currentAssistantId = assistantCount === 1 && activeRootAssistantId
@@ -938,9 +937,6 @@ const handleSessionEvent = (event: any) => {
           console.warn(`[PiRuntimeWorker] Session entry ${entryId} was not visible in the JSONL tail at message commit`)
         }
         if (sessionFile) durability.commit(sessionFile)
-        // Do not publish a commit mapping when the entry cannot be verified.
-        // The recovery journal must remain eligible to repair that turn after a
-        // crash instead of treating a best-effort leaf lookup as durable.
         if (verified && entryId && sessionFile && key) {
           if (message?.role === 'user' && activeUserMessageId) {
             emit({ type: 'pi_user_entry', conversationId: key.conversationId, messageId: activeUserMessageId, entryId, sessionFile })
@@ -974,8 +970,6 @@ const handleSessionEvent = (event: any) => {
           if (!autoExtensionRun || activeRunId !== runId) return
           await waitForQuiescence()
           signalRunIdleBoundary(runId)
-          // Give agent_end handlers a chance to navigate and enqueue a
-          // continuation while this host run still owns the stream.
           await new Promise<void>(resolve => setTimeout(resolve, 50))
           await waitForQuiescence()
           flushDeferredAssistantAborts()
@@ -1029,11 +1023,6 @@ const waitForCommandIdle = async () => {
   const runId = activeRunId
   const barrier = runIdleBarrier
   await session?.waitForIdle?.()
-
-  // AgentSession can report idle before the host has observed commit/tool
-  // quiescence. Wait for the run-owned boundary, but keep that host run open so
-  // agent_end handlers can navigate and enqueue their continuation into the
-  // same stream instead of losing it as late steering.
   if (runId && barrier?.runId === runId) await barrier.promise
   else await waitForQuiescence()
 }
@@ -1177,6 +1166,11 @@ const initialize = async (payload: RuntimeInitPayload) => {
   currentEditorTheme = loadedThemeModule?.getEditorTheme?.()
   const keybindingsModule = await import(new URL('../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js', import.meta.url).href)
   keybindings = keybindingsModule.KeybindingsManager.create(payload.agentDir)
+  const globalAgentsPath = payload.globalAgentsFile ? resolve(payload.globalAgentsFile) : null
+  const globalAgentsContent = globalAgentsPath
+    ? await readFile(globalAgentsPath, 'utf-8').catch(() => null)
+    : null
+
   const createRuntime = async ({ cwd, agentDir, sessionManager, sessionStartEvent }: any) => {
     const services = await createAgentSessionServices({
       cwd,
@@ -1184,20 +1178,26 @@ const initialize = async (payload: RuntimeInitPayload) => {
       resourceLoaderOptions: {
         agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => {
           const legacyAgentsMd = resolve(dirname(agentDir), 'AGENTS.md')
+          const seen = new Set<string>()
+          const discovered = base.agentsFiles.filter(file => {
+            const absolute = resolve(file.path)
+            if (absolute === legacyAgentsMd || (globalAgentsPath && absolute === globalAgentsPath) || seen.has(absolute)) return false
+            seen.add(absolute)
+            return true
+          })
           return {
-            agentsFiles: base.agentsFiles.filter(file => resolve(file.path) !== legacyAgentsMd),
+            agentsFiles: [
+              ...(globalAgentsPath && globalAgentsContent !== null
+                ? [{ path: globalAgentsPath, content: globalAgentsContent }]
+                : []),
+              ...discovered,
+            ],
           }
         },
         systemPromptOverride: (base: string | undefined) => payload.systemPrompt ?? base?.trim() ?? DEFAULT_CHAT_SYSTEM_PROMPT,
       },
     })
 
-    // YARC owns model/thinking selection per conversation. Pi's AgentSession
-    // persists setModel()/setThinkingLevel() into global settings.json by
-    // default, which would make every chat selection look like a synced file
-    // change and can cause unrelated Runtime reloads. Keep session JSONL
-    // history/model state, but make these global default setters no-ops for the
-    // long-lived web Runtime; the explicit settings API still writes defaults.
     services.settingsManager.setDefaultProvider = () => {}
     services.settingsManager.setDefaultModel = () => {}
     services.settingsManager.setDefaultModelAndProvider = () => {}
