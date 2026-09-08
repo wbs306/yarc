@@ -23,7 +23,7 @@ export const normalizeProjectRelativePath = (value = '') => {
   if (segments.some(segment => !segment || segment === '.' || segment === '..')) {
     throw new AppError('PROJECT_INVALID_DIRECTORY', 'Project path traversal is not allowed', 400)
   }
-  if (segments[0] === '.git') throw new AppError('PROTECTED_PATH', '.git is managed only through Project Git', 403)
+  if (segments.some(segment => segment === '.git')) throw new AppError('PROTECTED_PATH', '.git is managed only through Project Git', 403)
   return normalized
 }
 
