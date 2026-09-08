@@ -39,6 +39,12 @@ export class ProjectLiveFileManager {
     this.instances.delete(projectId)
     await instance.service.disposeAll()
   }
+
+  async disposeAll() {
+    const instances = [...this.instances.values()]
+    this.instances.clear()
+    await Promise.allSettled(instances.map(instance => instance.service.disposeAll()))
+  }
 }
 
 export const projectLiveFileManager = new ProjectLiveFileManager()
