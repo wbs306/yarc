@@ -32,6 +32,7 @@ const props = defineProps<{
   documentId?: string
   title?: string
   sourceHighlight?: { page: number; x: number; y: number; width?: number; height?: number } | null
+  showBackButton?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -286,6 +287,7 @@ const isTemporaryDocument = computed(() => !!props.sourceUrl)
 const canAnnotate = computed(() => !!props.paper?.id && !isTemporaryDocument.value)
 const canAskAI = computed(() => !!props.paper?.id || isTemporaryDocument.value)
 const documentTitle = computed(() => props.title || props.paper?.title || '临时 PDF')
+const showBackButton = computed(() => props.showBackButton !== false)
 const pdfSourceUrl = computed(() => props.sourceUrl || (props.paper?.id ? usePdfUrl(props.paper.id) : ''))
 const cachedPdfUrl = ref('')
 const pdfOfflineCopy = ref(false)
@@ -1397,7 +1399,7 @@ defineExpose({ scrollToNote, goToPage, goToPosition })
   <div ref="viewerRootRef" class="pdf-viewer" :class="{ 'selection-mode': selectionMode }">
     <div class="pdf-toolbar" :class="{ hidden: toolbarHidden }">
       <div class="pdf-toolbar-left">
-        <button class="tb-btn back-btn" @click="$emit('back')" title="返回文献列表">
+        <button v-if="showBackButton" class="tb-btn back-btn" @click="$emit('back')" title="返回文献列表">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
           </svg>

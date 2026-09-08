@@ -290,6 +290,14 @@ const latexBuildStatus = ref<LatexBuildStatus>({
   synctexAvailable: false,
 })
 const latexEntryPath = ref('')
+const latexPdfToggleLabel = computed(() => {
+  if (!latexEntryPath.value) return '编译 LaTeX'
+  return latexBuildVisible.value ? '隐藏 PDF' : '显示 PDF'
+})
+const latexPdfToggleTitle = computed(() => {
+  if (!latexEntryPath.value) return '编译当前 LaTeX 文件'
+  return latexBuildVisible.value ? '隐藏 PDF 预览' : '显示 PDF 预览'
+})
 const latexEntryDirectoryPath = computed(() => {
   const parts = latexEntryPath.value.split('/').filter(Boolean)
   parts.pop()
@@ -1557,6 +1565,10 @@ const onLatexBuildStatus = (status: LatexBuildStatus) => {
 const toggleLatexBuild = async () => {
   if (latexBuildVisible.value) {
     latexBuildVisible.value = false
+    return
+  }
+  if (latexEntryPath.value) {
+    latexBuildVisible.value = true
     return
   }
   await openLatexBuild()
@@ -4302,12 +4314,13 @@ const showSearchPaperPopup = (paper: any) => {
                 </template>
                 <button
                   v-if="workspaceIsLatex && !workspaceContentLoading"
-                  class="latex-compile-workspace-btn"
+                  class="latex-pdf-toggle-btn"
                   :disabled="!workspaceCanCompileLatex"
-                  :title="latexBuildVisible ? '返回 LaTeX 编辑器' : '编译当前 LaTeX 文件'"
+                  :aria-pressed="latexEntryPath ? latexBuildVisible : undefined"
+                  :title="latexPdfToggleTitle"
                   @click="toggleLatexBuild"
                 >
-                  {{ latexBuildVisible ? '返回编辑器' : '编译 LaTeX' }}
+                  {{ latexPdfToggleLabel }}
                 </button>
                 <button
                   v-if="selectedWorkspaceFile.type === 'file' && !workspaceCanEdit"
@@ -4509,7 +4522,8 @@ const showSearchPaperPopup = (paper: any) => {
                 <span class="latex-split-divider-grip" aria-hidden="true" />
               </div>
               <LatexBuildPanel
-                v-if="latexBuildVisible"
+                v-if="workspaceIsLatex && latexEntryPath"
+                v-show="latexBuildVisible"
                 ref="latexBuildPanelRef"
                 class="workspace-latex-preview-pane"
                 :auto-start="false"
@@ -5509,7 +5523,7 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .workspace-offline-tree-note { color: var(--color-warning); }
 .workspace-text-editor-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
-.latex-compile-workspace-btn {
+.latex-pdf-toggle-btn {
   min-height: 28px;
   padding: 4px 10px;
   border: 1px solid rgba(var(--color-primary-rgb), 0.42);
@@ -5519,8 +5533,8 @@ const showSearchPaperPopup = (paper: any) => {
   font-size: 12px;
   cursor: pointer;
 }
-.latex-compile-workspace-btn:hover:not(:disabled) { background: rgba(var(--color-primary-rgb), 0.18); }
-.latex-compile-workspace-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+.latex-pdf-toggle-btn:hover:not(:disabled) { background: rgba(var(--color-primary-rgb), 0.18); }
+.latex-pdf-toggle-btn:disabled { cursor: not-allowed; opacity: 0.5; }
 .latex-engine-workspace-select,
 .latex-workspace-tool-btn {
   min-height: 28px;

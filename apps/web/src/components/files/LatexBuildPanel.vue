@@ -299,7 +299,7 @@ onBeforeUnmount(() => {
         :document-id="pdfDocumentId"
         :title="`${name} 编译结果`"
         :source-highlight="pdfHighlight"
-        @back="emit('close')"
+        :show-back-button="false"
         @pdf-position="handlePdfPosition"
       />
     </div>
