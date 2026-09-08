@@ -95,8 +95,8 @@ export interface RuntimeToolExecutionContext {
   getKey: () => PiRuntimeKey
   getRunId: () => string | undefined
   emit: (event: ChatEvent) => void
-  cwd: string
-  workspaceKind: 'global' | 'project'
+  cwd?: string
+  workspaceKind?: 'global' | 'project'
   projectId?: string
 }
 
