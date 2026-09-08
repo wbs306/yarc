@@ -2,10 +2,11 @@ import { prisma } from '@yarc/db'
 import { config } from '../lib/config.js'
 import { isProjectPiRuntimeResourcePath, normalizeDataRelativePath } from '../lib/data-sync-policy.js'
 import { getDataChangeWatcher } from './data-change-watcher.js'
-import { projectHistoryService } from './project-history.service.js'
 import { projectLiveFileManager } from './project-live-file.service.js'
 import { projectFileService } from './project-file.service.js'
-import { piService } from './pi.service.js'
+import { installProjectPiContextBridge, projectPiContextService } from './project-pi-context.service.js'
+
+installProjectPiContextBridge()
 
 export class ProjectWorkspaceWatcherService {
   private unsubscribe?: () => void
@@ -45,12 +46,10 @@ export class ProjectWorkspaceWatcherService {
     if (!relativePath || relativePath === '.git' || relativePath.startsWith('.git/')) return
 
     await projectLiveFileManager.handleDiskChange(projectId, relativePath).catch(() => undefined)
-    await projectHistoryService.trackChange(projectId, relativePath, 'external').catch(() => undefined)
     projectFileService.notifyExternalChange(projectId, relativePath, String(change?.type || change?.action || 'external'))
 
     if (isProjectPiRuntimeResourcePath(relativePath)) {
-      const registry = (piService as any).runtimeRegistry
-      if (registry?.reloadProject) await registry.reloadProject(projectId, `project-file:${relativePath}`)
+      await projectPiContextService.reloadProject(projectId, `project-file:${relativePath}`)
     }
   }
 }
