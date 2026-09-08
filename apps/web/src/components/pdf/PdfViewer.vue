@@ -1820,6 +1820,13 @@ defineExpose({ scrollToNote, goToPage, goToPosition })
   background: rgba(var(--color-primary-rgb), 0.18);
   box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.08);
   pointer-events: none;
+  animation: source-position-highlight-flash 1.2s ease-in-out both;
+}
+@keyframes source-position-highlight-flash {
+  0%, 100% { opacity: 0; }
+  14%, 34% { opacity: 1; }
+  48% { opacity: 0.18; }
+  62% { opacity: 0.9; }
 }
 .note-highlight-layer { position: absolute; inset: 0; pointer-events: none; z-index: 6; }
 .note-highlight {

@@ -37,9 +37,11 @@ const syncError = ref('')
 const syncLoading = ref(false)
 const pdfPage = ref<number | null>(null)
 const pdfPosition = ref<{ page: number; x?: number; y?: number } | null>(null)
-const pdfHighlight = ref<{ page: number; x: number; y: number; width?: number; height?: number } | null>(null)
+type PdfHighlight = { page: number; x: number; y: number; width?: number; height?: number }
+const pdfHighlight = ref<PdfHighlight | null>(null)
 const pdfViewer = ref<InstanceType<typeof PdfViewer> | null>(null)
 let pollTimer: number | null = null
+let pdfHighlightTimer: number | null = null
 let requestSequence = 0
 let syncedBuildId = ''
 
@@ -71,6 +73,23 @@ const clearPoll = () => {
   }
 }
 
+const clearPdfHighlight = () => {
+  if (pdfHighlightTimer !== null) {
+    window.clearTimeout(pdfHighlightTimer)
+    pdfHighlightTimer = null
+  }
+  pdfHighlight.value = null
+}
+
+const flashPdfHighlight = (highlight: PdfHighlight) => {
+  clearPdfHighlight()
+  pdfHighlight.value = highlight
+  pdfHighlightTimer = window.setTimeout(() => {
+    pdfHighlightTimer = null
+    pdfHighlight.value = null
+  }, 1400)
+}
+
 const loadLog = async (id: string, sequence: number) => {
   const result = await api.getLatexBuildLog(id)
   if (sequence !== requestSequence) return
@@ -80,6 +99,7 @@ const loadLog = async (id: string, sequence: number) => {
 
 const syncToCurrentSource = async (id: string, sequence: number) => {
   if (syncedBuildId === id || !build.value?.synctexAvailable) return
+  clearPdfHighlight()
   syncedBuildId = id
   syncLoading.value = true
   syncError.value = ''
@@ -102,7 +122,7 @@ const syncToCurrentSource = async (id: string, sequence: number) => {
           ...(Number.isFinite(y) ? { y } : {}),
         }
       : null
-    pdfHighlight.value = pdfPage.value && Number.isFinite(x) && Number.isFinite(y)
+    const highlight = pdfPage.value && Number.isFinite(x) && Number.isFinite(y)
       ? {
           page: pdfPage.value,
           x,
@@ -111,6 +131,7 @@ const syncToCurrentSource = async (id: string, sequence: number) => {
           ...(Number.isFinite(Number(result.height)) ? { height: Number(result.height) } : {}),
         }
       : null
+    if (highlight) flashPdfHighlight(highlight)
     if (pdfPage.value) jumpToPdfPage()
     else syncError.value = 'SyncTeX 未返回 PDF 页码'
   } catch (err) {
@@ -150,7 +171,7 @@ const startBuild = async () => {
   syncError.value = ''
   pdfPage.value = null
   pdfPosition.value = null
-  pdfHighlight.value = null
+  clearPdfHighlight()
   syncedBuildId = ''
   try {
     const result = await api.compileLatex(props.path, engine.value)
@@ -196,7 +217,7 @@ const handlePdfPosition = async (position: { page: number; x: number; y: number 
   if (!current?.synctexAvailable || syncLoading.value) return
   syncLoading.value = true
   syncError.value = ''
-  pdfHighlight.value = null
+  clearPdfHighlight()
   try {
     const result = await api.getLatexSyncTex(current.id, {
       direction: 'backward',
@@ -244,7 +265,7 @@ watch(() => props.path, () => {
   syncError.value = ''
   pdfPage.value = null
   pdfPosition.value = null
-  pdfHighlight.value = null
+  clearPdfHighlight()
   syncedBuildId = ''
   // Changing the active source file must not trigger a new build. The build
   // entry is controlled by the parent, and users can explicitly rebuild from
@@ -259,6 +280,7 @@ defineExpose({ startBuild, cancelBuild, locateCurrentSource })
 
 onBeforeUnmount(() => {
   clearPoll()
+  clearPdfHighlight()
   requestSequence += 1
 })
 </script>
