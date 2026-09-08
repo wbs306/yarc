@@ -119,3 +119,11 @@ export type FileWorkspaceRef =
 export type FileScope =
   | { kind: 'global' }
   | { kind: 'project'; projectId: string }
+
+// Keep Conversation defined in the shared base types while extending it from
+// the Project domain so existing imports continue to use one canonical type.
+declare module './index.js' {
+  interface Conversation {
+    projectId: string | null
+  }
+}
