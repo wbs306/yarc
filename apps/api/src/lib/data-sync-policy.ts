@@ -14,16 +14,13 @@ const IGNORED_SEGMENT_NAMES = new Set([
 
 const IGNORED_GENERATED_PREFIXES = [
   '.latex-builds',
+  '.project-history',
   '.yarc/latex-builds',
   'generated/latex',
 ] as const
 const IGNORED_PI_PREFIXES = [
   '.pi/agent/sessions',
   '.pi/agent/subagent-results',
-  // In-flight Runtime journals are generated for crash recovery. They are not
-  // editable Pi configuration; watching them would reload the very Worker that
-  // is writing the journal and lose extension module state (for example
-  // pi-context's `/acm` command context).
   '.pi/agent/runtime-streams',
 ]
 
@@ -61,6 +58,22 @@ const PI_RUNTIME_PATH_PREFIXES = [
   '.pi/agent/git/',
 ] as const
 
+export const PROJECT_PI_RUNTIME_EXACT_PATHS = new Set([
+  'AGENTS.md',
+  '.pi/AGENTS.md',
+  '.pi/CLAUDE.md',
+  '.pi/SYSTEM.md',
+  '.pi/APPEND_SYSTEM.md',
+  '.pi/settings.json',
+])
+
+export const PROJECT_PI_RUNTIME_PATH_PREFIXES = [
+  '.pi/prompts/',
+  '.pi/themes/',
+  '.pi/extensions/',
+  '.agents/skills/',
+] as const
+
 export const DEFAULT_DATA_SYNC_EXCLUDE_PATTERNS = [
   'node_modules',
   '.git',
@@ -74,6 +87,7 @@ export const DEFAULT_DATA_SYNC_EXCLUDE_PATTERNS = [
   '.pi/agent/sessions',
   '.pi/agent/subagent-results',
   '.pi/agent/runtime-streams',
+  '.project-history',
   '.latex-builds',
   '.yarc/latex-builds',
   'generated/latex',
@@ -108,15 +122,16 @@ export const isDefaultIgnoredDataPath = (value: string) => {
   return false
 }
 
-/**
- * Return true only for files that Pi's ResourceLoader or Runtime Worker reads
- * as executable/configuration state. Ordinary files under `.pi/agent` are
- * user workspace data and must not recreate a Runtime Worker on every sync.
- */
 export const isPiRuntimeResourcePath = (value: string) => {
   const path = normalizeDataRelativePath(value)
   if (!path) return false
-
   if (PI_RUNTIME_EXACT_PATHS.has(path)) return true
   return PI_RUNTIME_PATH_PREFIXES.some(prefix => path.startsWith(prefix))
+}
+
+export const isProjectPiRuntimeResourcePath = (value: string) => {
+  const path = normalizeDataRelativePath(value)
+  if (!path) return false
+  if (PROJECT_PI_RUNTIME_EXACT_PATHS.has(path)) return true
+  return PROJECT_PI_RUNTIME_PATH_PREFIXES.some(prefix => path.startsWith(prefix))
 }
