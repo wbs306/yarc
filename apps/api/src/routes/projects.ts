@@ -5,6 +5,7 @@ import { projectService } from '../services/project.service.js'
 import { projectFileService } from '../services/project-file.service.js'
 import { projectGitService } from '../services/project-git.service.js'
 import { projectHistoryService } from '../services/project-history.service.js'
+import { projectLatexService } from '../services/project-latex.service.js'
 import { AppError } from '../lib/errors.js'
 
 const projects = new Hono()
@@ -109,16 +110,25 @@ projects.post('/:id/history/checkpoints/:checkpointId/pin', async (c) => {
 projects.post('/:id/history/revisions/:revisionId/restore', async (c) => c.json(await projectHistoryService.restoreFileRevision(id(c), c.req.param('revisionId'))))
 projects.post('/:id/history/checkpoints/:checkpointId/restore', async (c) => c.json(await projectHistoryService.restoreWritingCheckpoint(id(c), c.req.param('checkpointId'))))
 
-projects.get('/:id/latex/targets', async (c) => {
-  const project = await projectService.get(id(c))
-  const latex = ((project.settings || {}) as any).latex || { targets: [] }
-  return c.json(latex)
-})
+projects.get('/:id/latex/targets', async (c) => c.json(await projectLatexService.targets(id(c))))
 projects.put('/:id/latex/targets', async (c) => {
   const input = await body(c)
   const project = await projectService.get(id(c))
   const settings = { ...((project.settings || {}) as any), latex: { defaultTarget: input.defaultTarget, targets: Array.isArray(input.targets) ? input.targets : [] } }
   return c.json({ project: await projectService.update(id(c), { settings }) })
+})
+projects.post('/:id/latex/builds', async (c) => {
+  const input = await body(c)
+  if (typeof input.targetId !== 'string' || !input.targetId) throw new AppError('PROJECT_LATEX_TARGET_NOT_FOUND', 'targetId is required', 400)
+  return c.json({ build: await projectLatexService.startBuild(id(c), input.targetId) }, 202)
+})
+projects.get('/:id/latex/builds/:buildId', async (c) => c.json({ build: projectLatexService.getBuild(id(c), c.req.param('buildId')) }))
+projects.get('/:id/latex/builds/:buildId/log', async (c) => c.json(projectLatexService.getLog(id(c), c.req.param('buildId'))))
+projects.get('/:id/latex/builds/:buildId/pdf', async (c) => {
+  const pdf = projectLatexService.getPdf(id(c), c.req.param('buildId'))
+  c.header('Content-Type', 'application/pdf')
+  c.header('Cache-Control', 'private, no-store')
+  return c.body(Readable.toWeb(pdf.stream) as any)
 })
 
 export default projects
