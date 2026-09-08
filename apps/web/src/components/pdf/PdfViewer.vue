@@ -1429,9 +1429,10 @@ defineExpose({ scrollToNote, goToPage, goToPosition })
           class="tb-btn preview-toggle-btn"
           :class="{ active: showPreviewStrip }"
           :aria-pressed="showPreviewStrip"
-          title="显示或隐藏页面预览条"
+          :aria-label="showPreviewStrip ? '隐藏页面缩略图' : '显示页面缩略图'"
+          :title="showPreviewStrip ? '隐藏页面缩略图' : '显示页面缩略图'"
           @click="showPreviewStrip = !showPreviewStrip"
-        >缩</button>
+        >缩略图</button>
         <div class="tb-sep" />
         <button class="tb-btn" :class="{ active: selectionMode }" @click="toggleSelectionMode" title="划词模式">选</button>
       </div>
