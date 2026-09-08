@@ -4,8 +4,18 @@ import type { ProjectGitBranch, ProjectGitCommit, ProjectGitStatus } from '@yarc
 import { AppError } from '../lib/errors.js'
 import { normalizeProjectRelativePath, resolveProjectRoot } from '../lib/project-path.js'
 import { projectHistoryService } from './project-history.service.js'
+import { projectLiveFileManager } from './project-live-file.service.js'
+import { projectPiContextService } from './project-pi-context.service.js'
 
 interface RunResult { stdout: string; stderr: string }
+
+const assertBranchName = (name: string) => {
+  const clean = name.trim()
+  if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(clean) || clean.includes('..') || clean.endsWith('/') || clean.includes('@{')) {
+    throw new AppError('VALIDATION_ERROR', 'Invalid branch name', 400)
+  }
+  return clean
+}
 
 export class ProjectGitService {
   private async run(projectId: string, args: string[], options: { allowFailure?: boolean } = {}): Promise<RunResult & { code: number }> {
@@ -81,6 +91,8 @@ export class ProjectGitService {
   async stage(projectId: string, paths: string[]) {
     const safe = paths.map(normalizeProjectRelativePath).filter(Boolean)
     if (!safe.length) throw new AppError('VALIDATION_ERROR', 'At least one path is required', 400)
+    for (const path of safe) await projectLiveFileManager.flushProject(projectId, path)
+    await projectHistoryService.flushPending(projectId)
     await this.run(projectId, ['add', '--', ...safe])
     return this.status(projectId)
   }
@@ -97,31 +109,39 @@ export class ProjectGitService {
   async commit(projectId: string, message: string) {
     const clean = message.trim()
     if (!clean) throw new AppError('VALIDATION_ERROR', 'Commit message is required', 400)
+    await projectLiveFileManager.flushProject(projectId)
+    await projectHistoryService.flushPending(projectId)
     await this.run(projectId, ['commit', '-m', clean])
     return { status: await this.status(projectId), commits: await this.log(projectId, 1) }
   }
 
   async branches(projectId: string): Promise<ProjectGitBranch[]> {
     const current = (await this.status(projectId)).branch
-    const result = await this.run(projectId, ['for-each-ref', '--format=%(refname:short)%x1f%(objectname)', 'refs/heads/'])
+    const result = await this.run(projectId, ['for-each-ref', '--format=%(refname:short)%09%(objectname)', 'refs/heads/'])
     return result.stdout.split(/\r?\n/).filter(Boolean).map(line => {
-      const [name, head] = line.split('%x1f').length > 1 ? line.split('%x1f') : line.split('\x1f')
+      const [name, head] = line.split('\t')
       return { name, current: name === current, head: head || null }
     })
   }
 
   async createBranch(projectId: string, name: string) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(name) || name.includes('..') || name.endsWith('/') || name.includes('@{')) {
-      throw new AppError('VALIDATION_ERROR', 'Invalid branch name', 400)
-    }
-    await this.run(projectId, ['branch', name])
+    const clean = assertBranchName(name)
+    await this.run(projectId, ['branch', clean])
     return this.branches(projectId)
   }
 
   async switchBranch(projectId: string, name: string) {
+    const clean = assertBranchName(name)
+    await projectLiveFileManager.flushProject(projectId)
     await projectHistoryService.flushPending(projectId)
-    await projectHistoryService.checkpoint(projectId, { kind: 'manual', metadata: { operation: 'git-branch-switch', target: name } })
-    await this.run(projectId, ['switch', name])
+    await projectHistoryService.checkpoint(projectId, {
+      kind: 'manual',
+      metadata: { operation: 'git-branch-switch', target: clean },
+      forceBoundary: true,
+    })
+    await this.run(projectId, ['switch', clean])
+    await projectLiveFileManager.resetProjectSessions(projectId, 'git-branch-switch')
+    await projectPiContextService.reloadProject(projectId, `git-branch-switch:${clean}`)
     return this.status(projectId)
   }
 
