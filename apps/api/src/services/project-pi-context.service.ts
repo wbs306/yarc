@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { config } from '../lib/config.js'
 import { withAgentWorkspaceCwd } from '../lib/agent-workspace.js'
 import { resolveConversationWorkspace } from '../lib/conversation-workspace.js'
@@ -5,6 +6,8 @@ import { piService } from './pi.service.js'
 import { projectLiveFileManager } from './project-live-file.service.js'
 
 const service = piService as any
+const projectPromptContext = new AsyncLocalStorage<boolean>()
+const preparedRegistries = new WeakSet<object>()
 let installed = false
 
 const workspaceForConversation = async (conversationId?: string) => {
@@ -12,6 +15,39 @@ const workspaceForConversation = async (conversationId?: string) => {
   const workspace = await resolveConversationWorkspace(conversationId)
   if (workspace.projectId) await projectLiveFileManager.get(workspace.projectId)
   return workspace
+}
+
+const prepareRegistry = (registry: any) => {
+  if (!registry || preparedRegistries.has(registry)) return registry
+  preparedRegistries.add(registry)
+
+  // The registry historically injects YARC's default chat system prompt into
+  // every worker. For a Project that would mask the ResourceLoader's
+  // PROJECT_ROOT/.pi/SYSTEM.md and APPEND_SYSTEM.md. Make that default conditional
+  // on the current runtime creation context while preserving conversation-level
+  // systemPrompt as the highest-priority explicit override.
+  const options = registry.options
+  if (options && typeof options === 'object') {
+    let globalDefaultSystemPrompt = options.systemPrompt
+    try {
+      Object.defineProperty(options, 'systemPrompt', {
+        configurable: true,
+        enumerable: true,
+        get: () => projectPromptContext.getStore() ? undefined : globalDefaultSystemPrompt,
+        set: value => { globalDefaultSystemPrompt = value },
+      })
+    } catch {}
+  }
+
+  const originalCreateRuntime = registry.createRuntime?.bind(registry)
+  if (typeof originalCreateRuntime === 'function') {
+    registry.createRuntime = async (...args: any[]) => {
+      const workspace = await workspaceForConversation(args[0]?.conversationId)
+      return projectPromptContext.run(workspace.kind === 'project', () =>
+        withAgentWorkspaceCwd(workspace.cwd, () => originalCreateRuntime(...args)))
+    }
+  }
+  return registry
 }
 
 const wrapPromiseMethod = (name: string, conversationIdFromArgs: (args: any[]) => string | undefined) => {
@@ -51,6 +87,12 @@ export const installProjectPiContextBridge = () => {
   // helper paths read ensureAgentWorkspace().cwd while constructing tools and
   // fallback sessions. AsyncLocalStorage lets those paths observe the current
   // Conversation workspace without changing the shared Pi configuration.
+  const originalGetRuntimeRegistry = service.getRuntimeRegistry?.bind(piService)
+  if (typeof originalGetRuntimeRegistry === 'function') {
+    service.getRuntimeRegistry = (...args: any[]) => prepareRegistry(originalGetRuntimeRegistry(...args))
+  }
+  if (service.runtimeRegistry) prepareRegistry(service.runtimeRegistry)
+
   const originalCreateRuntimeToolHost = service.createRuntimeToolHost?.bind(piService)
   if (typeof originalCreateRuntimeToolHost === 'function') {
     service.createRuntimeToolHost = async (context: any) => {
@@ -71,11 +113,11 @@ export const installProjectPiContextBridge = () => {
 export const projectPiContextService = {
   install: installProjectPiContextBridge,
   async reloadProject(projectId: string, reason = 'project-config') {
-    const registry = service.runtimeRegistry
+    const registry = prepareRegistry(service.runtimeRegistry)
     if (registry?.reloadProject) await registry.reloadProject(projectId, reason)
   },
   async disposeProject(projectId: string, reason = 'project_deleted') {
-    const registry = service.runtimeRegistry
+    const registry = prepareRegistry(service.runtimeRegistry)
     if (registry?.disposeProject) await registry.disposeProject(projectId, reason)
   },
 }
