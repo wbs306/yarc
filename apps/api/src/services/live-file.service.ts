@@ -1,5 +1,5 @@
 import { access, readFile, stat } from 'node:fs/promises'
-import { extname, relative, resolve, sep } from 'node:path'
+import { basename, extname, relative, resolve, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import * as Y from 'yjs'
 import DiffMatchPatch from 'diff-match-patch'
@@ -14,6 +14,7 @@ const TEXT_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.css', '.scss', '.html', '.xml',
   '.py', '.sh', '.sql', '.log', '.bib', '.tex', '.ini', '.conf', '.env.example',
 ])
+const TEXT_FILE_NAMES = new Set(['.gitignore', '.gitattributes', 'Dockerfile', 'Makefile'])
 const MAX_TEXT_FILE_SIZE = 2 * 1024 * 1024
 const AUTOSAVE_DELAY_MS = 800
 const RETIRE_CLEAN_DELAY_MS = 30_000
@@ -100,9 +101,10 @@ const isHiddenPath = (filePath: string) => {
   if (segments[0] === '.pi') return segments.slice(1).some(segment => segment.startsWith('.'))
   return segments.some(segment => segment.startsWith('.') && segment !== '.env.example')
 }
+const isProjectProtectedPath = (path: string) => normalizeRelativePath(path).split('/').filter(Boolean).some(segment => segment === '.git')
 const isPapersPath = (path: string) => path === 'papers' || path.startsWith('papers/')
 const isGlobalProtectedPath = (path: string) => !path || path === '.pi' || isPapersPath(path) || path === 'projects' || path.startsWith('projects/') || path === '.project-history' || path.startsWith('.project-history/')
-const isEditable = (path: string, size?: number) => TEXT_EXTENSIONS.has(extensionFor(path)) && (size === undefined || size <= MAX_TEXT_FILE_SIZE)
+const isEditable = (path: string, size?: number) => (TEXT_EXTENSIONS.has(extensionFor(path)) || TEXT_FILE_NAMES.has(basename(path))) && (size === undefined || size <= MAX_TEXT_FILE_SIZE)
 
 const applyTextReplacement = (ytext: Y.Text, nextText: string, origin: unknown) => {
   const current = ytext.toString()
@@ -163,10 +165,20 @@ export class LiveFileService {
   }
 
   private normalizePath(path: string) { return normalizeRelativePath(path) }
+  private assertProjectAgentPath(relPath: string | null) {
+    if (this.options.workspaceKind !== 'project' || !relPath) return
+    if (isSensitivePath(relPath)) throw new AppError('FORBIDDEN', 'Access denied', 403)
+    if (isProjectProtectedPath(relPath)) throw new AppError('PROTECTED_PATH', '.git is managed only through Project Git', 403)
+  }
   private resolvePath(filePath = '') {
     const relPath = this.normalizePath(filePath)
-    if (isHiddenPath(relPath) || isSensitivePath(relPath)) throw new AppError('FORBIDDEN', 'Access denied', 403)
-    if (this.options.workspaceKind !== 'project' && isGlobalProtectedPath(relPath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
+    if (isSensitivePath(relPath)) throw new AppError('FORBIDDEN', 'Access denied', 403)
+    if (this.options.workspaceKind === 'project') {
+      if (isProjectProtectedPath(relPath)) throw new AppError('PROTECTED_PATH', '.git is managed only through Project Git', 403)
+    } else {
+      if (isHiddenPath(relPath)) throw new AppError('FORBIDDEN', 'Access denied', 403)
+      if (isGlobalProtectedPath(relPath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
+    }
     const fullPath = resolve(this.rootDir, relPath)
     if (fullPath !== this.rootDir && !fullPath.startsWith(`${this.rootDir}${sep}`)) throw new AppError('FORBIDDEN', 'Access denied', 403)
     return fullPath
@@ -407,12 +419,21 @@ export class LiveFileService {
     return this.withFileQueue(filePath, async () => { const session = this.sessions.get(this.normalizePath(filePath)); if (!session) return 'none' as const; return this.withWorkspaceMutationLock(() => this.handleDiskChangeUnsafe(session)) })
   }
   async readAgentFile(absolutePath: string) {
-    const relPath = this.relativePathFromAbsolute(absolutePath), session = relPath ? this.sessions.get(relPath) : undefined
+    const relPath = this.relativePathFromAbsolute(absolutePath)
+    this.assertProjectAgentPath(relPath)
+    const session = relPath ? this.sessions.get(relPath) : undefined
     return session ? Buffer.from(session.ytext.toString(), 'utf-8') : readFile(absolutePath)
   }
-  async accessAgentFile(absolutePath: string) { const relPath = this.relativePathFromAbsolute(absolutePath); if (relPath && this.sessions.has(relPath)) return; await access(absolutePath) }
+  async accessAgentFile(absolutePath: string) {
+    const relPath = this.relativePathFromAbsolute(absolutePath)
+    this.assertProjectAgentPath(relPath)
+    if (relPath && this.sessions.has(relPath)) return
+    await access(absolutePath)
+  }
   async writeAgentFile(absolutePath: string, content: string, baseContent?: string) {
-    const relPath = this.relativePathFromAbsolute(absolutePath), session = relPath ? this.sessions.get(relPath) : undefined
+    const relPath = this.relativePathFromAbsolute(absolutePath)
+    this.assertProjectAgentPath(relPath)
+    const session = relPath ? this.sessions.get(relPath) : undefined
     if (!relPath || !session) {
       await this.withWorkspaceMutationLock(async () => {
         if (relPath) await this.options.beforeWrite?.(relPath, 'agent')
