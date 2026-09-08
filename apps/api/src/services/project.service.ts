@@ -117,14 +117,17 @@ export class ProjectService {
     const conversations = await prisma.conversation.findMany({ where: { projectId: id }, select: { id: true, metadata: true } })
     const { piService } = await import('./pi.service.js')
     const { projectHistoryService } = await import('./project-history.service.js')
+    const { projectLiveFileManager } = await import('./project-live-file.service.js')
 
+    const runtimeRegistry = (piService as any).runtimeRegistry
+    if (runtimeRegistry?.disposeProject) await runtimeRegistry.disposeProject(id, 'project_deleted').catch(() => undefined)
+    await projectLiveFileManager.disposeProject(id).catch(() => undefined)
     for (const conversation of conversations) {
       await piService.disposeConversationRuntime(conversation.id, 'project_deleted').catch(() => undefined)
       await piService.deleteSessionFiles(conversation.metadata as Record<string, unknown>).catch(() => undefined)
     }
     await projectHistoryService.flushPending(id).catch(() => undefined)
 
-    // Re-resolve immediately before destructive filesystem removal.
     const verified = await resolveProjectRoot(id)
     if (verified.root !== root) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Project root changed during deletion', 409)
     await prisma.project.delete({ where: { id } })
