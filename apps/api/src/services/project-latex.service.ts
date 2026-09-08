@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { cp, lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
-import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
+import { cp, lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { basename, extname, join, relative, resolve, sep } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { LatexDiagnostic, ProjectLatexTarget } from '@yarc/shared'
 import { config } from '../lib/config.js'
@@ -9,6 +9,7 @@ import { AppError } from '../lib/errors.js'
 import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
 import { projectHistoryService } from './project-history.service.js'
 import { projectGitService } from './project-git.service.js'
+import { projectLiveFileManager } from './project-live-file.service.js'
 
 export type ProjectLatexBuildStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 export interface ProjectLatexBuild {
@@ -33,14 +34,20 @@ export interface ProjectLatexBuild {
   checkpointId?: string
 }
 
-const shellFreeDocker = (args: string[]) => new Promise<{ code: number; stdout: string; stderr: string }>((resolveRun, reject) => {
+const runDocker = (args: string[], timeoutMs: number) => new Promise<{ code: number; stdout: string; stderr: string }>((resolveRun, reject) => {
   const child = spawn(config.latexDockerCommand, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = '', stderr = ''
   const cap = Math.max(1024, config.latexMaxLogBytes)
+  const timer = setTimeout(() => {
+    child.kill('SIGTERM')
+    setTimeout(() => child.kill('SIGKILL'), 2_000).unref?.()
+    reject(new AppError('LATEX_BUILD_TIMEOUT', 'LaTeX build timed out', 504))
+  }, timeoutMs)
+  timer.unref?.()
   child.stdout.on('data', chunk => { if (stdout.length < cap) stdout += chunk.toString().slice(0, cap - stdout.length) })
   child.stderr.on('data', chunk => { if (stderr.length < cap) stderr += chunk.toString().slice(0, cap - stderr.length) })
-  child.once('error', reject)
-  child.once('close', code => resolveRun({ code: code ?? -1, stdout, stderr }))
+  child.once('error', error => { clearTimeout(timer); reject(error) })
+  child.once('close', code => { clearTimeout(timer); resolveRun({ code: code ?? -1, stdout, stderr }) })
 })
 
 const diagnosticLines = (log: string): LatexDiagnostic[] => {
@@ -152,6 +159,9 @@ export class ProjectLatexService {
       const source = await resolveProjectPath(build.projectId, target.sourceRoot || '.')
       const entry = await resolveProjectPath(build.projectId, target.entry)
       const relEntry = relative(source.fullPath, entry.fullPath).replace(/\\/g, '/')
+
+      // A build must see every dirty source/config buffer, not just .tex files.
+      await projectLiveFileManager.flushProject(build.projectId, normalizeProjectRelativePath(target.sourceRoot || '.'))
       await projectHistoryService.flushPending(build.projectId)
       const git = await projectGitService.status(build.projectId).catch(() => null)
       const checkpoint = await projectHistoryService.checkpoint(build.projectId, {
@@ -174,10 +184,7 @@ export class ProjectLatexService {
         '-v', `${snapshotDir}:/src:ro`, '-v', `${artifactDir}:/out:rw`, '-w', '/src',
         config.latexDockerImage, 'latexmk', engineFlag, '-interaction=nonstopmode', '-file-line-error', '-synctex=1', '-halt-on-error', '-outdir=/out', relEntry,
       ]
-      const result = await Promise.race([
-        shellFreeDocker(args),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new AppError('LATEX_BUILD_TIMEOUT', 'LaTeX build timed out', 504)), config.latexBuildTimeoutMs)),
-      ])
+      const result = await runDocker(args, config.latexBuildTimeoutMs)
       build.exitCode = result.code
       build.log = `${result.stdout}${result.stderr ? `\n${result.stderr}` : ''}`.slice(0, config.latexMaxLogBytes)
       build.diagnostics = diagnosticLines(build.log)
