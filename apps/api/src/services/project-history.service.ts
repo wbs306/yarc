@@ -60,6 +60,8 @@ const matchesAny = (path: string, patterns: string[]) => patterns.some(pattern =
 
 export class ProjectHistoryService {
   private pending = new Map<string, PendingProject>()
+  private retentionTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private retentionRuns = new Map<string, Promise<void>>()
 
   private objectPath(hash: string) {
     return join(config.projectHistoryDir, 'objects', hash.slice(0, 2), `${hash}.br`)
@@ -78,6 +80,23 @@ export class ProjectHistoryService {
     if (!settings.enabled) return false
     const included = settings.include?.length ? matchesAny(relative, settings.include) : DEFAULT_EXTENSIONS.has(extname(relative).toLowerCase())
     return included && !matchesAny(relative, settings.exclude || [])
+  }
+
+  private scheduleRetention(projectId: string, delayMs = 5_000) {
+    const previous = this.retentionTimers.get(projectId)
+    if (previous) clearTimeout(previous)
+    const timer = setTimeout(() => {
+      if (this.retentionTimers.get(projectId) === timer) this.retentionTimers.delete(projectId)
+      void this.runRetentionGc(projectId).catch(error => console.warn('[ProjectHistory] retention failed:', (error as Error).message))
+    }, delayMs)
+    timer.unref?.()
+    this.retentionTimers.set(projectId, timer)
+  }
+
+  private cancelScheduledRetention(projectId: string) {
+    const timer = this.retentionTimers.get(projectId)
+    if (timer) clearTimeout(timer)
+    this.retentionTimers.delete(projectId)
   }
 
   private async storeBlob(content: Buffer) {
@@ -196,7 +215,7 @@ export class ProjectHistoryService {
       },
       include: { revisions: true },
     })
-    void this.runRetentionGc(projectId).catch(error => console.warn('[ProjectHistory] retention failed:', (error as Error).message))
+    if (input.kind !== 'pre-restore' && input.kind !== 'restore') this.scheduleRetention(projectId)
     return checkpoint
   }
 
@@ -264,10 +283,12 @@ export class ProjectHistoryService {
   }
 
   async restoreFileRevision(projectId: string, revisionId: string) {
+    this.cancelScheduledRetention(projectId)
     const revision = await this.getRevision(projectId, revisionId)
     const { projectLiveFileManager } = await import('./project-live-file.service.js')
     await projectLiveFileManager.flushProject(projectId, revision.path)
     await this.flushPending(projectId)
+    this.cancelScheduledRetention(projectId)
     await this.checkpoint(projectId, {
       kind: 'pre-restore',
       paths: [revision.path],
@@ -277,14 +298,17 @@ export class ProjectHistoryService {
     await this.writeState(projectId, revision.path, revision)
     await projectLiveFileManager.resetPaths(projectId, [revision.path], 'history-file-restore')
     const restored = await this.checkpoint(projectId, { kind: 'restore', paths: [revision.path], metadata: { targetRevisionId: revisionId }, forceBoundary: true })
+    this.scheduleRetention(projectId)
     return { path: revision.path, checkpoint: restored }
   }
 
   async restoreWritingCheckpoint(projectId: string, checkpointId: string) {
+    this.cancelScheduledRetention(projectId)
     const target = await this.getCheckpoint(projectId, checkpointId)
     const { projectLiveFileManager } = await import('./project-live-file.service.js')
     await projectLiveFileManager.flushProject(projectId)
     await this.flushPending(projectId)
+    this.cancelScheduledRetention(projectId)
     const paths = await this.listTrackedPaths(projectId)
     await this.checkpoint(projectId, { kind: 'pre-restore', paths, metadata: { targetCheckpointId: checkpointId }, forceBoundary: true })
 
@@ -308,6 +332,7 @@ export class ProjectHistoryService {
     }
     await projectLiveFileManager.resetPaths(projectId, paths, 'history-checkpoint-restore')
     const restored = await this.checkpoint(projectId, { kind: 'restore', paths, metadata: { targetCheckpointId: checkpointId }, forceBoundary: true })
+    this.scheduleRetention(projectId)
     return { checkpoint: restored, restoredPaths: paths }
   }
 
@@ -359,7 +384,7 @@ export class ProjectHistoryService {
     }
   }
 
-  async runRetentionGc(projectId: string, options: { projectDeleted?: boolean } = {}) {
+  private async runRetentionGcUnsafe(projectId: string, options: { projectDeleted?: boolean } = {}) {
     if (!options.projectDeleted) {
       const settings = await this.settings(projectId)
       const cutoff = new Date(Date.now() - Math.max(1, Number(settings.retentionDays || 180)) * 86_400_000)
@@ -369,6 +394,18 @@ export class ProjectHistoryService {
       await this.trimProjectStorage(projectId, Number(settings.maxStorageMb || 512))
     }
     await this.gcObjects()
+  }
+
+  async runRetentionGc(projectId: string, options: { projectDeleted?: boolean } = {}) {
+    this.cancelScheduledRetention(projectId)
+    const previous = this.retentionRuns.get(projectId) || Promise.resolve()
+    const current = previous.catch(() => undefined).then(() => this.runRetentionGcUnsafe(projectId, options))
+    this.retentionRuns.set(projectId, current)
+    try {
+      await current
+    } finally {
+      if (this.retentionRuns.get(projectId) === current) this.retentionRuns.delete(projectId)
+    }
   }
 
   private async gcObjects() {
