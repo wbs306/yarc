@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { prisma } from '@yarc/db'
 import { config } from '../lib/config.js'
 import { withAgentWorkspaceCwd } from '../lib/agent-workspace.js'
 import { resolveConversationWorkspace } from '../lib/conversation-workspace.js'
@@ -15,6 +16,22 @@ const workspaceForConversation = async (conversationId?: string) => {
   const workspace = await resolveConversationWorkspace(conversationId)
   if (workspace.projectId) await projectLiveFileManager.get(workspace.projectId)
   return workspace
+}
+
+const conversationIdForSessionFile = async (sessionFile?: string) => {
+  if (!sessionFile) return undefined
+  const conversations = await prisma.conversation.findMany({
+    where: { projectId: { not: null } },
+    select: { id: true, metadata: true },
+  })
+  for (const conversation of conversations) {
+    const sessions = (conversation.metadata as any)?.pi?.sessions
+    if (!sessions || typeof sessions !== 'object') continue
+    for (const info of Object.values(sessions) as any[]) {
+      if (info?.sessionFile === sessionFile) return conversation.id
+    }
+  }
+  return undefined
 }
 
 const prepareRegistry = (registry: any) => {
@@ -99,6 +116,18 @@ export const installProjectPiContextBridge = () => {
       const cwd = context?.cwd || config.dataDir
       if (context?.projectId) await projectLiveFileManager.get(context.projectId)
       return withAgentWorkspaceCwd(cwd, () => originalCreateRuntimeToolHost(context))
+    }
+  }
+
+  // Startup recovery verifies existing assistant entries before deciding whether
+  // to synthesize a failed turn. Scope that SessionManager.open() to the Project
+  // owning the recovered session file as well.
+  const originalHasCommittedAssistantEntry = service.hasCommittedAssistantEntry?.bind(piService)
+  if (typeof originalHasCommittedAssistantEntry === 'function') {
+    service.hasCommittedAssistantEntry = async (sessionFile: string | undefined, entryIds: string[]) => {
+      const conversationId = await conversationIdForSessionFile(sessionFile)
+      const workspace = await workspaceForConversation(conversationId)
+      return withAgentWorkspaceCwd(workspace.cwd, () => originalHasCommittedAssistantEntry(sessionFile, entryIds))
     }
   }
 
