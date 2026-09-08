@@ -21,7 +21,6 @@ export interface RuntimeInitPayload {
   model?: string
   thinkingLevel?: string
   systemPrompt?: string
-  /** Re-establishes the in-memory ACM command context after a Runtime reload. */
   restoreAcm?: boolean
   tools: RuntimeToolManifest[]
   composer?: PiComposerMirror
@@ -96,6 +95,9 @@ export interface RuntimeToolExecutionContext {
   getKey: () => PiRuntimeKey
   getRunId: () => string | undefined
   emit: (event: ChatEvent) => void
+  cwd: string
+  workspaceKind: 'global' | 'project'
+  projectId?: string
 }
 
 export interface RuntimeToolHost {
