@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { lstat, mkdir, rm, writeFile } from 'node:fs/promises'
 import { prisma } from '@yarc/db'
@@ -41,6 +42,9 @@ const slugify = (name: string) => name
   .replace(/[^a-z0-9]+/g, '-')
   .replace(/^-+|-+$/g, '')
   .slice(0, 64)
+  .replace(/-+$/g, '')
+
+const automaticDirectoryName = (name: string) => slugify(name) || `project-${randomUUID().slice(0, 8)}`
 
 export class ProjectService {
   async list(options: { archived?: boolean } = {}) {
@@ -59,7 +63,7 @@ export class ProjectService {
   async create(input: { name: string; directoryName?: string; description?: string; settings?: Record<string, unknown> }) {
     const name = input.name?.trim()
     if (!name) throw new AppError('VALIDATION_ERROR', 'Project name is required', 400)
-    const directoryName = validateProjectDirectoryName(input.directoryName?.trim() || slugify(name))
+    const directoryName = validateProjectDirectoryName(input.directoryName?.trim() || automaticDirectoryName(name))
     const root = resolveProjectRootByDirectoryName(directoryName)
     await mkdir(config.projectsDir, { recursive: true })
     try {
