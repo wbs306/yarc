@@ -18,6 +18,7 @@ export interface RuntimeInitPayload {
   agentDir: string
   sessionDir: string
   sessionFile?: string | null
+  globalAgentsFile?: string
   model?: string
   thinkingLevel?: string
   systemPrompt?: string
