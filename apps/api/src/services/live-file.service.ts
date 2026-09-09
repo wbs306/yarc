@@ -91,7 +91,9 @@ const isSensitivePath = (filePath: string) => {
   const name = segments[segments.length - 1] || ''
   if (!relPath) return false
   if (name !== '.env.example' && (name === '.env' || name.startsWith('.env.'))) return true
-  return relPath === '.pi/agent/auth.json' || relPath.startsWith('.pi/agent/auth.json/')
+  return relPath === '.pi/auth.json' || relPath.startsWith('.pi/auth.json/')
+    || relPath === '.pi/models.json' || relPath.startsWith('.pi/models.json/')
+    || relPath === '.pi/agent/auth.json' || relPath.startsWith('.pi/agent/auth.json/')
     || relPath === '.pi/agent/models.json' || relPath.startsWith('.pi/agent/models.json/')
     || relPath.endsWith('.lock') || relPath.includes('.lock/')
 }
