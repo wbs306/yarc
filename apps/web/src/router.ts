@@ -33,6 +33,11 @@ const router = createRouter({
       component: () => import('@/pages/ProjectWorkspacePage.vue'),
     },
     {
+      path: '/projects/:id/settings',
+      name: 'project-settings',
+      component: () => import('@/pages/ProjectSettingsPage.vue'),
+    },
+    {
       path: '/files',
       name: 'files',
       component: () => import('@/pages/PapersPage.vue'),
