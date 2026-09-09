@@ -99,6 +99,11 @@ export class ProjectHistoryService {
     this.retentionTimers.delete(projectId)
   }
 
+  private async waitForRetentionIdle(projectId: string) {
+    const running = this.retentionRuns.get(projectId)
+    if (running) await running.catch(() => undefined)
+  }
+
   private async storeBlob(content: Buffer) {
     const hash = createHash('sha256').update(content).digest('hex')
     const target = this.objectPath(hash)
@@ -284,6 +289,7 @@ export class ProjectHistoryService {
 
   async restoreFileRevision(projectId: string, revisionId: string) {
     this.cancelScheduledRetention(projectId)
+    await this.waitForRetentionIdle(projectId)
     const revision = await this.getRevision(projectId, revisionId)
     const { projectLiveFileManager } = await import('./project-live-file.service.js')
     await projectLiveFileManager.flushProject(projectId, revision.path)
@@ -304,6 +310,7 @@ export class ProjectHistoryService {
 
   async restoreWritingCheckpoint(projectId: string, checkpointId: string) {
     this.cancelScheduledRetention(projectId)
+    await this.waitForRetentionIdle(projectId)
     const target = await this.getCheckpoint(projectId, checkpointId)
     const { projectLiveFileManager } = await import('./project-live-file.service.js')
     await projectLiveFileManager.flushProject(projectId)
@@ -337,8 +344,12 @@ export class ProjectHistoryService {
   }
 
   async pinCheckpoint(projectId: string, checkpointId: string, pinned = true) {
+    this.cancelScheduledRetention(projectId)
+    await this.waitForRetentionIdle(projectId)
     await this.getCheckpoint(projectId, checkpointId)
-    return prisma.projectHistoryCheckpoint.update({ where: { id: checkpointId }, data: { pinned } })
+    const checkpoint = await prisma.projectHistoryCheckpoint.update({ where: { id: checkpointId }, data: { pinned } })
+    if (!pinned) this.scheduleRetention(projectId)
+    return checkpoint
   }
 
   async updateCheckpointMetadata(projectId: string, checkpointId: string, metadata: Record<string, unknown>) {
