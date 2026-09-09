@@ -75,7 +75,7 @@ projects.post('/:id/files/directory', async (c) => {
 projects.post('/:id/files/open-system', async (c) => {
   const input = await body(c)
   if (typeof input.path !== 'string' || !input.path) throw new AppError('MISSING_PATH', 'Path is required', 400)
-  const file = await projectFileService.getDownload(id(c), input.path)
+  const file = await projectFileService.getSystemOpenPath(id(c), input.path)
   await openWithSystemApp(file.path)
   return c.json({ message: 'Opened' })
 })
