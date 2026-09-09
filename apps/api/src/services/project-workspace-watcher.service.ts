@@ -20,6 +20,13 @@ export class ProjectWorkspaceWatcherService {
     await this.refreshProjects()
     const watcher = getDataChangeWatcher(config.dataDir)
     this.unsubscribe = watcher.subscribe((change: any) => { void this.onChange(change).catch(error => console.warn('[ProjectWatcher]', error?.message || error)) })
+    try {
+      await watcher.start()
+    } catch (error) {
+      this.unsubscribe?.()
+      this.unsubscribe = undefined
+      throw error
+    }
   }
 
   stop() {
