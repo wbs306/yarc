@@ -101,7 +101,7 @@ projects.get('/:id/history/checkpoints/:checkpointId', async (c) => c.json({ che
 projects.get('/:id/history/revisions/:revisionId', async (c) => c.json(await projectHistoryService.getRevisionContent(id(c), c.req.param('revisionId'))))
 projects.post('/:id/history/checkpoints', async (c) => {
   const input = await body(c)
-  return c.json({ checkpoint: await projectHistoryService.checkpoint(id(c), { kind: input.kind || 'manual', paths: input.paths, label: input.label, metadata: input.metadata, forceBoundary: true }) }, 201)
+  return c.json({ checkpoint: await projectHistoryService.checkpoint(id(c), { kind: 'manual', paths: input.paths, label: input.label, metadata: input.metadata, forceBoundary: true }) }, 201)
 })
 projects.post('/:id/history/checkpoints/:checkpointId/pin', async (c) => {
   const input = await body(c)
