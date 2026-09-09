@@ -6,7 +6,6 @@ import { sseHub } from '../lib/sse.js'
 import { normalizeProjectRelativePath, resolveProjectRoot } from '../lib/project-path.js'
 import { projectHistoryService } from './project-history.service.js'
 import { projectLiveFileManager } from './project-live-file.service.js'
-import { projectPiContextService } from './project-pi-context.service.js'
 
 interface RunResult { stdout: string; stderr: string }
 
@@ -167,6 +166,7 @@ export class ProjectGitService {
     })
     await this.run(projectId, ['switch', clean])
     await projectLiveFileManager.resetProjectSessions(projectId, 'git-branch-switch')
+    const { projectPiContextService } = await import('./project-pi-context.service.js')
     await projectPiContextService.reloadProject(projectId, `git-branch-switch:${clean}`)
     sseHub.emit({ type: 'project-files-changed', projectId, action: 'git-branch-switch', at: new Date().toISOString() })
     return this.status(projectId)
