@@ -7,6 +7,7 @@ import { agentWorkspacePaths, withAgentWorkspaceCwd } from '../lib/agent-workspa
 import { isDefaultIgnoredDataPath, isProjectPiRuntimeResourcePath } from '../lib/data-sync-policy.js'
 import { normalizeProjectRelativePath, validateProjectDirectoryName } from '../lib/project-path.js'
 import { parseProjectGitPorcelainStatus } from './project-git.service.js'
+import { ProjectLatexService } from './project-latex.service.js'
 import { LiveFileService } from './live-file.service.js'
 
 describe('Project path policy', () => {
@@ -48,11 +49,42 @@ describe('Project Git status parsing', () => {
   })
 })
 
+describe('Project LaTeX target validation', () => {
+  const service = new ProjectLatexService()
+
+  it('normalizes sourceRoot and selects a default target', () => {
+    assert.deepEqual(service.validateTargetSettings({
+      targets: [{ id: 'paper', name: 'Paper', entry: 'paper/main.tex', sourceRoot: 'paper', engine: 'xelatex' }],
+    }), {
+      defaultTarget: 'paper',
+      targets: [{ id: 'paper', name: 'Paper', entry: 'paper/main.tex', sourceRoot: 'paper', engine: 'xelatex' }],
+    })
+  })
+
+  it('rejects duplicate ids, unsupported engines, and entries outside sourceRoot', () => {
+    assert.throws(() => service.validateTargetSettings({
+      targets: [
+        { id: 'paper', name: 'A', entry: 'main.tex', sourceRoot: '.', engine: 'xelatex' },
+        { id: 'paper', name: 'B', entry: 'other.tex', sourceRoot: '.', engine: 'pdflatex' },
+      ],
+    }), /Duplicate LaTeX target id/)
+    assert.throws(() => service.validateTargetSettings({
+      targets: [{ id: 'paper', name: 'Paper', entry: 'main.tex', sourceRoot: '.', engine: 'tectonic' }],
+    }), /Unsupported LaTeX engine/)
+    assert.throws(() => service.validateTargetSettings({
+      targets: [{ id: 'paper', name: 'Paper', entry: 'main.tex', sourceRoot: 'src', engine: 'xelatex' }],
+    }), /inside sourceRoot/)
+  })
+})
+
 describe('Project sync and Pi resource policy', () => {
-  it('ignores nested git metadata and global writing-history objects without hiding project Pi resources', () => {
+  it('ignores nested git metadata, writing-history objects, and nested Pi secrets without hiding project runtime resources', () => {
     assert.equal(isDefaultIgnoredDataPath('projects/demo/.git/HEAD'), true)
     assert.equal(isDefaultIgnoredDataPath('projects/demo/src/.git/config'), true)
     assert.equal(isDefaultIgnoredDataPath('.project-history/objects/aa/hash.br'), true)
+    assert.equal(isDefaultIgnoredDataPath('projects/demo/.pi/agent/auth.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('projects/demo/.pi/agent/models.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('projects/demo/.pi/agent/sessions/run.jsonl'), true)
     assert.equal(isDefaultIgnoredDataPath('projects/demo/.pi/settings.json'), false)
     assert.equal(isDefaultIgnoredDataPath('projects/demo/.agents/skills/reviewer/SKILL.md'), false)
 
@@ -109,14 +141,16 @@ describe('Project LiveFile isolation', () => {
     }
   })
 
-  it('allows project-local Pi and skill resources while blocking sensitive files', async () => {
+  it('allows project-local Pi and LaTeX support resources while blocking sensitive files', async () => {
     const root = await mkdtemp(join(tmpdir(), 'yarc-project-live-resources-'))
     const skill = join(root, '.agents', 'skills', 'reviewer', 'SKILL.md')
     const systemPrompt = join(root, '.pi', 'SYSTEM.md')
+    const style = join(root, 'paper.sty')
     await mkdir(join(root, '.agents', 'skills', 'reviewer'), { recursive: true })
     await mkdir(join(root, '.pi'), { recursive: true })
     await writeFile(skill, '# Reviewer\n')
     await writeFile(systemPrompt, 'Project system\n')
+    await writeFile(style, '\\ProvidesPackage{paper}\n')
     await writeFile(join(root, '.gitignore'), '*.aux\n')
     await writeFile(join(root, '.env'), 'SECRET=do-not-read\n')
 
@@ -129,6 +163,10 @@ describe('Project LiveFile isolation', () => {
       await live.replaceContent('.pi/SYSTEM.md', 'Project system updated\n', 'api')
       await live.flush('.pi/SYSTEM.md')
       assert.equal(await readFile(systemPrompt, 'utf-8'), 'Project system updated\n')
+
+      await live.replaceContent('paper.sty', '\\ProvidesPackage{paper}\n% updated\n', 'api')
+      await live.flush('paper.sty')
+      assert.equal(await readFile(style, 'utf-8'), '\\ProvidesPackage{paper}\n% updated\n')
 
       await live.replaceContent('.gitignore', '*.aux\n*.log\n', 'api')
       await live.flush('.gitignore')
