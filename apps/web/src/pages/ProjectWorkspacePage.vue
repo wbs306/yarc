@@ -9,6 +9,7 @@ import { useProjectLiveFiles, type ProjectLiveFileClient } from '@/composables/u
 import type {
   ProjectGitBranch,
   ProjectGitCommit,
+  ProjectGitFileStatus,
   ProjectHistoryCheckpoint,
   ProjectHistoryRevision,
   ProjectLatexTarget,
@@ -31,6 +32,8 @@ const EDITABLE_EXTENSIONS = new Set([
   'py','r','jl','m','c','h','cc','cpp','hpp','ts','tsx','js','jsx','vue','css','scss','html','xml','sh','zsh','fish','sql','log',
 ])
 const EDITABLE_NAMES = new Set(['.gitignore', '.gitattributes', 'Dockerfile', 'Makefile'])
+const DOCUMENT_GIT_EXTENSIONS = new Set(['tex', 'bib', 'sty', 'cls', 'bst'])
+const CODE_GIT_EXTENSIONS = new Set(['py', 'r', 'jl', 'm', 'c', 'h', 'cc', 'cpp', 'hpp', 'ts', 'tsx', 'js', 'jsx', 'vue', 'sh', 'zsh', 'fish', 'sql'])
 
 const route = useRoute()
 const router = useRouter()
@@ -52,6 +55,7 @@ const fileHistory = ref<FileRevision[]>([])
 const historyPreview = ref<HistoryPreview | null>(null)
 const gitDiff = ref('')
 const commitMessage = ref('')
+const selectedGitPaths = ref<string[]>([])
 const newPath = ref('')
 const error = ref('')
 const activeBuild = ref<any>(null)
@@ -117,6 +121,24 @@ function flattenNodes(nodes: FileNode[], depth = 0): Array<{ node: FileNode; dep
   return nodes.flatMap(node => [{ node, depth }, ...(node.children ? flattenNodes(node.children, depth + 1) : [])])
 }
 const flatFiles = computed(() => flattenNodes(files.value))
+
+const gitCategory = (path: string) => {
+  const name = fileName(path)
+  const dot = name.lastIndexOf('.')
+  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : ''
+  if (DOCUMENT_GIT_EXTENSIONS.has(ext)) return 'Document' as const
+  if (CODE_GIT_EXTENSIONS.has(ext)) return 'Code' as const
+  return 'Other' as const
+}
+const gitGroups = computed(() => {
+  const groups: Array<{ name: 'Code' | 'Document' | 'Other'; files: ProjectGitFileStatus[] }> = [
+    { name: 'Code', files: [] },
+    { name: 'Document', files: [] },
+    { name: 'Other', files: [] },
+  ]
+  for (const file of store.gitStatus?.files || []) groups.find(group => group.name === gitCategory(file.path))!.files.push(file)
+  return groups.filter(group => group.files.length)
+})
 
 async function loadFiles() {
   files.value = (await json<{ files: FileNode[] }>(`/api/projects/${projectId.value}/files`)).files
@@ -264,9 +286,20 @@ async function loadGit() {
   commits.value = log.commits
   branches.value = branchData.branches
   remotes.value = remoteData.remotes
+  selectedGitPaths.value = selectedGitPaths.value.filter(path => status.files.some(file => file.path === path))
   if (selectedPath.value && status.files.some(file => file.path === selectedPath.value)) {
     gitDiff.value = (await json<{ diff: string }>(`/api/projects/${projectId.value}/git/diff?path=${encodeURIComponent(selectedPath.value)}`)).diff
   } else gitDiff.value = ''
+}
+
+async function stageSelected() {
+  const paths = [...selectedGitPaths.value]
+  if (!paths.length) return
+  try {
+    await json(`/api/projects/${projectId.value}/git/stage`, { method: 'POST', body: JSON.stringify({ paths }) })
+    selectedGitPaths.value = []
+    await loadGit()
+  } catch (err) { error.value = (err as Error).message }
 }
 
 async function stage(path: string) {
@@ -568,6 +601,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="actions">
         <button @click="router.push('/')">文献</button>
+        <button @click="router.push(`/projects/${projectId}/settings`)">Settings</button>
         <button @click="startBuild">Build</button>
         <button @click="createProjectConversation">New Agent Chat</button>
       </div>
@@ -608,12 +642,17 @@ onBeforeUnmount(() => {
             </select>
             <button @click="createBranch">+ Branch</button>
           </div>
-          <div v-for="file in store.gitStatus?.files || []" :key="file.path" class="git-file">
-            <button class="path" @click="openFile(file.path)">
-              {{ file.indexStatus }}{{ file.worktreeStatus }} {{ file.originalPath ? `${file.originalPath} → ${file.path}` : file.path }}
-            </button>
-            <div><button v-if="file.indexStatus===' ' || file.indexStatus==='?'" @click="stage(file.path)">Stage</button><button v-else @click="unstage(file.path)">Unstage</button></div>
-          </div>
+          <div class="toolbar"><button :disabled="!selectedGitPaths.length" @click="stageSelected">Stage selected ({{ selectedGitPaths.length }})</button></div>
+          <section v-for="group in gitGroups" :key="group.name" class="git-group">
+            <h3>{{ group.name }}</h3>
+            <div v-for="file in group.files" :key="file.path" class="git-file">
+              <label class="git-select"><input v-model="selectedGitPaths" type="checkbox" :value="file.path" :disabled="file.indexStatus!==' ' && file.indexStatus!=='?'" /></label>
+              <button class="path" @click="openFile(file.path)">
+                {{ file.indexStatus }}{{ file.worktreeStatus }} {{ file.originalPath ? `${file.originalPath} → ${file.path}` : file.path }}
+              </button>
+              <div><button v-if="file.indexStatus===' ' || file.indexStatus==='?'" @click="stage(file.path)">Stage</button><button v-else @click="unstage(file.path)">Unstage</button></div>
+            </div>
+          </section>
           <textarea v-model="commitMessage" rows="3" placeholder="Commit message" />
           <button class="primary" @click="commit">Commit staged</button>
           <h3>Remotes</h3>
@@ -662,6 +701,7 @@ onBeforeUnmount(() => {
         <div class="editor-header">
           <span>{{ selectedPath || '选择一个文件' }}</span>
           <span v-if="selectedPath" :class="`save-${liveState}`">{{ liveState }}</span>
+          <button v-if="selectedPath && selectedEditable" @click="sideTab='history'">History</button>
           <button v-if="currentLive?.dirty.value" @click="flushFile">Flush</button>
           <template v-if="currentLive?.conflict.value"><button @click="resolveLiveConflict('use-live')">Keep editor</button><button @click="resolveLiveConflict('use-disk')">Use disk</button></template>
         </div>
@@ -688,6 +728,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.workspace{height:100vh;display:flex;flex-direction:column;background:var(--bg-primary,#151515);color:var(--text-primary,#e8e8e8)}.header{height:64px;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid rgba(127,127,127,.2)}button,input,select,textarea{font:inherit}.back,.actions button,.tabs button,.panel button,.editor-header button,.external-file button{background:transparent;color:inherit;border:1px solid rgba(127,127,127,.24);border-radius:6px;padding:6px 9px;cursor:pointer}.project-title{min-width:0;flex:1}.project-title h1{font-size:16px;margin:0 0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{display:flex;gap:12px;font-size:11px;opacity:.58}.actions{display:flex;gap:8px}.layout{min-height:0;flex:1;display:grid;grid-template-columns:310px minmax(420px,1fr) minmax(340px,430px)}.left,.center,.chat{min-height:0;border-right:1px solid rgba(127,127,127,.18)}.left{display:flex;flex-direction:column}.tabs{display:flex;padding:8px;gap:5px;border-bottom:1px solid rgba(127,127,127,.15)}.tabs button{padding:5px 7px}.tabs .active{background:rgba(127,127,127,.18)}.panel{padding:8px;display:flex;flex-direction:column;gap:6px}.scroll{overflow:auto}.toolbar{display:flex;gap:4px;flex-wrap:wrap}.toolbar input{min-width:0;flex:1}.toolbar.bottom{margin-top:8px}.file-row{width:100%;border:0!important;text-align:left!important;display:flex;gap:6px}.file-row.selected,.target-card.selected{background:rgba(100,120,255,.18)}.file-row:disabled{opacity:.7;cursor:default}.git-file{display:flex;gap:4px;justify-content:space-between;align-items:center}.git-file .path{border:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.panel input,.panel select,.panel textarea{box-sizing:border-box;background:transparent;color:inherit;border:1px solid rgba(127,127,127,.24);border-radius:6px;padding:7px}.panel textarea{width:100%}.primary{background:var(--accent-color,#6d7cff)!important;color:white!important}.danger{color:#f56c6c!important}.panel h3{font-size:12px;margin:12px 0 2px;opacity:.68}.commit{font-size:12px;line-height:1.5}.remote{font-size:11px;padding:6px 4px;display:grid;gap:2px;word-break:break-all}.remote small,.muted-row{opacity:.55}.checkpoint{padding:9px;border-bottom:1px solid rgba(127,127,127,.14);display:grid;gap:8px}.checkpoint small{display:block;opacity:.5;margin-top:3px}.row-actions,.branch-row,.latex-head{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.branch-row select{flex:1}.latex-head{justify-content:space-between}.panel label{display:grid;gap:4px;font-size:11px;opacity:.8}.target-card{padding:8px;border:1px solid rgba(127,127,127,.16);border-radius:7px;display:grid;gap:5px;cursor:pointer}.center{display:flex;flex-direction:column;overflow:hidden}.editor-header{height:40px;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid rgba(127,127,127,.15);font-size:12px}.editor-header span:first-child{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.save-dirty{color:#e6a23c}.save-conflict{color:#f56c6c}.save-saved{color:#67c23a}.save-offline{color:#909399}.save-external{opacity:.55}.editor-wrap{flex:1;min-height:0}.empty{display:grid;place-items:center;flex:1;opacity:.55;text-align:center;padding:20px}.external-file p{max-width:460px;font-size:12px}.diff,.build-log{max-height:220px;overflow:auto;border-top:1px solid rgba(127,127,127,.2);padding:12px;margin:0;font-size:11px;white-space:pre-wrap}.history-compare{max-height:42%;display:flex;flex-direction:column;border-top:1px solid rgba(127,127,127,.2)}.history-compare header{height:34px;padding:0 9px;display:flex;align-items:center;justify-content:space-between}.history-compare header button{background:transparent;border:0;color:inherit;cursor:pointer}.history-preview,.diff-lines{min-height:0;overflow:auto;padding:8px}.history-preview small,.diff-lines small{opacity:.55}.history-preview pre,.diff-lines pre{font-size:11px;white-space:pre-wrap;margin:5px 0}.diff-lines pre span{display:block;min-height:1.3em}.diff-add{background:rgba(70,160,90,.12)}.diff-remove{background:rgba(200,80,80,.12)}.diff-same{opacity:.7}.pdf{height:45%;border:0;border-top:1px solid rgba(127,127,127,.2);background:white}.chat{overflow:hidden}.error{margin:0;padding:8px 16px;background:rgba(210,60,60,.14);color:#e66}
+.workspace{height:100vh;display:flex;flex-direction:column;background:var(--bg-primary,#151515);color:var(--text-primary,#e8e8e8)}.header{height:64px;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid rgba(127,127,127,.2)}button,input,select,textarea{font:inherit}.back,.actions button,.tabs button,.panel button,.editor-header button,.external-file button{background:transparent;color:inherit;border:1px solid rgba(127,127,127,.24);border-radius:6px;padding:6px 9px;cursor:pointer}.project-title{min-width:0;flex:1}.project-title h1{font-size:16px;margin:0 0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{display:flex;gap:12px;font-size:11px;opacity:.58}.actions{display:flex;gap:8px}.layout{min-height:0;flex:1;display:grid;grid-template-columns:310px minmax(420px,1fr) minmax(340px,430px)}.left,.center,.chat{min-height:0;border-right:1px solid rgba(127,127,127,.18)}.left{display:flex;flex-direction:column}.tabs{display:flex;padding:8px;gap:5px;border-bottom:1px solid rgba(127,127,127,.15)}.tabs button{padding:5px 7px}.tabs .active{background:rgba(127,127,127,.18)}.panel{padding:8px;display:flex;flex-direction:column;gap:6px}.scroll{overflow:auto}.toolbar{display:flex;gap:4px;flex-wrap:wrap}.toolbar input{min-width:0;flex:1}.toolbar.bottom{margin-top:8px}.file-row{width:100%;border:0!important;text-align:left!important;display:flex;gap:6px}.file-row.selected,.target-card.selected{background:rgba(100,120,255,.18)}.file-row:disabled{opacity:.7;cursor:default}.git-group{display:grid;gap:4px}.git-file{display:flex;gap:4px;justify-content:space-between;align-items:center}.git-select{display:flex!important;align-items:center;opacity:1!important}.git-select input{margin:0}.git-file .path{border:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.panel input,.panel select,.panel textarea{box-sizing:border-box;background:transparent;color:inherit;border:1px solid rgba(127,127,127,.24);border-radius:6px;padding:7px}.panel textarea{width:100%}.primary{background:var(--accent-color,#6d7cff)!important;color:white!important}.danger{color:#f56c6c!important}.panel h3{font-size:12px;margin:12px 0 2px;opacity:.68}.commit{font-size:12px;line-height:1.5}.remote{font-size:11px;padding:6px 4px;display:grid;gap:2px;word-break:break-all}.remote small,.muted-row{opacity:.55}.checkpoint{padding:9px;border-bottom:1px solid rgba(127,127,127,.14);display:grid;gap:8px}.checkpoint small{display:block;opacity:.5;margin-top:3px}.row-actions,.branch-row,.latex-head{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.branch-row select{flex:1}.latex-head{justify-content:space-between}.panel label{display:grid;gap:4px;font-size:11px;opacity:.8}.target-card{padding:8px;border:1px solid rgba(127,127,127,.16);border-radius:7px;display:grid;gap:5px;cursor:pointer}.center{display:flex;flex-direction:column;overflow:hidden}.editor-header{height:40px;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid rgba(127,127,127,.15);font-size:12px}.editor-header span:first-child{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.save-dirty{color:#e6a23c}.save-conflict{color:#f56c6c}.save-saved{color:#67c23a}.save-offline{color:#909399}.save-external{opacity:.55}.editor-wrap{flex:1;min-height:0}.empty{display:grid;place-items:center;flex:1;opacity:.55;text-align:center;padding:20px}.external-file p{max-width:460px;font-size:12px}.diff,.build-log{max-height:220px;overflow:auto;border-top:1px solid rgba(127,127,127,.2);padding:12px;margin:0;font-size:11px;white-space:pre-wrap}.history-compare{max-height:42%;display:flex;flex-direction:column;border-top:1px solid rgba(127,127,127,.2)}.history-compare header{height:34px;padding:0 9px;display:flex;align-items:center;justify-content:space-between}.history-compare header button{background:transparent;border:0;color:inherit;cursor:pointer}.history-preview,.diff-lines{min-height:0;overflow:auto;padding:8px}.history-preview small,.diff-lines small{opacity:.55}.history-preview pre,.diff-lines pre{font-size:11px;white-space:pre-wrap;margin:5px 0}.diff-lines pre span{display:block;min-height:1.3em}.diff-add{background:rgba(70,160,90,.12)}.diff-remove{background:rgba(200,80,80,.12)}.diff-same{opacity:.7}.pdf{height:45%;border:0;border-top:1px solid rgba(127,127,127,.2);background:white}.chat{overflow:hidden}.error{margin:0;padding:8px 16px;background:rgba(210,60,60,.14);color:#e66}
 @media (max-width:1100px){.layout{grid-template-columns:260px 1fr}.chat{display:none}}@media (max-width:720px){.layout{grid-template-columns:1fr}.left{display:none}.actions{display:none}}
 </style>
