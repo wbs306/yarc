@@ -102,6 +102,7 @@ const toggleArchived = async () => {
             <button class="danger" @click="permanentlyDelete(project.id, project.name)">Delete permanently</button>
           </template>
           <template v-else>
+            <button class="ghost" @click="router.push(`/projects/${project.id}/settings`)">Settings</button>
             <button class="ghost" @click="renameProject(project.id, project.name)">Rename</button>
             <button class="ghost" @click="archive(project.id)">Archive</button>
           </template>
