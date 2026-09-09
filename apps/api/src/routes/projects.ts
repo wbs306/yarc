@@ -8,6 +8,7 @@ import { projectGitService } from '../services/project-git.service.js'
 import { projectHistoryService } from '../services/project-history.service.js'
 import { projectLatexService } from '../services/project-latex.service.js'
 import { AppError } from '../lib/errors.js'
+import { normalizeProjectHistorySettings } from '../lib/project-history-settings.js'
 
 const projects = new Hono()
 const body = async (c: any) => await c.req.json().catch(() => ({})) as Record<string, any>
@@ -125,6 +126,19 @@ projects.get('/:id/git/branches', async (c) => c.json({ branches: await projectG
 projects.post('/:id/git/branches', async (c) => c.json({ branches: await projectGitService.createBranch(id(c), String((await body(c)).name || '')) }, 201))
 projects.post('/:id/git/branches/switch', async (c) => c.json({ status: await projectGitService.switchBranch(id(c), String((await body(c)).name || '')) }))
 
+projects.get('/:id/history/settings', async (c) => {
+  const project = await projectService.get(id(c))
+  return c.json({ settings: normalizeProjectHistorySettings(((project.settings || {}) as any).history) })
+})
+projects.put('/:id/history/settings', async (c) => {
+  await projectHistoryService.flushPending(id(c))
+  const input = await body(c)
+  const history = normalizeProjectHistorySettings(input.settings ?? input)
+  const project = await projectService.get(id(c))
+  const settings = { ...((project.settings || {}) as any), history }
+  await projectService.update(id(c), { settings })
+  return c.json({ settings: history })
+})
 projects.get('/:id/history', async (c) => c.json({ checkpoints: await projectHistoryService.listCheckpoints(id(c), Number(c.req.query('limit') || 200)) }))
 projects.get('/:id/history/files', async (c) => {
   const path = c.req.query('path') || ''
