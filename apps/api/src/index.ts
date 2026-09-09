@@ -166,7 +166,7 @@ app.get(
 app.get(
   '/api/projects/:id/files/live',
   upgradeWebSocket((c) => {
-    const projectId = c.req.param('id')
+    const projectId = c.req.param('id') || ''
     const path = c.req.query('path') || ''
     let clientId: string | null = null
     let service: Awaited<ReturnType<typeof projectLiveFileManager.get>> | null = null

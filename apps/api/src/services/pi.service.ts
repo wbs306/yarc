@@ -297,7 +297,7 @@ export class PiService {
     }
     const agentWorkspace = await ensureAgentWorkspace()
     const yarcTools = this.filterChatTools(await this.createYarcTools(dynamicInteractionContext))
-    const definitions = [...this.createWorkspaceToolOverrides(agentWorkspace.cwd), ...yarcTools]
+    const definitions = [...this.createWorkspaceToolOverrides(context.cwd || agentWorkspace.cwd), ...yarcTools]
     const byName = new Map(definitions.map((definition: any) => [definition.name, definition]))
     const manifests = definitions.map((definition: any) => ({
       name: String(definition.name),

@@ -95,7 +95,7 @@ export class ProjectFileService {
       path: relativePath,
       type: info.isDirectory() ? 'directory' : 'file',
       modifiedAt: info.mtime.toISOString(),
-      ...(info.isFile() ? { size: info.size } : {}),
+      ...(info.isFile() ? { size: Number(info.size) } : {}),
     }
     if (info.isDirectory()) base.children = await this.getFileTree(projectId, relativePath)
     return base

@@ -159,7 +159,7 @@ async function openFile(path: string) {
   try {
     if (!isEditablePath(path)) {
       fileHistory.value = []
-      await Promise.all([openSystemFile(path), loadGit()])
+      await loadGit()
       return
     }
     const [disk, live] = await Promise.all([

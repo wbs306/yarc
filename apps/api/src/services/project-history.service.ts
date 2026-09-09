@@ -12,6 +12,7 @@ const compress = promisify(brotliCompress)
 const decompress = promisify(brotliDecompress)
 const DEFAULT_EXTENSIONS = new Set(['.tex', '.bib', '.sty', '.cls', '.bst'])
 const DELETED_HASH = createHash('sha256').update('').digest('hex')
+const GC_OBJECT_GRACE_MS = 5 * 60_000
 
 interface PendingProject {
   paths: Set<string>
@@ -25,7 +26,7 @@ interface CheckpointInput {
   kind: string
   paths?: string[]
   label?: string
-  metadata?: Record<string, unknown>
+  metadata?: any
   forceBoundary?: boolean
 }
 
@@ -142,7 +143,7 @@ export class ProjectHistoryService {
     return this.createSingleRevision(projectId, 'baseline', relative, content, false, { baseline: true })
   }
 
-  private async createSingleRevision(projectId: string, kind: string, path: string, content: Buffer | null, deleted: boolean, metadata: Record<string, unknown> = {}) {
+  private async createSingleRevision(projectId: string, kind: string, path: string, content: Buffer | null, deleted: boolean, metadata: any = {}) {
     const blobHash = deleted || !content ? null : await this.storeBlob(content)
     const contentHash = deleted || !content ? DELETED_HASH : createHash('sha256').update(content).digest('hex')
     const checkpoint = await prisma.projectHistoryCheckpoint.create({
@@ -438,7 +439,14 @@ export class ProjectHistoryService {
       for (const name of names) {
         if (!name.endsWith('.br')) continue
         const hash = name.slice(0, -3)
-        if (!referenced.has(hash)) await rm(join(dir, name), { force: true })
+        if (!referenced.has(hash)) {
+          const objectFile = join(dir, name)
+          try {
+            const info = await stat(objectFile)
+            if (Date.now() - info.mtimeMs < GC_OBJECT_GRACE_MS) continue
+          } catch { continue }
+          await rm(objectFile, { force: true })
+        }
       }
     }
   }

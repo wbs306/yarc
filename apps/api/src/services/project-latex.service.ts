@@ -240,7 +240,7 @@ export class ProjectLatexService {
       build.status = 'completed'
       if (build.checkpointId) await projectHistoryService.updateCheckpointMetadata(build.projectId, build.checkpointId, { buildId: build.id, success: true })
     } catch (error: any) {
-      build.status = build.status === 'cancelled' ? 'cancelled' : 'failed'
+      build.status = String(build.status) === 'cancelled' ? 'cancelled' : 'failed'
       build.error = error?.message || 'LaTeX build failed'
       if (build.checkpointId) await projectHistoryService.updateCheckpointMetadata(build.projectId, build.checkpointId, { buildId: build.id, success: false, error: build.error }).catch(() => undefined)
     } finally {
