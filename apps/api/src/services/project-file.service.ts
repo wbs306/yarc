@@ -1,6 +1,6 @@
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname } from 'node:path'
+import { basename, dirname, extname, sep } from 'node:path'
 import { config } from '../lib/config.js'
 import { sseHub } from '../lib/sse.js'
 import { AppError } from '../lib/errors.js'
@@ -187,6 +187,9 @@ export class ProjectFileService {
       if (error?.code !== 'ENOENT') throw error
     }
     const info = await lstat(source.fullPath)
+    if (info.isDirectory() && target.fullPath.startsWith(`${source.fullPath}${sep}`)) {
+      throw new AppError('VALIDATION_ERROR', 'A directory cannot be moved into its own subtree', 400)
+    }
     await projectLiveFileManager.flushProject(projectId, source.relativePath)
 
     let sourcePaths: string[] = []
