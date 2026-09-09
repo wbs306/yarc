@@ -165,7 +165,7 @@ export function useApi() {
       const formData = new FormData()
       for (const file of files) formData.append('files', file)
       if (categoryId) formData.append('categoryId', categoryId)
-      return request<{ papers: any[]; errors?: { fileName: string; message: string }[]>('/papers/upload', {
+      return request<{ papers: any[]; errors?: { fileName: string; message: string }[] }>('/papers/upload', {
         method: 'POST',
         body: formData as any,
       })
@@ -715,7 +715,7 @@ export function useApi() {
     uploadBackgroundImage: (file: File) => {
       const formData = new FormData()
       formData.append('file', file)
-      return request<{ image: { src: string; thumb: string }>('/settings/background-images', {
+      return request<{ image: { src: string; thumb: string } }>('/settings/background-images', {
         method: 'POST',
         body: formData as any,
       })
