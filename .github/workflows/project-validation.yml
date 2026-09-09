@@ -1,5 +1,6 @@
 name: Project validation
 
+# Branch-only validation for the Project implementation before manual merge.
 on:
   push:
     branches:
