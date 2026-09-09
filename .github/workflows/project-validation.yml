@@ -31,6 +31,10 @@ jobs:
     env:
       DATABASE_URL: postgresql://yarc:yarc@localhost:5432/yarc
       DATA_DIR: /tmp/yarc-project-data
+      GIT_AUTHOR_NAME: YARC Validation
+      GIT_AUTHOR_EMAIL: validation@yarc.invalid
+      GIT_COMMITTER_NAME: YARC Validation
+      GIT_COMMITTER_EMAIL: validation@yarc.invalid
     steps:
       - name: Checkout
         uses: actions/checkout@v4
