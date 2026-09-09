@@ -85,6 +85,17 @@ export class ProjectGitService {
     }
   }
 
+  private async expandRenamePaths(projectId: string, requestedPaths: string[], status?: ProjectGitStatus) {
+    const current = status || await this.status(projectId)
+    const requested = new Set(requestedPaths)
+    const expanded = new Set(requestedPaths)
+    for (const file of current.files) {
+      if (!requested.has(file.path) || !file.originalPath) continue
+      expanded.add(normalizeProjectRelativePath(file.originalPath))
+    }
+    return [...expanded].filter(Boolean)
+  }
+
   async diff(projectId: string, input: { staged?: boolean; path?: string } = {}) {
     const args = ['diff']
     if (input.staged) args.push('--cached')
@@ -106,7 +117,8 @@ export class ProjectGitService {
     if (!safe.length) throw new AppError('VALIDATION_ERROR', 'At least one path is required', 400)
     for (const path of safe) await projectLiveFileManager.flushProject(projectId, path)
     await projectHistoryService.flushPending(projectId)
-    await this.run(projectId, ['add', '--', ...safe])
+    const expanded = await this.expandRenamePaths(projectId, safe)
+    await this.run(projectId, ['add', '--', ...expanded])
     return this.status(projectId)
   }
 
@@ -114,8 +126,9 @@ export class ProjectGitService {
     const safe = paths.map(normalizeProjectRelativePath).filter(Boolean)
     if (!safe.length) throw new AppError('VALIDATION_ERROR', 'At least one path is required', 400)
     const status = await this.status(projectId)
-    if (status.head) await this.run(projectId, ['restore', '--staged', '--', ...safe])
-    else await this.run(projectId, ['rm', '--cached', '-r', '--ignore-unmatch', '--', ...safe])
+    const expanded = await this.expandRenamePaths(projectId, safe, status)
+    if (status.head) await this.run(projectId, ['restore', '--staged', '--', ...expanded])
+    else await this.run(projectId, ['rm', '--cached', '-r', '--ignore-unmatch', '--', ...expanded])
     return this.status(projectId)
   }
 
