@@ -30,7 +30,7 @@ jobs:
           --health-retries 12
     env:
       DATABASE_URL: postgresql://yarc:yarc@localhost:5432/yarc
-      DATA_DIR: ${{ runner.temp }}/yarc-project-data
+      DATA_DIR: /tmp/yarc-project-data
     steps:
       - name: Checkout
         uses: actions/checkout@v4
