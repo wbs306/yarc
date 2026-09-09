@@ -176,8 +176,16 @@ export class ProjectFileService {
     const sourcePath = assertProjectExposedPath(from)
     const targetPath = assertProjectExposedPath(to)
     if (!sourcePath || !targetPath) throw new AppError('VALIDATION_ERROR', 'Source and target paths are required', 400)
+    if (sourcePath === targetPath) throw new AppError('VALIDATION_ERROR', 'Source and target paths must differ', 400)
     const source = await resolveProjectPath(projectId, sourcePath)
     const target = await resolveProjectPath(projectId, targetPath, { allowMissing: true })
+    try {
+      await lstat(target.fullPath)
+      throw new AppError('ALREADY_EXISTS', 'Target path already exists', 409)
+    } catch (error: any) {
+      if (error instanceof AppError) throw error
+      if (error?.code !== 'ENOENT') throw error
+    }
     const info = await lstat(source.fullPath)
     await projectLiveFileManager.flushProject(projectId, source.relativePath)
 
@@ -255,6 +263,14 @@ export class ProjectFileService {
     await this.publishFileServiceChange(resolved.project.directoryName, relative)
     this.emit(projectId, 'upload', relative)
     return { path: relative, size: file.size }
+  }
+
+  async getSystemOpenPath(projectId: string, path: string) {
+    const relativePath = assertProjectExposedPath(path)
+    const resolved = await resolveProjectPath(projectId, relativePath)
+    const info = await stat(resolved.fullPath)
+    if (!info.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
+    return { path: resolved.fullPath, name: basename(relativePath) }
   }
 
   async getDownload(projectId: string, path: string) {
