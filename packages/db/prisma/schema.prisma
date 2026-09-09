@@ -112,6 +112,7 @@ model Conversation {
 
 model ProjectHistoryCheckpoint {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sequence  Int      @default(autoincrement())
   projectId String   @map("project_id") @db.Uuid
   kind      String
   label     String?
@@ -122,6 +123,8 @@ model ProjectHistoryCheckpoint {
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   revisions ProjectHistoryRevision[]
 
+  @@unique([projectId, sequence])
+  @@index([projectId, sequence(sort: Desc)])
   @@index([projectId, createdAt(sort: Desc)])
   @@map("project_history_checkpoints")
 }
