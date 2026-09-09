@@ -33,6 +33,8 @@ const isSensitiveProjectPath = (path: string) => {
   const segments = relative.split('/')
   const name = segments[segments.length - 1] || ''
   if (name !== '.env.example' && (name === '.env' || name.startsWith('.env.'))) return true
+  if (relative === '.pi/auth.json' || relative.startsWith('.pi/auth.json/')) return true
+  if (relative === '.pi/models.json' || relative.startsWith('.pi/models.json/')) return true
   if (relative === '.pi/agent/auth.json' || relative.startsWith('.pi/agent/auth.json/')) return true
   if (relative === '.pi/agent/models.json' || relative.startsWith('.pi/agent/models.json/')) return true
   return relative.endsWith('.lock') || relative.includes('.lock/')
