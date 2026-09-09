@@ -1,0 +1,228 @@
+import { relative, resolve, sep } from 'node:path'
+import { config } from '../lib/config.js'
+import { AppError } from '../lib/errors.js'
+import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
+import { getDataChangeWatcher } from './data-change-watcher.js'
+import { LiveFileService, liveFileService } from './live-file.service.js'
+import { projectHistoryService } from './project-history.service.js'
+
+export class ProjectLiveFileManager {
+  private instances = new Map<string, { root: string; service: LiveFileService }>()
+  private agentRoutingInstalled = false
+
+  private guardService(projectId: string, root: string, raw: LiveFileService): LiveFileService {
+    const guardRelative = async (path: string, allowMissing = false) => {
+      const normalized = normalizeProjectRelativePath(path)
+      await resolveProjectPath(projectId, normalized, { allowMissing })
+      return normalized
+    }
+    const relativeFromAbsolute = (absolutePath: string) => {
+      const target = resolve(absolutePath)
+      if (target === root) return ''
+      if (!target.startsWith(`${root}${sep}`)) return null
+      return relative(root, target).replace(/\\/g, '/')
+    }
+    const guardAbsolute = async (absolutePath: string, allowMissing = false) => {
+      const path = relativeFromAbsolute(absolutePath)
+      if (path === null) return
+      await resolveProjectPath(projectId, path, { allowMissing })
+    }
+
+    return new Proxy(raw, {
+      get(target, property) {
+        if (property === 'open' || property === 'attachClient' || property === 'replaceContent') {
+          return async (path: string, ...args: any[]) => {
+            const safe = await guardRelative(path)
+            return (target as any)[property](safe, ...args)
+          }
+        }
+        if (property === 'applyClientUpdate' || property === 'flush' || property === 'resolveConflict' || property === 'handleDiskChange') {
+          return async (path: string, ...args: any[]) => {
+            const safe = await guardRelative(path, true)
+            return (target as any)[property](safe, ...args)
+          }
+        }
+        if (property === 'readAgentFile') {
+          return async (absolutePath: string) => {
+            await guardAbsolute(absolutePath)
+            return target.readAgentFile(absolutePath)
+          }
+        }
+        if (property === 'accessAgentFile') {
+          return async (absolutePath: string) => {
+            await guardAbsolute(absolutePath, true)
+            return target.accessAgentFile(absolutePath)
+          }
+        }
+        if (property === 'writeAgentFile') {
+          return async (absolutePath: string, content: string, baseContent?: string) => {
+            await guardAbsolute(absolutePath, true)
+            return target.writeAgentFile(absolutePath, content, baseContent)
+          }
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  }
+
+  private async ensureBaselineBeforeWrite(projectId: string, path: string) {
+    try {
+      await projectHistoryService.ensureBaseline(projectId, path)
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'NOT_FOUND') {
+        await projectHistoryService.ensureBaseline(projectId, path, { missing: true })
+        return
+      }
+      throw error
+    }
+  }
+
+  async get(projectId: string) {
+    const { root, project } = await resolveProjectRoot(projectId)
+    const existing = this.instances.get(projectId)
+    if (existing?.root === root) return existing.service
+    if (existing) await existing.service.disposeAll().catch(() => undefined)
+    const raw = new LiveFileService({
+      rootDir: root,
+      workspaceKind: 'project',
+      projectId,
+      beforeWrite: async (path) => { await this.ensureBaselineBeforeWrite(projectId, path) },
+      afterWrite: async (path, source) => {
+        await projectHistoryService.trackChange(projectId, path, source === 'agent' || source === 'disk' ? 'external' : 'autosave')
+        const dataPath = `projects/${project.directoryName}/${normalizeProjectRelativePath(path)}`
+        await getDataChangeWatcher(config.dataDir).publish({ path: dataPath, source: 'live-file' }).catch(error => {
+          console.warn('[ProjectLiveFile] failed to publish DATA_DIR change:', (error as Error).message)
+        })
+      },
+    })
+    const service = this.guardService(projectId, root, raw)
+    this.instances.set(projectId, { root, service })
+    return service
+  }
+
+  private serviceForAbsolutePath(absolutePath: string) {
+    const target = resolve(absolutePath)
+    for (const instance of this.instances.values()) {
+      if (target === instance.root || target.startsWith(`${instance.root}${sep}`)) return instance.service
+    }
+    return null
+  }
+
+  private sessionMap(service: LiveFileService): Map<string, any> {
+    return ((service as any).sessions as Map<string, any> | undefined) || new Map()
+  }
+
+  private resetMatchingSessions(service: LiveFileService, matches: (path: string) => boolean, reason: string) {
+    const sessions = this.sessionMap(service)
+    for (const [path, session] of [...sessions.entries()]) {
+      if (!matches(path)) continue
+      if (session.saveTimer) clearTimeout(session.saveTimer)
+      if (session.retireTimer) clearTimeout(session.retireTimer)
+      const payload = JSON.stringify({ type: 'workspace-reset', path, reason })
+      for (const client of session.clients?.values?.() || []) {
+        try { client.ws.send(payload) } catch {}
+        try { client.ws.close?.() } catch {}
+      }
+      try { session.ydoc?.destroy?.() } catch {}
+      sessions.delete(path)
+    }
+  }
+
+  installGlobalAgentRouting() {
+    if (this.agentRoutingInstalled) return
+    this.agentRoutingInstalled = true
+
+    const readAgentFile = liveFileService.readAgentFile.bind(liveFileService)
+    const accessAgentFile = liveFileService.accessAgentFile.bind(liveFileService)
+    const writeAgentFile = liveFileService.writeAgentFile.bind(liveFileService)
+
+    liveFileService.readAgentFile = async (absolutePath: string) => {
+      const service = this.serviceForAbsolutePath(absolutePath)
+      return service ? service.readAgentFile(absolutePath) : readAgentFile(absolutePath)
+    }
+    liveFileService.accessAgentFile = async (absolutePath: string) => {
+      const service = this.serviceForAbsolutePath(absolutePath)
+      if (service) return service.accessAgentFile(absolutePath)
+      return accessAgentFile(absolutePath)
+    }
+    liveFileService.writeAgentFile = async (absolutePath: string, content: string, baseContent?: string) => {
+      const service = this.serviceForAbsolutePath(absolutePath)
+      if (service) return service.writeAgentFile(absolutePath, content, baseContent)
+      return writeAgentFile(absolutePath, content, baseContent)
+    }
+  }
+
+  async flushProject(projectId: string, prefix = '') {
+    const service = await this.get(projectId)
+    const normalized = prefix ? normalizeProjectRelativePath(prefix) : ''
+    if (normalized) await resolveProjectPath(projectId, normalized, { allowMissing: true })
+    const paths = [...this.sessionMap(service).keys()].filter(path => !normalized || path === normalized || path.startsWith(`${normalized}/`))
+    const results = []
+    for (const path of paths) {
+      const result = await service.flush(path)
+      if (!result) continue
+      if (result.conflict) throw new AppError('PROJECT_FILE_CONFLICT', `Live file conflict: ${path}`, 409)
+      results.push(result)
+    }
+    return results
+  }
+
+  async hasSessions(projectId: string, prefix = '') {
+    const service = await this.get(projectId)
+    const normalized = prefix ? normalizeProjectRelativePath(prefix) : ''
+    return [...this.sessionMap(service).keys()].some(path => !normalized || path === normalized || path.startsWith(`${normalized}/`))
+  }
+
+  async refreshProject(projectId: string) {
+    const service = await this.get(projectId)
+    for (const path of [...this.sessionMap(service).keys()]) await service.handleDiskChange(path)
+  }
+
+  async refreshPaths(projectId: string, paths: string[]) {
+    const service = await this.get(projectId)
+    for (const path of [...new Set(paths)]) {
+      if (service.hasSession(path)) await service.handleDiskChange(path)
+    }
+  }
+
+  async resetProjectSessions(projectId: string, reason = 'workspace-reset') {
+    const service = await this.get(projectId)
+    this.resetMatchingSessions(service, () => true, reason)
+  }
+
+  async resetPaths(projectId: string, paths: string[], reason = 'workspace-reset') {
+    const service = await this.get(projectId)
+    const normalized = [...new Set(paths.map(path => normalizeProjectRelativePath(path)).filter(Boolean))]
+    this.resetMatchingSessions(service, path => normalized.some(prefix => path === prefix || path.startsWith(`${prefix}/`)), reason)
+  }
+
+  async handleDiskChange(projectId: string, path: string) {
+    const service = await this.get(projectId)
+    const result = await service.handleDiskChange(path)
+    if (result !== 'self') await projectHistoryService.trackChange(projectId, path, 'external')
+    return result
+  }
+
+  async disposeProject(projectId: string) {
+    const instance = this.instances.get(projectId)
+    if (!instance) return
+    await this.flushProject(projectId).catch(() => undefined)
+    this.instances.delete(projectId)
+    this.resetMatchingSessions(instance.service, () => true, 'project-dispose')
+    await instance.service.disposeAll()
+  }
+
+  async disposeAll() {
+    const entries = [...this.instances.entries()]
+    for (const [projectId] of entries) await this.flushProject(projectId).catch(() => undefined)
+    this.instances.clear()
+    for (const [, instance] of entries) {
+      this.resetMatchingSessions(instance.service, () => true, 'shutdown')
+      await instance.service.disposeAll().catch(() => undefined)
+    }
+  }
+}
+
+export const projectLiveFileManager = new ProjectLiveFileManager()
+projectLiveFileManager.installGlobalAgentRouting()

@@ -21,12 +21,19 @@ describe('data sync path policy', () => {
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/sessions/run.jsonl'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/subagent-results/result.json'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/runtime-streams/conversation/run.jsonl'), true)
+    assert.equal(isDefaultIgnoredDataPath('.pi/auth.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('.pi/models.json'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/auth.json'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/models.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('projects/demo/.pi/auth.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('projects/demo/.pi/models.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('projects/demo/.pi/agent/auth.json'), true)
+    assert.equal(isDefaultIgnoredDataPath('projects/demo/.pi/agent/models.json'), true)
     assert.equal(isDefaultIgnoredDataPath('.pi/agent/npm/node_modules/pkg/index.js'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/.venv/bin/python'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/.cache/index.json'), true)
     assert.equal(isDefaultIgnoredDataPath('.latex-builds/job/out/main.synctex.gz'), true)
+    assert.equal(isDefaultIgnoredDataPath('.project-history/objects/aa/hash.br'), true)
     assert.equal(isDefaultIgnoredDataPath('.yarc/latex-builds/job/out/main.synctex.gz'), true)
     assert.equal(isDefaultIgnoredDataPath('generated/latex/job/out/main.pdf'), true)
     assert.equal(isDefaultIgnoredDataPath('works/demo/src/index.ts'), false)
@@ -118,6 +125,28 @@ describe('DataChangeWatcher', () => {
 
       await writeFile(join(directory, 'works', 'synced.md'), 'user edit after download')
       await waitFor(() => events.some(event => event.source === 'filesystem' && event.path === 'works/synced.md'))
+    } finally {
+      watcher.stop()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('suppresses the filesystem echo of a Project File API write', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yarc-data-watcher-'))
+    const watcher = new DataChangeWatcher(directory)
+    const events: DataChangeEvent[] = []
+    watcher.subscribe(event => { events.push(event) })
+
+    try {
+      const projectDir = join(directory, 'projects', 'demo')
+      await mkdir(projectDir, { recursive: true })
+      await watcher.start()
+      await writeFile(join(projectDir, 'main.tex'), 'YARC save')
+      await watcher.publish({ path: 'projects/demo/main.tex', source: 'file-service' })
+      await waitFor(() => events.some(event => event.source === 'file-service' && event.path === 'projects/demo/main.tex'))
+      await new Promise(resolve => setTimeout(resolve, 300))
+
+      assert.equal(events.some(event => event.source === 'filesystem' && event.path === 'projects/demo/main.tex'), false)
     } finally {
       watcher.stop()
       await rm(directory, { recursive: true, force: true })

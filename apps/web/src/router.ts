@@ -23,6 +23,21 @@ const router = createRouter({
       component: () => import('@/pages/PapersPage.vue'),
     },
     {
+      path: '/projects',
+      name: 'projects',
+      component: () => import('@/pages/ProjectsPage.vue'),
+    },
+    {
+      path: '/projects/:id',
+      name: 'project-workspace',
+      component: () => import('@/pages/ProjectWorkspacePage.vue'),
+    },
+    {
+      path: '/projects/:id/settings',
+      name: 'project-settings',
+      component: () => import('@/pages/ProjectSettingsPage.vue'),
+    },
+    {
       path: '/files',
       name: 'files',
       component: () => import('@/pages/PapersPage.vue'),
@@ -47,9 +62,6 @@ async function hasValidSession(): Promise<boolean> {
   return false
 }
 
-// Auth guard checks the real HttpOnly cookie, not only localStorage. This avoids
-// showing an empty app when localStorage says logged-in but the API cookie is
-// missing for the current host/port.
 router.beforeEach(async (to) => {
   const loggedIn = await hasValidSession()
 

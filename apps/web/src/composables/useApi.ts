@@ -38,6 +38,13 @@ export interface TemporaryPdfDocument {
   expiresAt?: string
 }
 
+const currentProjectId = () => {
+  if (typeof window === 'undefined') return null
+  const match = window.location.pathname.match(/^\/projects\/([^/]+)(?:\/|$)/)
+  if (!match?.[1]) return null
+  try { return decodeURIComponent(match[1]) } catch { return match[1] }
+}
+
 async function request<T>(endpoint: string, options: RequestInitExt = {}): Promise<T> {
   const { params, ...fetchOptions } = options
 
@@ -236,9 +243,12 @@ export function useApi() {
       }),
 
     // Conversations
-    getConversations: () => request<{ conversations: any[] }>('/conversations'),
+    getConversations: (projectId?: string | null) =>
+      request<{ conversations: any[] }>('/conversations', {
+        params: projectId === undefined ? undefined : { projectId: projectId || '' },
+      }),
 
-    createConversation: (data?: { paperId?: string; title?: string; model?: string }) =>
+    createConversation: (data?: { paperId?: string; projectId?: string; title?: string; model?: string }) =>
       request<{ conversation: any }>('/conversations', {
         method: 'POST',
         body: JSON.stringify(data || {}),
@@ -454,8 +464,12 @@ export function useApi() {
     retryTask: (id: string) => request(`/tasks/${id}/retry`, { method: 'POST' }),
 
     // Files
-    getFileTree: (path?: string) =>
-      request<{ files: any[] }>('/files', { params: path ? { path } : {} }),
+    getFileTree: (path?: string) => {
+      const projectId = currentProjectId()
+      return projectId
+        ? request<{ files: any[] }>(`/projects/${encodeURIComponent(projectId)}/files`, { params: path ? { path } : {} })
+        : request<{ files: any[] }>('/files', { params: path ? { path } : {} })
+    },
 
     getFileContent: (path: string, options?: { refreshLive?: boolean }) =>
       request<{

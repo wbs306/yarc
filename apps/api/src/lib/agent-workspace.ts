@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { config } from './config.js'
@@ -16,17 +17,19 @@ type AgentSkillSetting = {
   enabled?: boolean
 }
 
-export const agentWorkspacePaths = () => {
-  const cwd = resolve(config.dataDir)
-  const piDir = join(cwd, '.pi')
+const agentCwdContext = new AsyncLocalStorage<string>()
+
+const globalAgentWorkspacePaths = () => {
+  const dataDir = resolve(config.dataDir)
+  const piDir = join(dataDir, '.pi')
   const agentDir = join(piDir, 'agent')
   const skillsDir = join(agentDir, 'skills')
 
   return {
-    cwd,
+    cwd: dataDir,
     piDir,
     agentDir,
-    agentsMd: join(cwd, 'AGENTS.md'),
+    agentsMd: join(dataDir, 'AGENTS.md'),
     legacyAgentsMd: join(piDir, 'AGENTS.md'),
     summaryPrompt: join(piDir, 'SUMMARY.md'),
     systemPrompt: join(agentDir, 'SYSTEM.md'),
@@ -38,12 +41,21 @@ export const agentWorkspacePaths = () => {
   }
 }
 
+export const agentWorkspacePaths = () => ({
+  ...globalAgentWorkspacePaths(),
+  cwd: agentCwdContext.getStore() || resolve(config.dataDir),
+})
+
+export const withAgentWorkspaceCwd = <T>(cwd: string, operation: () => T): T =>
+  agentCwdContext.run(resolve(cwd), operation)
+
 export const applyAgentWorkspaceEnv = () => {
-  const paths = agentWorkspacePaths()
+  const paths = globalAgentWorkspacePaths()
   // Pi packages and extensions (including pi-subagents) discover user settings,
   // agents, models, auth, npm plugins, and default session paths through these
   // standard environment variables. Keep them pointed at YARC's data-scoped
-  // agent workspace instead of the process user's ~/.pi/agent.
+  // agent workspace instead of the process user's ~/.pi/agent. Conversation cwd
+  // is intentionally independent and may point at a Project workspace.
   process.env.PI_CODING_AGENT_DIR = paths.agentDir
   process.env.PI_CODING_AGENT_SESSION_DIR = paths.sessionsDir
   return paths
@@ -171,7 +183,7 @@ const scanSkillDirectories = async (skillsDir: string) => {
   }
 }
 
-const writeSkillFiles = async (paths: ReturnType<typeof agentWorkspacePaths>, skills: AgentSkillSetting[]) => {
+const writeSkillFiles = async (paths: ReturnType<typeof globalAgentWorkspacePaths>, skills: AgentSkillSetting[]) => {
   const nextNames = new Set(skills.map((skill) => skill.name))
   try {
     const entries = await readdir(paths.skillsDir, { withFileTypes: true })
@@ -208,35 +220,40 @@ const ensureJsonFile = async (path: string, fallback: unknown) => {
   await writeJsonFile(path, fallback)
 }
 
-let _ensuredPaths: ReturnType<typeof agentWorkspacePaths> | null = null
+let _ensuredPaths: ReturnType<typeof globalAgentWorkspacePaths> | null = null
 let _ensuredWithSeeds = false
 
 export const ensureAgentWorkspace = async (seed: AgentWorkspaceSeed = {}) => {
-  const paths = applyAgentWorkspaceEnv()
+  applyAgentWorkspaceEnv()
+  const paths = globalAgentWorkspacePaths()
   const hasSeeds = !!(seed.agentMd || seed.summaryPrompt || seed.systemPrompt || seed.skills)
 
-  // Skip if already ensured without seeds and no new seeds provided.
-  // With seeds, always re-run to sync filesystem.
-  if (_ensuredPaths && _ensuredWithSeeds && !hasSeeds) return _ensuredPaths
-  if (_ensuredPaths && !hasSeeds) return _ensuredPaths
-
-  await mkdir(paths.cwd, { recursive: true })
-  await mkdir(paths.piDir, { recursive: true })
-  await mkdir(paths.agentDir, { recursive: true })
-  await mkdir(paths.skillsDir, { recursive: true })
-  const legacyAgentMd = await readOptionalText(paths.legacyAgentsMd)
-  await ensureTextFile(paths.agentsMd, seed.agentMd ?? legacyAgentMd ?? DEFAULT_AGENTS_MD_CONTENT)
-  await ensureTextFile(paths.summaryPrompt, seed.summaryPrompt ?? undefined)
-  await ensureTextFile(paths.systemPrompt, seed.systemPrompt || DEFAULT_CHAT_SYSTEM_PROMPT)
-  await ensureJsonFile(paths.agentSettings, {})
-  const seedSkills = normalizeSkills(seed.skills)
-  if (seedSkills.length && !(await scanSkillDirectories(paths.skillsDir)).length) {
-    await writeSkillFiles(paths, seedSkills)
+  // Seed and cache only the global Pi configuration. The returned cwd is taken
+  // from AsyncLocalStorage so concurrent Project conversations do not leak cwd
+  // into one another while still sharing the same agentDir/sessionDir.
+  if (!_ensuredPaths || hasSeeds || !_ensuredWithSeeds) {
+    await mkdir(paths.cwd, { recursive: true })
+    await mkdir(paths.piDir, { recursive: true })
+    await mkdir(paths.agentDir, { recursive: true })
+    await mkdir(paths.skillsDir, { recursive: true })
+    const legacyAgentMd = await readOptionalText(paths.legacyAgentsMd)
+    await ensureTextFile(paths.agentsMd, seed.agentMd ?? legacyAgentMd ?? DEFAULT_AGENTS_MD_CONTENT)
+    await ensureTextFile(paths.summaryPrompt, seed.summaryPrompt ?? undefined)
+    await ensureTextFile(paths.systemPrompt, seed.systemPrompt || DEFAULT_CHAT_SYSTEM_PROMPT)
+    await ensureJsonFile(paths.agentSettings, {})
+    const seedSkills = normalizeSkills(seed.skills)
+    if (seedSkills.length && !(await scanSkillDirectories(paths.skillsDir)).length) {
+      await writeSkillFiles(paths, seedSkills)
+    }
+    _ensuredPaths = paths
+    if (hasSeeds) _ensuredWithSeeds = true
   }
 
-  _ensuredPaths = paths
-  if (hasSeeds) _ensuredWithSeeds = true
-  return paths
+  const ensured = _ensuredPaths || paths
+  return {
+    ...ensured,
+    cwd: agentCwdContext.getStore() || ensured.cwd,
+  }
 }
 
 export const readAgentSystemPrompt = async () => {
