@@ -44,6 +44,7 @@ export interface ProjectSummary extends Project {
 
 export interface ProjectGitFileStatus {
   path: string
+  originalPath?: string
   indexStatus: string
   worktreeStatus: string
 }
