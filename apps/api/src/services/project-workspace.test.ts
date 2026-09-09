@@ -6,6 +6,7 @@ import { describe, it } from 'node:test'
 import { agentWorkspacePaths, withAgentWorkspaceCwd } from '../lib/agent-workspace.js'
 import { isDefaultIgnoredDataPath, isProjectPiRuntimeResourcePath } from '../lib/data-sync-policy.js'
 import { normalizeProjectRelativePath, validateProjectDirectoryName } from '../lib/project-path.js'
+import { parseProjectGitPorcelainStatus } from './project-git.service.js'
 import { LiveFileService } from './live-file.service.js'
 
 describe('Project path policy', () => {
@@ -31,6 +32,19 @@ describe('Project path policy', () => {
     for (const invalid of ['Project', 'two words', '../escape', 'under_score', '-leading', 'trailing-']) {
       assert.throws(() => validateProjectDirectoryName(invalid), /directoryName/i)
     }
+  })
+})
+
+describe('Project Git status parsing', () => {
+  it('consumes the second NUL pathname for rename/copy records', () => {
+    const files = parseProjectGitPorcelainStatus(
+      'R  chapters/new.tex\0chapters/old.tex\0 M main.tex\0C  figures/new.svg\0figures/old.svg\0',
+    )
+    assert.deepEqual(files, [
+      { indexStatus: 'R', worktreeStatus: ' ', path: 'chapters/new.tex', originalPath: 'chapters/old.tex' },
+      { indexStatus: ' ', worktreeStatus: 'M', path: 'main.tex' },
+      { indexStatus: 'C', worktreeStatus: ' ', path: 'figures/new.svg', originalPath: 'figures/old.svg' },
+    ])
   })
 })
 
