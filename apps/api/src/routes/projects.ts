@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { createReadStream } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { projectService } from '../services/project.service.js'
 import { projectFileService } from '../services/project-file.service.js'
@@ -11,6 +12,32 @@ import { AppError } from '../lib/errors.js'
 const projects = new Hono()
 const body = async (c: any) => await c.req.json().catch(() => ({})) as Record<string, any>
 const id = (c: any) => c.req.param('id')
+
+const systemOpenCommand = (fullPath: string): { command: string; args: string[] } => {
+  if (process.platform === 'darwin') return { command: 'open', args: [fullPath] }
+  if (process.platform === 'win32') return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', 'Start-Process -LiteralPath $args[0]', fullPath] }
+  return { command: 'xdg-open', args: [fullPath] }
+}
+
+const openWithSystemApp = (fullPath: string): Promise<void> => new Promise((resolve, reject) => {
+  const { command, args } = systemOpenCommand(fullPath)
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' })
+  let settled = false
+  const finish = (error?: Error) => {
+    if (settled) return
+    settled = true
+    if (error) reject(error)
+    else resolve()
+  }
+  child.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return finish(new AppError('SYSTEM_OPEN_NOT_AVAILABLE', 'No system opener is available on this host', 503))
+    finish(error)
+  })
+  child.on('spawn', () => {
+    child.unref()
+    finish()
+  })
+})
 
 projects.get('/', async (c) => c.json({ projects: await projectService.list({ archived: c.req.query('archived') === 'true' }) }))
 projects.post('/', async (c) => c.json({ project: await projectService.create(await body(c) as any) }, 201))
@@ -44,6 +71,13 @@ projects.post('/:id/files/directory', async (c) => {
   const input = await body(c)
   if (typeof input.path !== 'string') throw new AppError('MISSING_PATH', 'Path is required', 400)
   return c.json(await projectFileService.createDirectory(id(c), input.path), 201)
+})
+projects.post('/:id/files/open-system', async (c) => {
+  const input = await body(c)
+  if (typeof input.path !== 'string' || !input.path) throw new AppError('MISSING_PATH', 'Path is required', 400)
+  const file = await projectFileService.getDownload(id(c), input.path)
+  await openWithSystemApp(file.path)
+  return c.json({ message: 'Opened' })
 })
 projects.patch('/:id/files/path', async (c) => {
   const input = await body(c)
