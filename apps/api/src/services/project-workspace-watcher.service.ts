@@ -10,6 +10,8 @@ import { installProjectPiContextBridge, projectPiContextService } from './projec
 
 installProjectPiContextBridge()
 
+const isYarcOwnedWrite = (change: DataChangeEvent) => change.source === 'file-service' || change.source === 'live-file'
+
 export class ProjectWorkspaceWatcherService {
   private unsubscribe?: () => void
   private directoryCache = new Map<string, string>()
@@ -83,21 +85,19 @@ export class ProjectWorkspaceWatcherService {
     const known = this.knownTrackedPaths.get(projectId) || new Set<string>()
     this.knownTrackedPaths.set(projectId, known)
     if (tracked && change.kind !== 'delete' && !known.has(relativePath)) {
-      // For a true external creation the old state is missing. Project File API
-      // creates its own missing baseline before publishing `file-service`.
       await projectHistoryService.ensureBaseline(projectId, relativePath, { missing: true }).catch(() => undefined)
       known.add(relativePath)
     }
 
-    if (change.source !== 'file-service') {
-      // Filesystem/WebDAV changes are external to YARC's Project File API and
-      // therefore belong in Writing History as `external`. File API writes have
-      // already recorded autosave/manual checkpoints and are only published here
-      // to suppress their filesystem echo and trigger reload/UI bookkeeping.
+    if (!isYarcOwnedWrite(change)) {
+      // Filesystem/WebDAV changes are external. Project File API and LiveFile
+      // already recorded their own autosave/manual/agent revision before
+      // publishing into the DATA_DIR watcher; processing them again here would
+      // incorrectly promote their pending checkpoint to `external`.
       await projectLiveFileManager.handleDiskChange(projectId, relativePath).catch(() => undefined)
     }
     if (tracked && change.kind === 'delete') known.delete(relativePath)
-    projectFileService.notifyExternalChange(projectId, relativePath, change.source === 'file-service' ? 'file-service' : change.kind)
+    projectFileService.notifyExternalChange(projectId, relativePath, isYarcOwnedWrite(change) ? change.source : change.kind)
 
     if (isProjectPiRuntimeResourcePath(relativePath)) {
       await projectPiContextService.reloadProject(projectId, `project-file:${relativePath}`)
