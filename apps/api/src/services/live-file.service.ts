@@ -12,7 +12,8 @@ import { getDataChangeWatcher } from './data-change-watcher.js'
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.csv', '.tsv',
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.css', '.scss', '.html', '.xml',
-  '.py', '.sh', '.sql', '.log', '.bib', '.tex', '.ini', '.conf', '.env.example',
+  '.py', '.r', '.jl', '.m', '.c', '.h', '.cc', '.cpp', '.hpp', '.sh', '.zsh', '.fish', '.sql', '.log',
+  '.bib', '.tex', '.sty', '.cls', '.bst', '.ini', '.cfg', '.conf', '.env.example',
 ])
 const TEXT_FILE_NAMES = new Set(['.gitignore', '.gitattributes', 'Dockerfile', 'Makefile'])
 const MAX_TEXT_FILE_SIZE = 2 * 1024 * 1024
@@ -81,6 +82,7 @@ const languageFor = (path: string) => ({
   '.ts': 'typescript', '.tsx': 'typescript', '.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
   '.vue': 'vue', '.json': 'json', '.jsonl': 'json', '.md': 'markdown', '.markdown': 'markdown', '.py': 'python', '.css': 'css',
   '.scss': 'scss', '.html': 'html', '.xml': 'xml', '.yaml': 'yaml', '.yml': 'yaml', '.sh': 'shell', '.sql': 'sql', '.bib': 'bibtex', '.tex': 'latex',
+  '.sty': 'latex', '.cls': 'latex', '.bst': 'plaintext',
 } as Record<string, string>)[extensionFor(path)] || 'plaintext'
 
 const isSensitivePath = (filePath: string) => {
