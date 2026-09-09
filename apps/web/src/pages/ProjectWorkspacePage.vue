@@ -16,6 +16,21 @@ import type {
 
 type FileNode = { name: string; path: string; type: 'file' | 'directory'; children?: FileNode[]; size?: number }
 type FileRevision = ProjectHistoryRevision & { checkpoint?: ProjectHistoryCheckpoint }
+type GitRemote = { name: string; fetch?: string; push?: string }
+type HistoryPreview = {
+  revision: FileRevision
+  content: string | null
+  mode: 'preview' | 'current' | 'previous'
+  baseLabel?: string
+  baseContent?: string | null
+}
+type DiffLine = { kind: 'same' | 'add' | 'remove'; text: string }
+
+const EDITABLE_EXTENSIONS = new Set([
+  'tex','bib','sty','cls','bst','txt','md','markdown','json','jsonl','yaml','yml','toml','ini','cfg','conf','csv','tsv',
+  'py','r','jl','m','c','h','cc','cpp','hpp','ts','tsx','js','jsx','vue','css','scss','html','xml','sh','zsh','fish','sql','log',
+])
+const EDITABLE_NAMES = new Set(['.gitignore', '.gitattributes', 'Dockerfile', 'Makefile'])
 
 const route = useRoute()
 const router = useRouter()
@@ -31,9 +46,10 @@ const currentLive = shallowRef<ProjectLiveFileClient | null>(null)
 const fileLoading = ref(false)
 const commits = ref<ProjectGitCommit[]>([])
 const branches = ref<ProjectGitBranch[]>([])
+const remotes = ref<GitRemote[]>([])
 const history = ref<ProjectHistoryCheckpoint[]>([])
 const fileHistory = ref<FileRevision[]>([])
-const historyPreview = ref<{ revision: FileRevision; content: string | null } | null>(null)
+const historyPreview = ref<HistoryPreview | null>(null)
 const gitDiff = ref('')
 const commitMessage = ref('')
 const newPath = ref('')
@@ -59,6 +75,15 @@ const json = async <T = any>(url: string, init?: RequestInit): Promise<T> => {
   return data as T
 }
 
+const fileName = (path: string) => path.split('/').pop() || path
+const isEditablePath = (path: string) => {
+  const name = fileName(path)
+  if (EDITABLE_NAMES.has(name)) return true
+  const dot = name.lastIndexOf('.')
+  return dot >= 0 && EDITABLE_EXTENSIONS.has(name.slice(dot + 1).toLowerCase())
+}
+const selectedEditable = computed(() => !!selectedPath.value && isEditablePath(selectedPath.value))
+
 const language = computed(() => {
   const ext = selectedPath.value.split('.').pop()?.toLowerCase()
   return ({ tex: 'latex', bib: 'bibtex', sty: 'latex', cls: 'latex', md: 'markdown', json: 'json', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', vue: 'vue', py: 'python', css: 'css', html: 'html', yaml: 'yaml', yml: 'yaml', sql: 'sql', sh: 'shell', xml: 'xml' } as Record<string,string>)[ext || ''] || 'plaintext'
@@ -66,7 +91,7 @@ const language = computed(() => {
 
 const liveState = computed(() => {
   const live = currentLive.value
-  if (!live) return selectedPath.value ? 'loading' : 'idle'
+  if (!live) return selectedEditable.value ? (selectedPath.value ? 'loading' : 'idle') : 'external'
   if (live.conflict.value) return 'conflict'
   if (live.saving.value) return 'saving'
   if (live.dirty.value) return 'dirty'
@@ -74,7 +99,7 @@ const liveState = computed(() => {
 })
 
 const currentResource = computed(() => selectedPath.value
-  ? { type: 'file' as const, path: selectedPath.value, name: selectedPath.value.split('/').pop() || selectedPath.value }
+  ? { type: 'file' as const, path: selectedPath.value, name: fileName(selectedPath.value) }
   : null)
 
 watch(() => currentLive.value?.content.value, next => {
@@ -114,8 +139,15 @@ async function settleCurrentLiveFile() {
   }
 }
 
+async function openSystemFile(path = selectedPath.value) {
+  if (!path) return
+  try {
+    await json(`/api/projects/${projectId.value}/files/open-system`, { method: 'POST', body: JSON.stringify({ path }) })
+  } catch (err) { error.value = (err as Error).message }
+}
+
 async function openFile(path: string) {
-  if (path === selectedPath.value && currentLive.value) return
+  if (path === selectedPath.value && (currentLive.value || !isEditablePath(path))) return
   if (!(await settleCurrentLiveFile())) return
   currentLive.value?.close()
   currentLive.value = null
@@ -125,6 +157,11 @@ async function openFile(path: string) {
   fileLoading.value = true
   error.value = ''
   try {
+    if (!isEditablePath(path)) {
+      fileHistory.value = []
+      await Promise.all([openSystemFile(path), loadGit()])
+      return
+    }
     const [disk, live] = await Promise.all([
       json<{ content: string }>(`/api/projects/${projectId.value}/files/content?path=${encodeURIComponent(path)}`),
       projectLiveFiles.open(projectId.value, path),
@@ -133,7 +170,6 @@ async function openFile(path: string) {
     content.value = live.ready.value ? live.content.value : disk.content
     await Promise.all([loadFileHistory(), loadGit()])
   } catch (err) {
-    selectedPath.value = ''
     error.value = (err as Error).message
   } finally {
     fileLoading.value = false
@@ -219,13 +255,15 @@ async function uploadFile(event: Event) {
 }
 
 async function loadGit() {
-  const [status, log, branchData] = await Promise.all([
+  const [status, log, branchData, remoteData] = await Promise.all([
     store.fetchGitStatus(projectId.value),
     json<{ commits: ProjectGitCommit[] }>(`/api/projects/${projectId.value}/git/log`),
     json<{ branches: ProjectGitBranch[] }>(`/api/projects/${projectId.value}/git/branches`),
+    json<{ remotes: GitRemote[] }>(`/api/projects/${projectId.value}/git/remotes`),
   ])
   commits.value = log.commits
   branches.value = branchData.branches
+  remotes.value = remoteData.remotes
   if (selectedPath.value && status.files.some(file => file.path === selectedPath.value)) {
     gitDiff.value = (await json<{ diff: string }>(`/api/projects/${projectId.value}/git/diff?path=${encodeURIComponent(selectedPath.value)}`)).diff
   } else gitDiff.value = ''
@@ -286,14 +324,82 @@ async function loadHistory() {
 }
 
 async function loadFileHistory() {
-  if (!selectedPath.value) { fileHistory.value = []; return }
+  if (!selectedPath.value || !isEditablePath(selectedPath.value)) { fileHistory.value = []; return }
   fileHistory.value = (await json<{ revisions: FileRevision[] }>(`/api/projects/${projectId.value}/history/files?path=${encodeURIComponent(selectedPath.value)}`)).revisions
 }
 
-async function previewRevision(revision: FileRevision) {
+async function revisionContent(revision: FileRevision) {
+  return json<{ revision: FileRevision; content: string | null }>(`/api/projects/${projectId.value}/history/revisions/${revision.id}`)
+}
+
+async function previewRevision(revision: FileRevision, mode: HistoryPreview['mode'] = 'preview') {
   try {
-    historyPreview.value = await json<{ revision: FileRevision; content: string | null }>(`/api/projects/${projectId.value}/history/revisions/${revision.id}`)
+    const selected = await revisionContent(revision)
+    if (mode === 'preview') {
+      historyPreview.value = { ...selected, mode }
+      return
+    }
+    if (mode === 'current') {
+      historyPreview.value = { ...selected, mode, baseLabel: 'Current', baseContent: content.value }
+      return
+    }
+    const index = fileHistory.value.findIndex(item => item.id === revision.id)
+    const previous = index >= 0 ? fileHistory.value[index + 1] : undefined
+    if (!previous) {
+      historyPreview.value = { ...selected, mode: 'preview' }
+      error.value = '该 revision 没有更早的版本可比较。'
+      return
+    }
+    const prior = await revisionContent(previous)
+    historyPreview.value = {
+      ...selected,
+      mode,
+      baseLabel: `Previous · ${new Date(previous.createdAt).toLocaleString()}`,
+      baseContent: prior.content,
+    }
   } catch (err) { error.value = (err as Error).message }
+}
+
+const lineDiff = (before: string, after: string): DiffLine[] => {
+  const a = before.split('\n')
+  const b = after.split('\n')
+  if (a.length * b.length > 250_000) {
+    return [
+      ...a.map(text => ({ kind: 'remove' as const, text })),
+      ...b.map(text => ({ kind: 'add' as const, text })),
+    ]
+  }
+  const rows = a.length + 1
+  const cols = b.length + 1
+  const table = Array.from({ length: rows }, () => new Uint32Array(cols))
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1])
+    }
+  }
+  const out: DiffLine[] = []
+  let i = 0, j = 0
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) { out.push({ kind: 'same', text: a[i] }); i++; j++; continue }
+    if (j < b.length && (i >= a.length || table[i][j + 1] >= table[i + 1][j])) { out.push({ kind: 'add', text: b[j++] }); continue }
+    if (i < a.length) out.push({ kind: 'remove', text: a[i++] })
+  }
+  return out
+}
+
+const historyDiff = computed<DiffLine[]>(() => {
+  const preview = historyPreview.value
+  if (!preview || preview.mode === 'preview') return []
+  const revisionText = preview.content ?? ''
+  if (preview.mode === 'current') return lineDiff(revisionText, preview.baseContent ?? '')
+  return lineDiff(preview.baseContent ?? '', revisionText)
+})
+
+function checkpointTitle(checkpoint: ProjectHistoryCheckpoint) {
+  if (checkpoint.kind !== 'build') return checkpoint.kind
+  const meta = (checkpoint.metadata || {}) as Record<string, any>
+  const state = meta.success === true ? '✓' : meta.success === false ? '✕' : '…'
+  return `Build ${state}${meta.target ? ` · ${meta.target}` : ''}`
 }
 
 async function restoreRevision(revision: FileRevision) {
@@ -490,6 +596,7 @@ onBeforeUnmount(() => {
             <span>{{ item.node.type === 'directory' ? '▾' : '·' }}</span>{{ item.node.name }}
           </button>
           <div v-if="selectedPath" class="toolbar bottom">
+            <button v-if="!selectedEditable" @click="openSystemFile()">Open system</button>
             <button @click="renameSelected">Rename</button><button class="danger" @click="deleteSelected">Delete</button>
           </div>
         </div>
@@ -502,26 +609,36 @@ onBeforeUnmount(() => {
             <button @click="createBranch">+ Branch</button>
           </div>
           <div v-for="file in store.gitStatus?.files || []" :key="file.path" class="git-file">
-            <button class="path" @click="openFile(file.path)">{{ file.indexStatus }}{{ file.worktreeStatus }} {{ file.path }}</button>
+            <button class="path" @click="openFile(file.path)">
+              {{ file.indexStatus }}{{ file.worktreeStatus }} {{ file.originalPath ? `${file.originalPath} → ${file.path}` : file.path }}
+            </button>
             <div><button v-if="file.indexStatus===' ' || file.indexStatus==='?'" @click="stage(file.path)">Stage</button><button v-else @click="unstage(file.path)">Unstage</button></div>
           </div>
           <textarea v-model="commitMessage" rows="3" placeholder="Commit message" />
           <button class="primary" @click="commit">Commit staged</button>
+          <h3>Remotes</h3>
+          <div v-if="!remotes.length" class="muted-row">No remotes configured</div>
+          <div v-for="remote in remotes" :key="remote.name" class="remote"><strong>{{ remote.name }}</strong><small v-if="remote.fetch">fetch · {{ remote.fetch }}</small><small v-if="remote.push && remote.push !== remote.fetch">push · {{ remote.push }}</small></div>
           <h3>Recent commits</h3>
           <div v-for="item in commits" :key="item.hash" class="commit"><code>{{ item.shortHash }}</code> {{ item.subject }}</div>
         </div>
 
         <div v-else-if="sideTab==='history'" class="panel scroll">
-          <template v-if="selectedPath">
+          <template v-if="selectedPath && selectedEditable">
             <h3>{{ selectedPath }}</h3>
             <div v-for="revision in fileHistory" :key="revision.id" class="checkpoint">
-              <div><strong>{{ revision.checkpoint?.kind || 'revision' }}</strong><small>{{ new Date(revision.createdAt).toLocaleString() }} · {{ revision.deleted ? 'deleted' : `${revision.size} B` }}</small></div>
-              <div class="row-actions"><button @click="previewRevision(revision)">Preview / Compare</button><button @click="restoreRevision(revision)">Restore file</button></div>
+              <div><strong>{{ checkpointTitle(revision.checkpoint || ({ kind: 'revision', metadata: {} } as any)) }}</strong><small>{{ new Date(revision.createdAt).toLocaleString() }} · {{ revision.deleted ? 'deleted' : `${revision.size} B` }}</small></div>
+              <div class="row-actions">
+                <button @click="previewRevision(revision, 'preview')">Preview</button>
+                <button @click="previewRevision(revision, 'current')">Diff current</button>
+                <button @click="previewRevision(revision, 'previous')">Diff previous</button>
+                <button @click="restoreRevision(revision)">Restore file</button>
+              </div>
             </div>
           </template>
           <h3>Writing checkpoints</h3>
           <div v-for="checkpoint in history" :key="checkpoint.id" class="checkpoint">
-            <div><strong>{{ checkpoint.kind }}</strong><small>{{ new Date(checkpoint.createdAt).toLocaleString() }}</small></div>
+            <div><strong>{{ checkpointTitle(checkpoint) }}</strong><small>{{ new Date(checkpoint.createdAt).toLocaleString() }}</small></div>
             <div class="row-actions"><button @click="pinCheckpoint(checkpoint)">{{ checkpoint.pinned ? 'Unpin' : 'Pin' }}</button><button @click="restoreCheckpoint(checkpoint.id)">Restore writing</button></div>
           </div>
         </div>
@@ -548,12 +665,18 @@ onBeforeUnmount(() => {
           <button v-if="currentLive?.dirty.value" @click="flushFile">Flush</button>
           <template v-if="currentLive?.conflict.value"><button @click="resolveLiveConflict('use-live')">Keep editor</button><button @click="resolveLiveConflict('use-disk')">Use disk</button></template>
         </div>
-        <div v-if="selectedPath" class="editor-wrap"><CodeEditor v-model="content" :language="language" @save="flushFile" /></div>
+        <div v-if="selectedPath && selectedEditable" class="editor-wrap"><CodeEditor v-model="content" :language="language" @save="flushFile" /></div>
+        <div v-else-if="selectedPath" class="empty external-file"><div><strong>{{ fileName(selectedPath) }}</strong><p>该文件不通过文本 LiveFile 编辑。可使用系统应用打开，Git 仍会正常追踪它。</p><button @click="openSystemFile()">Open system</button></div></div>
         <div v-else class="empty">从 Files 选择文件开始编辑。</div>
 
         <section v-if="historyPreview" class="history-compare">
-          <header><strong>History preview · {{ historyPreview.revision.path }}</strong><button @click="historyPreview=null">×</button></header>
-          <div class="compare-grid"><div><small>Current</small><pre>{{ content }}</pre></div><div><small>Revision</small><pre>{{ historyPreview.content ?? '[deleted]' }}</pre></div></div>
+          <header><strong>Writing History · {{ historyPreview.revision.path }}</strong><button @click="historyPreview=null">×</button></header>
+          <div v-if="historyPreview.mode==='preview'" class="history-preview"><small>Revision</small><pre>{{ historyPreview.content ?? '[deleted]' }}</pre></div>
+          <div v-else class="diff-lines" role="region" aria-label="Writing History text diff">
+            <small>{{ historyPreview.mode === 'current' ? 'Revision → Current' : `${historyPreview.baseLabel || 'Previous'} → Revision` }}</small>
+            <pre><span v-for="(line, index) in historyDiff" :key="index" :class="`diff-${line.kind}`">{{ line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' ' }} {{ line.text }}
+</span></pre>
+          </div>
         </section>
         <pre v-if="gitDiff && sideTab==='git'" class="diff">{{ gitDiff }}</pre>
         <iframe v-if="activeBuild?.status==='completed' && activeBuild.pdfAvailable" class="pdf" :src="`/api/projects/${projectId}/latex/builds/${activeBuild.id}/pdf`" title="LaTeX PDF" />
@@ -565,6 +688,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.workspace{height:100vh;display:flex;flex-direction:column;background:var(--bg-primary,#151515);color:var(--text-primary,#e8e8e8)}.header{height:64px;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid rgba(127,127,127,.2)}button,input,select,textarea{font:inherit}.back,.actions button,.tabs button,.panel button,.editor-header button{background:transparent;color:inherit;border:1px solid rgba(127,127,127,.24);border-radius:6px;padding:6px 9px;cursor:pointer}.project-title{min-width:0;flex:1}.project-title h1{font-size:16px;margin:0 0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{display:flex;gap:12px;font-size:11px;opacity:.58}.actions{display:flex;gap:8px}.layout{min-height:0;flex:1;display:grid;grid-template-columns:310px minmax(420px,1fr) minmax(340px,430px)}.left,.center,.chat{min-height:0;border-right:1px solid rgba(127,127,127,.18)}.left{display:flex;flex-direction:column}.tabs{display:flex;padding:8px;gap:5px;border-bottom:1px solid rgba(127,127,127,.15)}.tabs button{padding:5px 7px}.tabs .active{background:rgba(127,127,127,.18)}.panel{padding:8px;display:flex;flex-direction:column;gap:6px}.scroll{overflow:auto}.toolbar{display:flex;gap:4px;flex-wrap:wrap}.toolbar input{min-width:0;flex:1}.toolbar.bottom{margin-top:8px}.file-row{width:100%;border:0!important;text-align:left!important;display:flex;gap:6px}.file-row.selected,.target-card.selected{background:rgba(100,120,255,.18)}.file-row:disabled{opacity:.7;cursor:default}.git-file{display:flex;gap:4px;justify-content:space-between;align-items:center}.git-file .path{border:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.panel input,.panel select,.panel textarea{box-sizing:border-box;background:transparent;color:inherit;border:1px solid rgba(127,127,127,.24);border-radius:6px;padding:7px}.panel textarea{width:100%}.primary{background:var(--accent-color,#6d7cff)!important;color:white!important}.danger{color:#f56c6c!important}.panel h3{font-size:12px;margin:12px 0 2px;opacity:.68}.commit{font-size:12px;line-height:1.5}.checkpoint{padding:9px;border-bottom:1px solid rgba(127,127,127,.14);display:grid;gap:8px}.checkpoint small{display:block;opacity:.5;margin-top:3px}.row-actions,.branch-row,.latex-head{display:flex;gap:4px;align-items:center}.branch-row select{flex:1}.latex-head{justify-content:space-between}.panel label{display:grid;gap:4px;font-size:11px;opacity:.8}.target-card{padding:8px;border:1px solid rgba(127,127,127,.16);border-radius:7px;display:grid;gap:5px;cursor:pointer}.center{display:flex;flex-direction:column;overflow:hidden}.editor-header{height:40px;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid rgba(127,127,127,.15);font-size:12px}.editor-header span:first-child{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.save-dirty{color:#e6a23c}.save-conflict{color:#f56c6c}.save-saved{color:#67c23a}.save-offline{color:#909399}.editor-wrap{flex:1;min-height:0}.empty{display:grid;place-items:center;flex:1;opacity:.45}.diff,.build-log{max-height:220px;overflow:auto;border-top:1px solid rgba(127,127,127,.2);padding:12px;margin:0;font-size:11px;white-space:pre-wrap}.history-compare{max-height:38%;display:flex;flex-direction:column;border-top:1px solid rgba(127,127,127,.2)}.history-compare header{height:34px;padding:0 9px;display:flex;align-items:center;justify-content:space-between}.history-compare header button{background:transparent;border:0;color:inherit;cursor:pointer}.compare-grid{display:grid;grid-template-columns:1fr 1fr;min-height:0;overflow:hidden}.compare-grid>div{min-width:0;overflow:auto;border-right:1px solid rgba(127,127,127,.14);padding:8px}.compare-grid small{opacity:.5}.compare-grid pre{font-size:11px;white-space:pre-wrap}.pdf{height:45%;border:0;border-top:1px solid rgba(127,127,127,.2);background:white}.chat{overflow:hidden}.error{margin:0;padding:8px 16px;background:rgba(210,60,60,.14);color:#e66}
+.workspace{height:100vh;display:flex;flex-direction:column;background:var(--bg-primary,#151515);color:var(--text-primary,#e8e8e8)}.header{height:64px;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid rgba(127,127,127,.2)}button,input,select,textarea{font:inherit}.back,.actions button,.tabs button,.panel button,.editor-header button,.external-file button{background:transparent;color:inherit;border:1px solid rgba(127,127,127,.24);border-radius:6px;padding:6px 9px;cursor:pointer}.project-title{min-width:0;flex:1}.project-title h1{font-size:16px;margin:0 0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{display:flex;gap:12px;font-size:11px;opacity:.58}.actions{display:flex;gap:8px}.layout{min-height:0;flex:1;display:grid;grid-template-columns:310px minmax(420px,1fr) minmax(340px,430px)}.left,.center,.chat{min-height:0;border-right:1px solid rgba(127,127,127,.18)}.left{display:flex;flex-direction:column}.tabs{display:flex;padding:8px;gap:5px;border-bottom:1px solid rgba(127,127,127,.15)}.tabs button{padding:5px 7px}.tabs .active{background:rgba(127,127,127,.18)}.panel{padding:8px;display:flex;flex-direction:column;gap:6px}.scroll{overflow:auto}.toolbar{display:flex;gap:4px;flex-wrap:wrap}.toolbar input{min-width:0;flex:1}.toolbar.bottom{margin-top:8px}.file-row{width:100%;border:0!important;text-align:left!important;display:flex;gap:6px}.file-row.selected,.target-card.selected{background:rgba(100,120,255,.18)}.file-row:disabled{opacity:.7;cursor:default}.git-file{display:flex;gap:4px;justify-content:space-between;align-items:center}.git-file .path{border:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.panel input,.panel select,.panel textarea{box-sizing:border-box;background:transparent;color:inherit;border:1px solid rgba(127,127,127,.24);border-radius:6px;padding:7px}.panel textarea{width:100%}.primary{background:var(--accent-color,#6d7cff)!important;color:white!important}.danger{color:#f56c6c!important}.panel h3{font-size:12px;margin:12px 0 2px;opacity:.68}.commit{font-size:12px;line-height:1.5}.remote{font-size:11px;padding:6px 4px;display:grid;gap:2px;word-break:break-all}.remote small,.muted-row{opacity:.55}.checkpoint{padding:9px;border-bottom:1px solid rgba(127,127,127,.14);display:grid;gap:8px}.checkpoint small{display:block;opacity:.5;margin-top:3px}.row-actions,.branch-row,.latex-head{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.branch-row select{flex:1}.latex-head{justify-content:space-between}.panel label{display:grid;gap:4px;font-size:11px;opacity:.8}.target-card{padding:8px;border:1px solid rgba(127,127,127,.16);border-radius:7px;display:grid;gap:5px;cursor:pointer}.center{display:flex;flex-direction:column;overflow:hidden}.editor-header{height:40px;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid rgba(127,127,127,.15);font-size:12px}.editor-header span:first-child{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.save-dirty{color:#e6a23c}.save-conflict{color:#f56c6c}.save-saved{color:#67c23a}.save-offline{color:#909399}.save-external{opacity:.55}.editor-wrap{flex:1;min-height:0}.empty{display:grid;place-items:center;flex:1;opacity:.55;text-align:center;padding:20px}.external-file p{max-width:460px;font-size:12px}.diff,.build-log{max-height:220px;overflow:auto;border-top:1px solid rgba(127,127,127,.2);padding:12px;margin:0;font-size:11px;white-space:pre-wrap}.history-compare{max-height:42%;display:flex;flex-direction:column;border-top:1px solid rgba(127,127,127,.2)}.history-compare header{height:34px;padding:0 9px;display:flex;align-items:center;justify-content:space-between}.history-compare header button{background:transparent;border:0;color:inherit;cursor:pointer}.history-preview,.diff-lines{min-height:0;overflow:auto;padding:8px}.history-preview small,.diff-lines small{opacity:.55}.history-preview pre,.diff-lines pre{font-size:11px;white-space:pre-wrap;margin:5px 0}.diff-lines pre span{display:block;min-height:1.3em}.diff-add{background:rgba(70,160,90,.12)}.diff-remove{background:rgba(200,80,80,.12)}.diff-same{opacity:.7}.pdf{height:45%;border:0;border-top:1px solid rgba(127,127,127,.2);background:white}.chat{overflow:hidden}.error{margin:0;padding:8px 16px;background:rgba(210,60,60,.14);color:#e66}
 @media (max-width:1100px){.layout{grid-template-columns:260px 1fr}.chat{display:none}}@media (max-width:720px){.layout{grid-template-columns:1fr}.left{display:none}.actions{display:none}}
 </style>
