@@ -95,6 +95,7 @@ export interface ProjectHistoryRevision {
 
 export interface ProjectHistoryCheckpoint {
   id: string
+  sequence: number
   projectId: string
   kind: ProjectHistoryKind | string
   label: string | null
