@@ -18,7 +18,7 @@ const assertBranchName = (name: string) => {
   return clean
 }
 
-const parsePorcelainStatus = (stdout: string): ProjectGitStatus['files'] => {
+export const parseProjectGitPorcelainStatus = (stdout: string): ProjectGitStatus['files'] => {
   const records = stdout.split('\0')
   const files: ProjectGitStatus['files'] = []
   for (let i = 0; i < records.length; i++) {
@@ -27,12 +27,9 @@ const parsePorcelainStatus = (stdout: string): ProjectGitStatus['files'] => {
     const indexStatus = record[0] || ' '
     const worktreeStatus = record[1] || ' '
     const path = record.slice(3)
-    files.push({ indexStatus, worktreeStatus, path })
-    // `git status --porcelain=v1 -z` emits rename/copy entries as
-    // `XY destination\0source\0`, without the human `source -> destination`
-    // marker. Consume the source pathname so it is not misread as another
-    // status record.
-    if (indexStatus === 'R' || indexStatus === 'C' || worktreeStatus === 'R' || worktreeStatus === 'C') i += 1
+    const renameOrCopy = indexStatus === 'R' || indexStatus === 'C' || worktreeStatus === 'R' || worktreeStatus === 'C'
+    const originalPath = renameOrCopy ? records[++i] || undefined : undefined
+    files.push({ indexStatus, worktreeStatus, path, ...(originalPath ? { originalPath } : {}) })
   }
   return files
 }
@@ -78,7 +75,7 @@ export class ProjectGitService {
       this.run(projectId, ['rev-parse', '--verify', 'HEAD'], { allowFailure: true }),
       this.run(projectId, ['status', '--porcelain=v1', '-z']),
     ])
-    const files = parsePorcelainStatus(porcelain.stdout)
+    const files = parseProjectGitPorcelainStatus(porcelain.stdout)
     return {
       branch: branchResult.code === 0 ? branchResult.stdout.trim() : null,
       detached: branchResult.code !== 0 && headResult.code === 0,
