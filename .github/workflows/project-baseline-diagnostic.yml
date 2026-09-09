@@ -1,0 +1,40 @@
+name: Project baseline diagnostic
+
+on:
+  push:
+    branches:
+      - openai/yarc-project
+    paths:
+      - .github/workflows/project-baseline-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  master-worker-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout master without modifying it
+        uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.6.0 --activate
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter @yarc/db generate
+
+      - name: Run unchanged Runtime Worker test on master
+        working-directory: apps/api
+        run: pnpm exec tsx --test src/services/pi-runtime-worker.test.ts
