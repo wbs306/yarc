@@ -126,7 +126,10 @@ export class ProjectHistoryService {
   async ensureBaseline(projectId: string, path: string, options: { missing?: boolean } = {}) {
     const relative = normalizeProjectRelativePath(path)
     if (!(await this.isTracked(projectId, relative))) return null
-    const prior = await prisma.projectHistoryRevision.findFirst({ where: { projectId, path: relative }, orderBy: { createdAt: 'desc' } })
+    const prior = await prisma.projectHistoryRevision.findFirst({
+      where: { projectId, path: relative },
+      orderBy: { checkpoint: { sequence: 'desc' } },
+    })
     if (prior) return prior
 
     if (options.missing) {
@@ -205,7 +208,10 @@ export class ProjectHistoryService {
     const revisions: Array<{ projectId: string; path: string; contentHash: string; blobHash: string | null; size: number; deleted: boolean }> = []
     for (const path of paths) {
       const snapshot = await this.snapshotPath(projectId, path)
-      const previous = await prisma.projectHistoryRevision.findFirst({ where: { projectId, path }, orderBy: { createdAt: 'desc' } })
+      const previous = await prisma.projectHistoryRevision.findFirst({
+        where: { projectId, path },
+        orderBy: { checkpoint: { sequence: 'desc' } },
+      })
       if (previous && previous.contentHash === snapshot.contentHash && previous.deleted === snapshot.deleted) continue
       revisions.push({ projectId, ...snapshot })
     }
@@ -245,12 +251,19 @@ export class ProjectHistoryService {
   }
 
   listCheckpoints(projectId: string, take = 200) {
-    return prisma.projectHistoryCheckpoint.findMany({ where: { projectId }, orderBy: { createdAt: 'desc' }, take, include: { revisions: true } })
+    return prisma.projectHistoryCheckpoint.findMany({
+      where: { projectId },
+      orderBy: { sequence: 'desc' },
+      take,
+      include: { revisions: true },
+    })
   }
 
   listFileHistory(projectId: string, path: string, take = 200) {
     return prisma.projectHistoryRevision.findMany({
-      where: { projectId, path: normalizeProjectRelativePath(path) }, orderBy: { createdAt: 'desc' }, take,
+      where: { projectId, path: normalizeProjectRelativePath(path) },
+      orderBy: { checkpoint: { sequence: 'desc' } },
+      take,
       include: { checkpoint: true },
     })
   }
@@ -319,19 +332,13 @@ export class ProjectHistoryService {
     const paths = await this.listTrackedPaths(projectId)
     await this.checkpoint(projectId, { kind: 'pre-restore', paths, metadata: { targetCheckpointId: checkpointId }, forceBoundary: true })
 
-    const earlier = await prisma.projectHistoryRevision.findMany({
-      where: { projectId, checkpoint: { createdAt: { lt: target.createdAt } } },
+    const revisionsThroughTarget = await prisma.projectHistoryRevision.findMany({
+      where: { projectId, checkpoint: { sequence: { lte: target.sequence } } },
       include: { checkpoint: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      orderBy: [{ checkpoint: { sequence: 'asc' } }, { id: 'asc' }],
     })
-    const targetRevisions = await prisma.projectHistoryRevision.findMany({
-      where: { projectId, checkpointId },
-      include: { checkpoint: true },
-      orderBy: { id: 'asc' },
-    })
-    const state = new Map<string, (typeof earlier)[number]>()
-    for (const revision of earlier) state.set(revision.path, revision)
-    for (const revision of targetRevisions) state.set(revision.path, revision as (typeof earlier)[number])
+    const state = new Map<string, (typeof revisionsThroughTarget)[number]>()
+    for (const revision of revisionsThroughTarget) state.set(revision.path, revision)
     for (const path of paths) {
       const revision = state.get(path)
       if (revision) await this.writeState(projectId, path, revision)
@@ -378,8 +385,8 @@ export class ProjectHistoryService {
 
     const checkpoints = await prisma.projectHistoryCheckpoint.findMany({
       where: { projectId, pinned: false },
-      select: { id: true, kind: true, createdAt: true },
-      orderBy: { createdAt: 'asc' },
+      select: { id: true, kind: true, sequence: true },
+      orderBy: { sequence: 'asc' },
     })
     const tiers = [
       checkpoints.filter(item => item.kind === 'autosave' || item.kind === 'external'),
