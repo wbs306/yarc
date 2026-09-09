@@ -1,6 +1,8 @@
 import { relative, resolve, sep } from 'node:path'
+import { config } from '../lib/config.js'
 import { AppError } from '../lib/errors.js'
 import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
+import { getDataChangeWatcher } from './data-change-watcher.js'
 import { LiveFileService, liveFileService } from './live-file.service.js'
 import { projectHistoryService } from './project-history.service.js'
 
@@ -77,7 +79,7 @@ export class ProjectLiveFileManager {
   }
 
   async get(projectId: string) {
-    const { root } = await resolveProjectRoot(projectId)
+    const { root, project } = await resolveProjectRoot(projectId)
     const existing = this.instances.get(projectId)
     if (existing?.root === root) return existing.service
     if (existing) await existing.service.disposeAll().catch(() => undefined)
@@ -86,7 +88,13 @@ export class ProjectLiveFileManager {
       workspaceKind: 'project',
       projectId,
       beforeWrite: async (path) => { await this.ensureBaselineBeforeWrite(projectId, path) },
-      afterWrite: async (path, source) => { await projectHistoryService.trackChange(projectId, path, source === 'agent' || source === 'disk' ? 'external' : 'autosave') },
+      afterWrite: async (path, source) => {
+        await projectHistoryService.trackChange(projectId, path, source === 'agent' || source === 'disk' ? 'external' : 'autosave')
+        const dataPath = `projects/${project.directoryName}/${normalizeProjectRelativePath(path)}`
+        await getDataChangeWatcher(config.dataDir).publish({ path: dataPath, source: 'live-file' }).catch(error => {
+          console.warn('[ProjectLiveFile] failed to publish DATA_DIR change:', (error as Error).message)
+        })
+      },
     })
     const service = this.guardService(projectId, root, raw)
     this.instances.set(projectId, { root, service })
@@ -125,10 +133,6 @@ export class ProjectLiveFileManager {
     if (this.agentRoutingInstalled) return
     this.agentRoutingInstalled = true
 
-    // PiService's workspace tools share one global LiveFileService reference.
-    // Once a Project runtime is materialized, route absolute paths under that
-    // Project to its isolated LiveFileService so agent edits participate in the
-    // same Yjs conflict handling and Writing History as browser edits.
     const readAgentFile = liveFileService.readAgentFile.bind(liveFileService)
     const accessAgentFile = liveFileService.accessAgentFile.bind(liveFileService)
     const writeAgentFile = liveFileService.writeAgentFile.bind(liveFileService)
@@ -196,9 +200,6 @@ export class ProjectLiveFileManager {
   async handleDiskChange(projectId: string, path: string) {
     const service = await this.get(projectId)
     const result = await service.handleDiskChange(path)
-    // A global DATA_DIR watcher will also see writes that this Project's own
-    // LiveFile watcher already published. `self` means the disk hash is exactly
-    // our last flush and must not be mislabeled as an external revision.
     if (result !== 'self') await projectHistoryService.trackChange(projectId, path, 'external')
     return result
   }
