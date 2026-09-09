@@ -1,9 +1,11 @@
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname } from 'node:path'
+import { config } from '../lib/config.js'
 import { sseHub } from '../lib/sse.js'
 import { AppError } from '../lib/errors.js'
 import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
+import { getDataChangeWatcher, type DataChangeKind } from './data-change-watcher.js'
 import { projectHistoryService } from './project-history.service.js'
 import { projectLiveFileManager } from './project-live-file.service.js'
 
@@ -52,6 +54,14 @@ const isEditableText = (path: string, size: number) =>
 export class ProjectFileService {
   private emit(projectId: string, action: string, path?: string, live = false) {
     sseHub.emit({ type: 'project-files-changed', projectId, action, path, live, at: new Date().toISOString() })
+  }
+
+  private async publishFileServiceChange(directoryName: string, path: string, kind?: DataChangeKind) {
+    const relative = normalizeProjectRelativePath(path)
+    const dataPath = ['projects', directoryName, relative].filter(Boolean).join('/')
+    await getDataChangeWatcher(config.dataDir).publish({ path: dataPath, kind, source: 'file-service' }).catch(error => {
+      console.warn('[ProjectFile] failed to publish data change:', (error as Error).message)
+    })
   }
 
   async getFileTree(projectId: string, path = ''): Promise<ProjectFileNode[]> {
@@ -127,6 +137,7 @@ export class ProjectFileService {
       await rename(tmp, resolved.fullPath)
       await projectHistoryService.trackChange(projectId, resolved.relativePath, 'autosave')
     }
+    await this.publishFileServiceChange(resolved.project.directoryName, resolved.relativePath)
     this.emit(projectId, 'save', resolved.relativePath, live.hasSession(resolved.relativePath))
     return this.getFileContent(projectId, resolved.relativePath)
   }
@@ -146,6 +157,7 @@ export class ProjectFileService {
     await projectHistoryService.ensureBaseline(projectId, relativePath, { missing: true })
     await writeFile(resolved.fullPath, content, { flag: 'wx' })
     await projectHistoryService.trackChange(projectId, resolved.relativePath, 'autosave')
+    await this.publishFileServiceChange(resolved.project.directoryName, resolved.relativePath)
     this.emit(projectId, 'create', resolved.relativePath)
     return this.getFileContent(projectId, resolved.relativePath)
   }
@@ -155,6 +167,7 @@ export class ProjectFileService {
     if (!relativePath) throw new AppError('MISSING_PATH', 'Path is required', 400)
     const resolved = await resolveProjectPath(projectId, relativePath, { allowMissing: true })
     await mkdir(resolved.fullPath, { recursive: false })
+    await this.publishFileServiceChange(resolved.project.directoryName, resolved.relativePath)
     this.emit(projectId, 'mkdir', resolved.relativePath)
     return { path: resolved.relativePath }
   }
@@ -173,8 +186,8 @@ export class ProjectFileService {
     if (info.isDirectory()) {
       sourcePaths = (await projectHistoryService.listTrackedPaths(projectId)).filter(path => path.startsWith(`${source.relativePath}/`))
       targetPaths = sourcePaths.map(path => `${target.relativePath}${path.slice(source.relativePath.length)}`)
-      for (const path of sourcePaths) await projectHistoryService.ensureBaseline(projectId, path)
-      for (const path of targetPaths) await projectHistoryService.ensureBaseline(projectId, path, { missing: true })
+      for (const trackedPath of sourcePaths) await projectHistoryService.ensureBaseline(projectId, trackedPath)
+      for (const trackedPath of targetPaths) await projectHistoryService.ensureBaseline(projectId, trackedPath, { missing: true })
     } else {
       sourcePaths = [source.relativePath]
       targetPaths = [target.relativePath]
@@ -190,6 +203,10 @@ export class ProjectFileService {
       metadata: { operation: 'rename', from: source.relativePath, to: target.relativePath },
       forceBoundary: true,
     })
+    await this.publishFileServiceChange(source.project.directoryName, source.relativePath, 'delete')
+    await this.publishFileServiceChange(source.project.directoryName, target.relativePath)
+    for (const trackedPath of sourcePaths) await this.publishFileServiceChange(source.project.directoryName, trackedPath, 'delete')
+    for (const trackedPath of targetPaths) await this.publishFileServiceChange(source.project.directoryName, trackedPath)
     this.emit(projectId, 'rename', target.relativePath)
     return { from: source.relativePath, to: target.relativePath }
   }
@@ -216,6 +233,8 @@ export class ProjectFileService {
         forceBoundary: true,
       })
     }
+    await this.publishFileServiceChange(resolved.project.directoryName, resolved.relativePath, 'delete')
+    for (const trackedPath of trackedPaths) await this.publishFileServiceChange(resolved.project.directoryName, trackedPath, 'delete')
     this.emit(projectId, 'delete', resolved.relativePath)
     return { deleted: true }
   }
@@ -233,6 +252,7 @@ export class ProjectFileService {
     await projectHistoryService.ensureBaseline(projectId, relative, { missing: true })
     await writeFile(resolved.fullPath, Buffer.from(await file.arrayBuffer()), { flag: 'wx' })
     await projectHistoryService.trackChange(projectId, relative, 'autosave')
+    await this.publishFileServiceChange(resolved.project.directoryName, relative)
     this.emit(projectId, 'upload', relative)
     return { path: relative, size: file.size }
   }
