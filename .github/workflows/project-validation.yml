@@ -1,0 +1,43 @@
+name: Project validation
+
+on:
+  push:
+    branches:
+      - openai/yarc-project
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.6.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter @yarc/db generate
+
+      - name: API typecheck
+        run: pnpm --filter @yarc/api typecheck
+
+      - name: API tests
+        run: pnpm --filter @yarc/api test
+
+      - name: Web build
+        run: pnpm --filter @yarc/web build
