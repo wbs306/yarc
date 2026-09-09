@@ -2,7 +2,7 @@ import { prisma } from '@yarc/db'
 import { config } from '../lib/config.js'
 import { isProjectPiRuntimeResourcePath, normalizeDataRelativePath } from '../lib/data-sync-policy.js'
 import { resolveProjectPath } from '../lib/project-path.js'
-import { getDataChangeWatcher } from './data-change-watcher.js'
+import { getDataChangeWatcher, type DataChangeEvent } from './data-change-watcher.js'
 import { projectHistoryService } from './project-history.service.js'
 import { projectLiveFileManager } from './project-live-file.service.js'
 import { projectFileService } from './project-file.service.js'
@@ -19,7 +19,7 @@ export class ProjectWorkspaceWatcherService {
     if (this.unsubscribe) return
     await this.refreshProjects()
     const watcher = getDataChangeWatcher(config.dataDir)
-    this.unsubscribe = watcher.subscribe((change: any) => { void this.onChange(change).catch(error => console.warn('[ProjectWatcher]', error?.message || error)) })
+    this.unsubscribe = watcher.subscribe(change => { void this.onChange(change).catch(error => console.warn('[ProjectWatcher]', error?.message || error)) })
     try {
       await watcher.start()
     } catch (error) {
@@ -62,7 +62,7 @@ export class ProjectWorkspaceWatcherService {
     for (const project of projects) await this.initializeTrackedPaths(project.id)
   }
 
-  private async onChange(change: any) {
+  private async onChange(change: DataChangeEvent) {
     const path = normalizeDataRelativePath(String(change?.path || ''))
     if (!path.startsWith('projects/')) return
     const parts = path.split('/')
@@ -82,18 +82,22 @@ export class ProjectWorkspaceWatcherService {
     const tracked = await projectHistoryService.isTracked(projectId, relativePath).catch(() => false)
     const known = this.knownTrackedPaths.get(projectId) || new Set<string>()
     this.knownTrackedPaths.set(projectId, known)
-    if (tracked && change?.kind !== 'delete' && !known.has(relativePath)) {
-      // The watcher observes filesystem changes after they happen. A path not
-      // present in the startup/current set is therefore a newly-created writing
-      // file from YARC's perspective; record the prior missing state before the
-      // external snapshot is queued.
+    if (tracked && change.kind !== 'delete' && !known.has(relativePath)) {
+      // For a true external creation the old state is missing. Project File API
+      // creates its own missing baseline before publishing `file-service`.
       await projectHistoryService.ensureBaseline(projectId, relativePath, { missing: true }).catch(() => undefined)
       known.add(relativePath)
     }
 
-    await projectLiveFileManager.handleDiskChange(projectId, relativePath).catch(() => undefined)
-    if (tracked && change?.kind === 'delete') known.delete(relativePath)
-    projectFileService.notifyExternalChange(projectId, relativePath, String(change?.type || change?.action || change?.kind || 'external'))
+    if (change.source !== 'file-service') {
+      // Filesystem/WebDAV changes are external to YARC's Project File API and
+      // therefore belong in Writing History as `external`. File API writes have
+      // already recorded autosave/manual checkpoints and are only published here
+      // to suppress their filesystem echo and trigger reload/UI bookkeeping.
+      await projectLiveFileManager.handleDiskChange(projectId, relativePath).catch(() => undefined)
+    }
+    if (tracked && change.kind === 'delete') known.delete(relativePath)
+    projectFileService.notifyExternalChange(projectId, relativePath, change.source === 'file-service' ? 'file-service' : change.kind)
 
     if (isProjectPiRuntimeResourcePath(relativePath)) {
       await projectPiContextService.reloadProject(projectId, `project-file:${relativePath}`)
