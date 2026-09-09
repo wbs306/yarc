@@ -25,8 +25,11 @@ const IGNORED_PI_PREFIXES = [
 ]
 const IGNORED_NESTED_PI_AGENT_DIRS = new Set(['sessions', 'subagent-results', 'runtime-streams'])
 const IGNORED_NESTED_PI_AGENT_FILES = new Set(['auth.json', 'models.json', 'run-history.jsonl', 'web-search.json'])
+const IGNORED_NESTED_PI_FILES = new Set(['auth.json', 'models.json'])
 
 const IGNORED_EXACT_PATHS = new Set([
+  '.pi/auth.json',
+  '.pi/models.json',
   '.pi/agent/auth.json',
   '.pi/agent/models.json',
   '.pi/agent/run-history.jsonl',
@@ -93,6 +96,8 @@ export const DEFAULT_DATA_SYNC_EXCLUDE_PATTERNS = [
   '.latex-builds',
   '.yarc/latex-builds',
   'generated/latex',
+  '.pi/auth.json',
+  '.pi/models.json',
   '.pi/agent/auth.json',
   '.pi/agent/models.json',
   '.pi/agent/run-history.jsonl',
@@ -108,12 +113,15 @@ export const normalizeDataRelativePath = (value = '') => value
   .filter(part => part && part !== '.')
   .join('/')
 
-const containsIgnoredPiAgentPath = (segments: string[]) => {
-  for (let i = 0; i < segments.length - 2; i++) {
-    if (segments[i] !== '.pi' || segments[i + 1] !== 'agent') continue
-    const next = segments[i + 2]
-    if (IGNORED_NESTED_PI_AGENT_FILES.has(next)) return true
-    if (IGNORED_NESTED_PI_AGENT_DIRS.has(next)) return true
+const containsIgnoredPiPath = (segments: string[]) => {
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (segments[i] !== '.pi') continue
+    const next = segments[i + 1]
+    if (IGNORED_NESTED_PI_FILES.has(next)) return true
+    if (next !== 'agent' || i + 2 >= segments.length) continue
+    const agentNext = segments[i + 2]
+    if (IGNORED_NESTED_PI_AGENT_FILES.has(agentNext)) return true
+    if (IGNORED_NESTED_PI_AGENT_DIRS.has(agentNext)) return true
   }
   return false
 }
@@ -123,7 +131,7 @@ export const isDefaultIgnoredDataPath = (value: string) => {
   if (!path) return false
   const segments = path.split('/')
   if (segments.some(segment => IGNORED_SEGMENT_NAMES.has(segment))) return true
-  if (containsIgnoredPiAgentPath(segments)) return true
+  if (containsIgnoredPiPath(segments)) return true
   if (IGNORED_EXACT_PATHS.has(path)) return true
   if (IGNORED_GENERATED_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}/`))) return true
   if (IGNORED_PI_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}/`))) return true
