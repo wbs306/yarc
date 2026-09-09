@@ -113,8 +113,9 @@ projects.post('/:id/history/checkpoints/:checkpointId/restore', async (c) => c.j
 projects.get('/:id/latex/targets', async (c) => c.json(await projectLatexService.targets(id(c))))
 projects.put('/:id/latex/targets', async (c) => {
   const input = await body(c)
+  const latex = projectLatexService.validateTargetSettings({ defaultTarget: input.defaultTarget, targets: input.targets })
   const project = await projectService.get(id(c))
-  const settings = { ...((project.settings || {}) as any), latex: { defaultTarget: input.defaultTarget, targets: Array.isArray(input.targets) ? input.targets : [] } }
+  const settings = { ...((project.settings || {}) as any), latex }
   return c.json({ project: await projectService.update(id(c), { settings }) })
 })
 projects.post('/:id/latex/builds', async (c) => {
