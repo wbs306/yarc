@@ -14,20 +14,22 @@ const IGNORED_SEGMENT_NAMES = new Set([
 
 const IGNORED_GENERATED_PREFIXES = [
   '.latex-builds',
+  '.project-history',
   '.yarc/latex-builds',
   'generated/latex',
 ] as const
 const IGNORED_PI_PREFIXES = [
   '.pi/agent/sessions',
   '.pi/agent/subagent-results',
-  // In-flight Runtime journals are generated for crash recovery. They are not
-  // editable Pi configuration; watching them would reload the very Worker that
-  // is writing the journal and lose extension module state (for example
-  // pi-context's `/acm` command context).
   '.pi/agent/runtime-streams',
 ]
+const IGNORED_NESTED_PI_AGENT_DIRS = new Set(['sessions', 'subagent-results', 'runtime-streams'])
+const IGNORED_NESTED_PI_AGENT_FILES = new Set(['auth.json', 'models.json', 'run-history.jsonl', 'web-search.json'])
+const IGNORED_NESTED_PI_FILES = new Set(['auth.json', 'models.json'])
 
 const IGNORED_EXACT_PATHS = new Set([
+  '.pi/auth.json',
+  '.pi/models.json',
   '.pi/agent/auth.json',
   '.pi/agent/models.json',
   '.pi/agent/run-history.jsonl',
@@ -61,6 +63,22 @@ const PI_RUNTIME_PATH_PREFIXES = [
   '.pi/agent/git/',
 ] as const
 
+export const PROJECT_PI_RUNTIME_EXACT_PATHS = new Set([
+  'AGENTS.md',
+  '.pi/AGENTS.md',
+  '.pi/CLAUDE.md',
+  '.pi/SYSTEM.md',
+  '.pi/APPEND_SYSTEM.md',
+  '.pi/settings.json',
+])
+
+export const PROJECT_PI_RUNTIME_PATH_PREFIXES = [
+  '.pi/prompts/',
+  '.pi/themes/',
+  '.pi/extensions/',
+  '.agents/skills/',
+] as const
+
 export const DEFAULT_DATA_SYNC_EXCLUDE_PATTERNS = [
   'node_modules',
   '.git',
@@ -74,9 +92,12 @@ export const DEFAULT_DATA_SYNC_EXCLUDE_PATTERNS = [
   '.pi/agent/sessions',
   '.pi/agent/subagent-results',
   '.pi/agent/runtime-streams',
+  '.project-history',
   '.latex-builds',
   '.yarc/latex-builds',
   'generated/latex',
+  '.pi/auth.json',
+  '.pi/models.json',
   '.pi/agent/auth.json',
   '.pi/agent/models.json',
   '.pi/agent/run-history.jsonl',
@@ -92,11 +113,25 @@ export const normalizeDataRelativePath = (value = '') => value
   .filter(part => part && part !== '.')
   .join('/')
 
+const containsIgnoredPiPath = (segments: string[]) => {
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (segments[i] !== '.pi') continue
+    const next = segments[i + 1]
+    if (IGNORED_NESTED_PI_FILES.has(next)) return true
+    if (next !== 'agent' || i + 2 >= segments.length) continue
+    const agentNext = segments[i + 2]
+    if (IGNORED_NESTED_PI_AGENT_FILES.has(agentNext)) return true
+    if (IGNORED_NESTED_PI_AGENT_DIRS.has(agentNext)) return true
+  }
+  return false
+}
+
 export const isDefaultIgnoredDataPath = (value: string) => {
   const path = normalizeDataRelativePath(value)
   if (!path) return false
   const segments = path.split('/')
   if (segments.some(segment => IGNORED_SEGMENT_NAMES.has(segment))) return true
+  if (containsIgnoredPiPath(segments)) return true
   if (IGNORED_EXACT_PATHS.has(path)) return true
   if (IGNORED_GENERATED_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}/`))) return true
   if (IGNORED_PI_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}/`))) return true
@@ -108,15 +143,16 @@ export const isDefaultIgnoredDataPath = (value: string) => {
   return false
 }
 
-/**
- * Return true only for files that Pi's ResourceLoader or Runtime Worker reads
- * as executable/configuration state. Ordinary files under `.pi/agent` are
- * user workspace data and must not recreate a Runtime Worker on every sync.
- */
 export const isPiRuntimeResourcePath = (value: string) => {
   const path = normalizeDataRelativePath(value)
   if (!path) return false
-
   if (PI_RUNTIME_EXACT_PATHS.has(path)) return true
   return PI_RUNTIME_PATH_PREFIXES.some(prefix => path.startsWith(prefix))
+}
+
+export const isProjectPiRuntimeResourcePath = (value: string) => {
+  const path = normalizeDataRelativePath(value)
+  if (!path) return false
+  if (PROJECT_PI_RUNTIME_EXACT_PATHS.has(path)) return true
+  return PROJECT_PI_RUNTIME_PATH_PREFIXES.some(prefix => path.startsWith(prefix))
 }

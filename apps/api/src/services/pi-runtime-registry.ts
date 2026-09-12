@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { access } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { createRequire } from 'node:module'
 import { prisma } from '@yarc/db'
@@ -12,6 +13,7 @@ import { streamBuffer } from '../lib/stream-buffer-singleton.js'
 import { streamingRegistry } from '../lib/streaming-registry.js'
 import { runJournalStore } from '../lib/pi-runtime/run-journal.js'
 import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
+import { resolveConversationWorkspace } from '../lib/conversation-workspace.js'
 import { AsyncEventQueue } from '../lib/pi-runtime/runtime-events.js'
 import type {
   RuntimeHostMessage,
@@ -64,6 +66,9 @@ interface RuntimeRecord {
   uiState: Map<string, ChatEvent>
   requests: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>
   uiRequestIds: Map<string, string>
+  cwd: string
+  workspaceKind: 'global' | 'project'
+  projectId?: string
 }
 
 export interface RuntimeSnapshot {
@@ -91,9 +96,6 @@ export class PiRuntimeRegistry {
   private records = new Map<string, RuntimeRecord>()
   private starting = new Map<string, Promise<RuntimeRecord>>()
   private disposingConversations = new Set<string>()
-  // pi-context keeps ACM enabled state in its extension module. Preserve only
-  // this small session-level flag across host Worker replacement; the plugin
-  // itself is still responsible for the actual CommandCtx implementation.
   private acmEnabled = new Set<string>()
   private mirrors = new Map<string, PiComposerMirror>()
   private metadataChains = new Map<string, Promise<void>>()
@@ -120,11 +122,7 @@ export class PiRuntimeRegistry {
     if (/^\/acm(?:\s|$)/.test(input.prompt.trim()) && record.commands.some(command => command.name === 'acm')) {
       this.acmEnabled.add(runtimeKey(input.key))
     }
-    const run: RuntimeRunRecord = {
-      runId: input.runId,
-      queue: new AsyncEventQueue<ChatEvent>(),
-      completed: false,
-    }
+    const run: RuntimeRunRecord = { runId: input.runId, queue: new AsyncEventQueue<ChatEvent>(), completed: false }
     record.activeRun = run
     record.state = 'running'
     record.lastUsedAt = Date.now()
@@ -140,7 +138,6 @@ export class PiRuntimeRegistry {
         thinkingEnabled: input.thinkingEnabled,
       },
     })
-
     try {
       for await (const event of run.queue) yield event
     } finally {
@@ -159,17 +156,11 @@ export class PiRuntimeRegistry {
   }): AsyncGenerator<ChatEvent> {
     const record = await this.ensure(input.key, input.model, input.thinkingLevel)
     if (record.activeRun || record.extensionRuns.size > 0) throw new Error('Runtime already has an active run')
-
-    const run: RuntimeRunRecord = {
-      runId: input.runId,
-      queue: new AsyncEventQueue<ChatEvent>(),
-      completed: false,
-    }
+    const run: RuntimeRunRecord = { runId: input.runId, queue: new AsyncEventQueue<ChatEvent>(), completed: false }
     record.activeRun = run
     record.state = 'running'
     record.lastUsedAt = Date.now()
     this.post(record, { type: 'compact', payload: input })
-
     try {
       for await (const event of run.queue) yield event
     } finally {
@@ -198,16 +189,26 @@ export class PiRuntimeRegistry {
     const generation = this.generation
     const disposals: Promise<void>[] = []
     for (const record of [...this.records.values()]) {
-      if (record.state === 'running' || record.state === 'starting') {
-        record.pendingReload = { generation, reason }
-      } else {
-        // A new Worker is required to clear Node's extension module cache.
-        // session.reload() alone can reuse a cached package factory and miss an
-        // installed/updated package version.
-        disposals.push(this.disposeRecord(record, `reload:${reason}`))
-      }
+      if (record.state === 'running' || record.state === 'starting') record.pendingReload = { generation, reason }
+      else disposals.push(this.disposeRecord(record, `reload:${reason}`))
     }
     await Promise.all(disposals)
+  }
+
+  async reloadProject(projectId: string, reason = 'project-config'): Promise<void> {
+    this.generation += 1
+    const generation = this.generation
+    const disposals: Promise<void>[] = []
+    for (const record of [...this.records.values()].filter(item => item.projectId === projectId)) {
+      if (record.state === 'running' || record.state === 'starting') record.pendingReload = { generation, reason }
+      else disposals.push(this.disposeRecord(record, `reload-project:${reason}`))
+    }
+    await Promise.all(disposals)
+  }
+
+  async disposeProject(projectId: string, reason = 'project_deleted'): Promise<void> {
+    const conversationIds = [...new Set([...this.records.values()].filter(record => record.projectId === projectId).map(record => record.key.conversationId))]
+    await Promise.all(conversationIds.map(conversationId => this.disposeConversation(conversationId, reason)))
   }
 
   updateComposer(mirror: PiComposerMirror): void {
@@ -270,14 +271,10 @@ export class PiRuntimeRegistry {
     if (this.disposingConversations.has(conversationId)) return
     this.disposingConversations.add(conversationId)
     try {
-      const starting = [...this.starting.entries()]
-        .filter(([id]) => id.startsWith(`${conversationId}:`))
-        .map(([, promise]) => promise)
+      const starting = [...this.starting.entries()].filter(([id]) => id.startsWith(`${conversationId}:`)).map(([, promise]) => promise)
       await Promise.allSettled(starting)
-
       const records = [...this.records.values()].filter(record => record.key.conversationId === conversationId)
       if (!records.length) return
-
       agentInteractionRegistry.cancelByConversation(conversationId, reason)
       for (const record of records) {
         if (record.activeRun) {
@@ -289,15 +286,10 @@ export class PiRuntimeRegistry {
           try { this.post(record, { type: 'abort', runId: run.runId }) } catch {}
         }
       }
-
-      // Let normal abort handling persist the aborted assistant before the
-      // caller removes the conversation and its Session files.
       await Promise.all(records.map(record => this.waitForRecordRuns(record)))
       await Promise.all(records.map(record => this.disposeRecord(record, reason)))
     } finally {
-      for (const id of this.acmEnabled) {
-        if (id.startsWith(`${conversationId}:`)) this.acmEnabled.delete(id)
-      }
+      for (const id of this.acmEnabled) if (id.startsWith(`${conversationId}:`)) this.acmEnabled.delete(id)
       this.disposingConversations.delete(conversationId)
     }
   }
@@ -310,9 +302,7 @@ export class PiRuntimeRegistry {
   }
 
   private async ensure(key: PiRuntimeKey, model?: string, thinkingLevel?: string): Promise<RuntimeRecord> {
-    if (this.disposingConversations.has(key.conversationId)) {
-      throw new Error('Conversation is being disposed')
-    }
+    if (this.disposingConversations.has(key.conversationId)) throw new Error('Conversation is being disposed')
     const id = runtimeKey(key)
     const existing = this.records.get(id)
     if (existing) {
@@ -323,14 +313,9 @@ export class PiRuntimeRegistry {
     }
     const inFlight = this.starting.get(id)
     if (inFlight) return inFlight
-
     const creation = this.createRuntime(key, model, thinkingLevel)
     this.starting.set(id, creation)
-    try {
-      return await creation
-    } finally {
-      if (this.starting.get(id) === creation) this.starting.delete(id)
-    }
+    try { return await creation } finally { if (this.starting.get(id) === creation) this.starting.delete(id) }
   }
 
   private async createRuntime(key: PiRuntimeKey, model?: string, thinkingLevel?: string): Promise<RuntimeRecord> {
@@ -344,7 +329,10 @@ export class PiRuntimeRegistry {
     }
 
     await this.ensureCapacity()
-    const agentWorkspace = await ensureAgentWorkspace()
+    const [agentWorkspace, conversationWorkspace] = await Promise.all([
+      ensureAgentWorkspace(),
+      resolveConversationWorkspace(key.conversationId),
+    ])
     let sessionFile = await piConversationService.getSessionFile(key.conversationId, key.branchId)
     if (sessionFile) {
       try { await access(sessionFile) } catch { sessionFile = null }
@@ -355,23 +343,21 @@ export class PiRuntimeRegistry {
       getKey: () => recordRef?.key || key,
       getRunId: () => recordRef?.activeRun?.runId,
       emit: event => emitFromTool(event),
+      cwd: conversationWorkspace.cwd,
+      workspaceKind: conversationWorkspace.kind,
+      projectId: conversationWorkspace.projectId,
     })
 
     let resolveReady!: () => void
     let rejectReady!: (error: Error) => void
-    const ready = new Promise<void>((resolve, reject) => {
-      resolveReady = resolve
-      rejectReady = reject
+    const ready = new Promise<void>((resolveReadyPromise, rejectReadyPromise) => {
+      resolveReady = resolveReadyPromise
+      rejectReady = rejectReadyPromise
     })
-
-    if (this.disposingConversations.has(key.conversationId)) {
-      throw new Error('Conversation is being disposed')
-    }
+    if (this.disposingConversations.has(key.conversationId)) throw new Error('Conversation is being disposed')
 
     const workerUrl = new URL('../workers/pi-session.worker.ts', import.meta.url)
-    const worker = new Worker(workerUrl, {
-      execArgv: ['--import', tsxLoader],
-    })
+    const worker = new Worker(workerUrl, { execArgv: ['--import', tsxLoader] })
     const record: RuntimeRecord = {
       key: { ...key },
       worker,
@@ -392,6 +378,9 @@ export class PiRuntimeRegistry {
       uiState: new Map(),
       requests: new Map(),
       uiRequestIds: new Map(),
+      cwd: conversationWorkspace.cwd,
+      workspaceKind: conversationWorkspace.kind,
+      projectId: conversationWorkspace.projectId,
     }
     recordRef = record
     emitFromTool = event => this.emitToActiveRun(record, event)
@@ -406,10 +395,7 @@ export class PiRuntimeRegistry {
       if (this.records.get(runtimeKey(record.key)) === record) this.records.delete(runtimeKey(record.key))
     })
 
-    const conversation = await prisma.conversation.findUnique({
-      where: { id: key.conversationId },
-      select: { model: true, systemPrompt: true },
-    })
+    const conversation = await prisma.conversation.findUnique({ where: { id: key.conversationId }, select: { model: true, systemPrompt: true } })
     const sessionDir = `${agentWorkspace.agentDir}/sessions`
     this.post(record, {
       type: 'init',
@@ -417,10 +403,11 @@ export class PiRuntimeRegistry {
         key,
         generation: record.generation,
         restoreAcm: this.acmEnabled.has(id),
-        cwd: agentWorkspace.cwd,
+        cwd: conversationWorkspace.cwd,
         agentDir: agentWorkspace.agentDir,
         sessionDir,
         sessionFile,
+        globalAgentsFile: resolve(config.dataDir, 'AGENTS.md'),
         model: model || conversation?.model || undefined,
         thinkingLevel,
         systemPrompt: conversation?.systemPrompt || this.options.systemPrompt,
@@ -451,30 +438,17 @@ export class PiRuntimeRegistry {
       record.commands = message.commands
       record.diagnostics = message.diagnostics
       await this.saveMetadata(record, message.metadata)
-      // A filesystem/config event may arrive while the first request is still
-      // creating its Runtime Worker. Resolving the initial waiter is critical:
-      // rejecting it here turns the triggering command (for example
-      // `/context`) into a failed chat turn. Defer the requested reload one
-      // event-loop turn so prompt() can reserve its active run; once reserved,
-      // the normal settled-path below disposes the Worker safely.
       const pendingReload = record.pendingReload
       record.pendingReload = undefined
       record.resolveReady()
       this.emitToActiveRun(record, {
-        type: 'runtime_state',
-        conversationId: record.key.conversationId,
-        branchId: record.key.branchId,
-        state: 'idle',
-        commands: record.commands,
-        generation: record.generation,
+        type: 'runtime_state', conversationId: record.key.conversationId, branchId: record.key.branchId,
+        state: 'idle', commands: record.commands, generation: record.generation,
       })
       if (pendingReload) {
         const deferReload = setTimeout(() => {
           if (record.state === 'disposing' || record.state === 'failed') return
-          if (record.activeRun || record.state === 'running') {
-            record.pendingReload = pendingReload
-            return
-          }
+          if (record.activeRun || record.state === 'running') { record.pendingReload = pendingReload; return }
           void this.disposeRecord(record, `reload:${pendingReload.reason}`)
         }, 0)
         if (typeof deferReload.unref === 'function') deferReload.unref()
@@ -495,12 +469,8 @@ export class PiRuntimeRegistry {
 
     if (message.type === 'extension_run_start') {
       const extensionRun: ExtensionRunRecord = {
-        runId: message.runId,
-        key: { ...message.key },
-        assistantMessageId: message.assistantMessageId,
-        events: [],
-        started: false,
-        completed: false,
+        runId: message.runId, key: { ...message.key }, assistantMessageId: message.assistantMessageId,
+        events: [], started: false, completed: false,
       }
       record.extensionRuns.set(message.runId, extensionRun)
       void this.startExtensionRun(record, extensionRun)
@@ -515,25 +485,15 @@ export class PiRuntimeRegistry {
         else extensionRun.events.push(message.event)
         return
       }
-
       const hasMatchingRun = !!record.activeRun && (!message.runId || record.activeRun.runId === message.runId)
       this.emitToActiveRun(record, message.event, message.runId)
       if (!hasMatchingRun) {
-        sseHub.emit({
-          type: 'pi-runtime-event',
-          conversationId: record.key.conversationId,
-          branchId: record.key.branchId,
-          event: message.event,
-          at: new Date().toISOString(),
-        })
+        sseHub.emit({ type: 'pi-runtime-event', conversationId: record.key.conversationId, branchId: record.key.branchId, event: message.event, at: new Date().toISOString() })
       }
       return
     }
 
-    if (message.type === 'metadata') {
-      await this.saveMetadata(record, message.metadata)
-      return
-    }
+    if (message.type === 'metadata') { await this.saveMetadata(record, message.metadata); return }
 
     if (message.type === 'run_complete' || message.type === 'run_error') {
       await this.saveMetadata(record, message.metadata)
@@ -564,13 +524,8 @@ export class PiRuntimeRegistry {
       const controller = new AbortController()
       record.toolAbortControllers.set(message.requestId, controller)
       try {
-        const result = await record.toolHost.execute(
-          message.toolName,
-          message.toolCallId,
-          message.params,
-          controller.signal,
-          update => this.post(record, { type: 'tool_update', requestId: message.requestId, update }),
-        )
+        const result = await record.toolHost.execute(message.toolName, message.toolCallId, message.params, controller.signal,
+          update => this.post(record, { type: 'tool_update', requestId: message.requestId, update }))
         this.post(record, { type: 'tool_result', requestId: message.requestId, ok: true, result })
       } catch (err) {
         this.post(record, { type: 'tool_result', requestId: message.requestId, ok: false, error: (err as Error).message })
@@ -580,10 +535,7 @@ export class PiRuntimeRegistry {
       return
     }
 
-    if (message.type === 'tool_abort') {
-      record.toolAbortControllers.get(message.requestId)?.abort()
-      return
-    }
+    if (message.type === 'tool_abort') { record.toolAbortControllers.get(message.requestId)?.abort(); return }
 
     if (message.type === 'ui_request') {
       const streamMessageId = message.runId || record.activeRun?.runId || ''
@@ -597,19 +549,11 @@ export class PiRuntimeRegistry {
           message: typeof message.payload.message === 'string' ? message.payload.message : undefined,
           payload: message.payload,
           timeoutMs: message.timeoutMs ?? config.piExtensionUiTimeoutMs,
-          emitRequest: event => {
-            record.uiRequestIds.set(message.requestId, event.requestId)
-            this.emitToActiveRun(record, event, message.runId)
-          },
+          emitRequest: event => { record.uiRequestIds.set(message.requestId, event.requestId); this.emitToActiveRun(record, event, message.runId) },
           emitResolved: event => this.emitToActiveRun(record, event, message.runId),
         })
         record.uiRequestIds.delete(message.requestId)
-        this.post(record, {
-          type: 'ui_response',
-          requestId: message.requestId,
-          ok: true,
-          value: response.action === 'submit' ? response.value : undefined,
-        })
+        this.post(record, { type: 'ui_response', requestId: message.requestId, ok: true, value: response.action === 'submit' ? response.value : undefined })
       } catch (err) {
         record.uiRequestIds.delete(message.requestId)
         this.post(record, { type: 'ui_response', requestId: message.requestId, ok: false, error: (err as Error).message })
@@ -620,11 +564,7 @@ export class PiRuntimeRegistry {
     if (message.type === 'ui_cancel') {
       const interactionId = record.uiRequestIds.get(message.requestId)
       if (interactionId) {
-        agentInteractionRegistry.respond(interactionId, {
-          requestId: interactionId,
-          action: 'cancel',
-          value: { reason: message.reason || 'signal_aborted' },
-        })
+        agentInteractionRegistry.respond(interactionId, { requestId: interactionId, action: 'cancel', value: { reason: message.reason || 'signal_aborted' } })
         record.uiRequestIds.delete(message.requestId)
       }
       return
@@ -649,63 +589,34 @@ export class PiRuntimeRegistry {
       return
     }
 
-    if (message.type === 'disposed') {
-      if (this.records.get(runtimeKey(record.key)) === record) this.records.delete(runtimeKey(record.key))
-    }
+    if (message.type === 'disposed' && this.records.get(runtimeKey(record.key)) === record) this.records.delete(runtimeKey(record.key))
   }
 
   private async startExtensionRun(record: RuntimeRecord, run: ExtensionRunRecord): Promise<void> {
     try {
       const active = streamingRegistry.get(run.key.conversationId)
       if (active && active.messageId !== run.runId) {
-        const handedOff = streamingRegistry.handoff(
-          run.key.conversationId,
-          active.messageId,
-          run.runId,
-          { branchId: run.key.branchId, sessionFile: record.sessionFile || '' },
-        )
+        const handedOff = streamingRegistry.handoff(run.key.conversationId, active.messageId, run.runId,
+          { branchId: run.key.branchId, sessionFile: record.sessionFile || '' })
         if (!handedOff) throw new Error('Conversation producer handoff failed')
       } else if (!active) {
-        streamingRegistry.register(
-          run.key.conversationId,
-          run.runId,
-          run.key.branchId,
-          record.sessionFile || '',
-        )
+        streamingRegistry.register(run.key.conversationId, run.runId, run.key.branchId, record.sessionFile || '')
       }
-
       await streamBuffer.start(run.runId, run.key.conversationId, run.key.branchId, undefined, {
-        source: 'extension',
-        initialLeafId: record.leafEntryId,
-        sessionFile: record.sessionFile,
+        source: 'extension', initialLeafId: record.leafEntryId, sessionFile: record.sessionFile,
       })
-      run.unregisterAbort = chatStreamControl.registerAbortHandler(run.runId, () => {
-        this.post(record, { type: 'abort', runId: run.runId })
-      })
+      run.unregisterAbort = chatStreamControl.registerAbortHandler(run.runId, () => { this.post(record, { type: 'abort', runId: run.runId }) })
       run.started = true
       for (const event of run.events.splice(0)) streamBuffer.append(run.runId, event)
-
-      sseHub.emit({
-        type: 'pi-extension-run-start',
-        conversationId: run.key.conversationId,
-        branchId: run.key.branchId,
-        messageId: run.runId,
-        at: new Date().toISOString(),
-      })
-
+      sseHub.emit({ type: 'pi-extension-run-start', conversationId: run.key.conversationId, branchId: run.key.branchId, messageId: run.runId, at: new Date().toISOString() })
       if (run.completed) await this.finishExtensionRun(record, run)
     } catch (err) {
       run.unregisterAbort?.()
       this.post(record, { type: 'abort', runId: run.runId })
       record.extensionRuns.delete(run.runId)
       streamingRegistry.unregister(run.key.conversationId, run.runId)
-      sseHub.emit({
-        type: 'pi-runtime-event',
-        conversationId: run.key.conversationId,
-        branchId: run.key.branchId,
-        event: { type: 'error', message: (err as Error).message || 'Extension run failed to start' },
-        at: new Date().toISOString(),
-      })
+      sseHub.emit({ type: 'pi-runtime-event', conversationId: run.key.conversationId, branchId: run.key.branchId,
+        event: { type: 'error', message: (err as Error).message || 'Extension run failed to start' }, at: new Date().toISOString() })
     }
   }
 
@@ -719,14 +630,8 @@ export class PiRuntimeRegistry {
       chatStreamControl.clear(run.runId)
       streamingRegistry.unregister(run.key.conversationId, run.runId)
       record.extensionRuns.delete(run.runId)
-      sseHub.emit({
-        type: 'pi-extension-run-complete',
-        conversationId: run.key.conversationId,
-        branchId: run.key.branchId,
-        messageId: run.runId,
-        status: run.error ? 'failed' : 'completed',
-        at: new Date().toISOString(),
-      })
+      sseHub.emit({ type: 'pi-extension-run-complete', conversationId: run.key.conversationId, branchId: run.key.branchId,
+        messageId: run.runId, status: run.error ? 'failed' : 'completed', at: new Date().toISOString() })
     }
   }
 
@@ -737,40 +642,26 @@ export class PiRuntimeRegistry {
   }
 
   private trackUiEvent(record: RuntimeRecord, event: ChatEvent): void {
-    if (event.type === 'agent_ui_tui_open') {
-      record.surfaces.set(event.surface.surfaceId, event.surface)
-      return
-    }
+    if (event.type === 'agent_ui_tui_open') { record.surfaces.set(event.surface.surfaceId, event.surface); return }
     if (event.type === 'agent_ui_tui_output') {
       const surface = record.surfaces.get(event.surfaceId)
       if (surface && event.revision >= surface.revision) {
-        surface.revision = event.revision
-        surface.ansi = event.ansi
-        surface.plainText = event.plainText
-        surface.hidden = event.hidden
+        surface.revision = event.revision; surface.ansi = event.ansi; surface.plainText = event.plainText; surface.hidden = event.hidden
       }
       return
     }
-    if (event.type === 'agent_ui_tui_close') {
-      record.surfaces.delete(event.surfaceId)
-      record.surfaceOwners.delete(event.surfaceId)
-      return
-    }
+    if (event.type === 'agent_ui_tui_close') { record.surfaces.delete(event.surfaceId); record.surfaceOwners.delete(event.surfaceId); return }
     if (event.type === 'agent_ui_status') {
       const id = `status:${event.key}`
-      if (event.text) record.uiState.set(id, event)
-      else record.uiState.delete(id)
+      if (event.text) record.uiState.set(id, event); else record.uiState.delete(id)
       return
     }
     if (event.type === 'agent_ui_widget') {
       const id = `widget:${event.key}`
-      if (event.lines?.length || event.surfaceId) record.uiState.set(id, event)
-      else record.uiState.delete(id)
+      if (event.lines?.length || event.surfaceId) record.uiState.set(id, event); else record.uiState.delete(id)
       return
     }
-    if (event.type === 'agent_ui_header' || event.type === 'agent_ui_footer' || event.type === 'agent_ui_title' || event.type === 'agent_ui_working') {
-      record.uiState.set(event.type, event)
-    }
+    if (event.type === 'agent_ui_header' || event.type === 'agent_ui_footer' || event.type === 'agent_ui_title' || event.type === 'agent_ui_working') record.uiState.set(event.type, event)
   }
 
   private async saveMetadata(record: RuntimeRecord, meta?: RuntimeMetadata): Promise<void> {
@@ -781,16 +672,8 @@ export class PiRuntimeRegistry {
     const conversationId = meta.conversationId || record.key.conversationId
     const branchId = meta.branchId || record.key.branchId
     await this.withMetadataMutation(conversationId, () => piConversationService.saveSessionInfo(
-      conversationId,
-      branchId,
-      meta.sessionFile!,
-      meta.leafEntryId,
-      {},
-      {
-        sessionId: meta.sessionId,
-        model: meta.model,
-        thinkingLevel: meta.thinkingLevel,
-      },
+      conversationId, branchId, meta.sessionFile!, meta.leafEntryId, {},
+      { sessionId: meta.sessionId, model: meta.model, thinkingLevel: meta.thinkingLevel },
     ))
   }
 
@@ -799,21 +682,12 @@ export class PiRuntimeRegistry {
     let result!: T
     const current = previous.catch(() => {}).then(async () => { result = await operation() })
     this.metadataChains.set(conversationId, current)
-    try {
-      await current
-      return result
-    } finally {
-      if (this.metadataChains.get(conversationId) === current) this.metadataChains.delete(conversationId)
-    }
+    try { await current; return result } finally { if (this.metadataChains.get(conversationId) === current) this.metadataChains.delete(conversationId) }
   }
 
   private async handleControl(record: RuntimeRecord, operation: string, payload: any): Promise<unknown> {
     if (operation === 'allocate_branch') {
-      return {
-        branchId: `extension-${Date.now()}-${randomUUID().slice(0, 8)}`,
-        parentBranchId: record.key.branchId,
-        forkEntryId: payload?.entryId || null,
-      }
+      return { branchId: `extension-${Date.now()}-${randomUUID().slice(0, 8)}`, parentBranchId: record.key.branchId, forkEntryId: payload?.entryId || null }
     }
     if (operation === 'finalize_branch') {
       const meta = payload?.metadata as RuntimeMetadata
@@ -834,7 +708,8 @@ export class PiRuntimeRegistry {
       return { ok: true }
     }
     if (operation === 'allocate_new_conversation') {
-      const conversation = await conversationService.create({ id: randomUUID(), title: '新对话' })
+      const source = await prisma.conversation.findUnique({ where: { id: record.key.conversationId }, select: { projectId: true } })
+      const conversation = await conversationService.create({ id: randomUUID(), title: '新对话', projectId: source?.projectId || undefined })
       return { conversationId: conversation.id, branchId: 'main' }
     }
     if (operation === 'discard_new_conversation') {
@@ -846,10 +721,9 @@ export class PiRuntimeRegistry {
       const meta = payload?.metadata as RuntimeMetadata
       const nextKey = payload.key as PiRuntimeKey
       if (!meta?.sessionFile) throw new Error('New Session did not create a Session file')
-      await prisma.conversation.update({
-        where: { id: nextKey.conversationId },
-        data: { model: meta.model || undefined, updatedAt: new Date() },
-      })
+      const nextWorkspace = await resolveConversationWorkspace(nextKey.conversationId)
+      if (nextWorkspace.cwd !== record.cwd) throw new Error('Cannot move a live Runtime across workspace roots')
+      await prisma.conversation.update({ where: { id: nextKey.conversationId }, data: { model: meta.model || undefined, updatedAt: new Date() } })
       try {
         await this.withMetadataMutation(nextKey.conversationId, () => piConversationService.saveSessionInfo(nextKey.conversationId, nextKey.branchId, meta.sessionFile!, meta.leafEntryId))
       } catch (err) {
@@ -877,6 +751,8 @@ export class PiRuntimeRegistry {
         const sessions = (conversation.metadata as any)?.pi?.sessions || {}
         for (const [branchId, info] of Object.entries(sessions) as Array<[string, any]>) {
           if (info?.sessionFile === sessionPath) {
+            const targetWorkspace = await resolveConversationWorkspace(conversation.id)
+            if (targetWorkspace.cwd !== record.cwd) return null
             const targetKey = { conversationId: conversation.id, branchId }
             const targetRuntime = this.records.get(runtimeKey(targetKey))
             if (targetRuntime && targetRuntime !== record) {
@@ -893,6 +769,8 @@ export class PiRuntimeRegistry {
       const meta = payload?.metadata as RuntimeMetadata
       const nextKey = payload.key as PiRuntimeKey
       if (!meta?.sessionFile) throw new Error('Switched Session has no file')
+      const nextWorkspace = await resolveConversationWorkspace(nextKey.conversationId)
+      if (nextWorkspace.cwd !== record.cwd) throw new Error('Cannot switch a live Runtime across workspace roots')
       await this.withMetadataMutation(nextKey.conversationId, () => piConversationService.saveSessionInfo(nextKey.conversationId, nextKey.branchId, meta.sessionFile!, meta.leafEntryId))
       const previousKey = payload.previousKey as PiRuntimeKey
       const runId = record.activeRun?.runId
@@ -924,15 +802,13 @@ export class PiRuntimeRegistry {
 
   private requestWorker(record: RuntimeRecord, createMessage: (requestId: string) => RuntimeHostMessage): Promise<unknown> {
     const requestId = randomUUID()
-    return new Promise((resolve, reject) => {
-      record.requests.set(requestId, { resolve, reject })
+    return new Promise((resolveRequest, rejectRequest) => {
+      record.requests.set(requestId, { resolve: resolveRequest, reject: rejectRequest })
       this.post(record, createMessage(requestId))
     })
   }
 
-  private post(record: RuntimeRecord, message: RuntimeHostMessage): void {
-    record.worker.postMessage(message)
-  }
+  private post(record: RuntimeRecord, message: RuntimeHostMessage): void { record.worker.postMessage(message) }
 
   private handleWorkerMessageError(record: RuntimeRecord, error: unknown): void {
     const normalized = error instanceof Error ? error : new Error(String(error))
@@ -970,24 +846,14 @@ export class PiRuntimeRegistry {
 
   private async waitForRecordRuns(record: RuntimeRecord, timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + timeoutMs
-    while ((record.activeRun || record.extensionRuns.size > 0) && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 25))
-    }
+    while ((record.activeRun || record.extensionRuns.size > 0) && Date.now() < deadline) await new Promise(resolveWait => setTimeout(resolveWait, 25))
   }
 
   private async ensureCapacity(): Promise<void> {
-    // Count in-flight starts as capacity too. Otherwise concurrent requests for
-    // different conversations can all pass the check before their records are
-    // inserted and exceed PI_RUNTIME_MAX_ACTIVE.
     if (this.records.size + this.starting.size < config.piRuntimeMaxActive) return
     const candidates = [...this.records.values()]
-      .filter(record => record.state === 'idle'
-        && record.surfaces.size === 0
-        && !record.activeRun
-        && record.extensionRuns.size === 0
-        && record.requests.size === 0
-        && record.toolAbortControllers.size === 0
-        && record.uiRequestIds.size === 0)
+      .filter(record => record.state === 'idle' && record.surfaces.size === 0 && !record.activeRun && record.extensionRuns.size === 0
+        && record.requests.size === 0 && record.toolAbortControllers.size === 0 && record.uiRequestIds.size === 0)
       .sort((a, b) => a.lastUsedAt - b.lastUsedAt)
     const candidate = candidates[0]
     if (!candidate) throw new Error('Pi Runtime capacity reached; all Runtime Workers are busy')
@@ -997,15 +863,8 @@ export class PiRuntimeRegistry {
   private async cleanupIdle(): Promise<void> {
     const cutoff = Date.now() - config.piRuntimeIdleTtlMs
     const candidates = [...this.records.values()].filter(record =>
-      record.lastUsedAt < cutoff
-      && record.state === 'idle'
-      && !record.activeRun
-      && record.extensionRuns.size === 0
-      && record.surfaces.size === 0
-      && record.requests.size === 0
-      && record.toolAbortControllers.size === 0
-      && record.uiRequestIds.size === 0
-    )
+      record.lastUsedAt < cutoff && record.state === 'idle' && !record.activeRun && record.extensionRuns.size === 0
+      && record.surfaces.size === 0 && record.requests.size === 0 && record.toolAbortControllers.size === 0 && record.uiRequestIds.size === 0)
     await Promise.all(candidates.map(record => this.disposeRecord(record, 'idle_ttl')))
   }
 
@@ -1013,10 +872,6 @@ export class PiRuntimeRegistry {
     if (record.state === 'disposing') return
     record.state = 'disposing'
     if (this.records.get(runtimeKey(record.key)) === record) this.records.delete(runtimeKey(record.key))
-
-    // A failed Worker message or a forced conversation deletion can leave the
-    // host-side queue open. Close it before terminating the Worker so callers
-    // waiting on the Runtime prompt are not left hanging forever.
     if (record.activeRun) {
       record.activeRun.queue.push({ type: 'error', message: `Runtime disposed: ${reason}` })
       record.activeRun.queue.push({ type: 'done' })
@@ -1042,8 +897,8 @@ export class PiRuntimeRegistry {
     try {
       this.post(record, { type: 'dispose', reason })
       await Promise.race([
-        new Promise<void>(resolve => record.worker.once('exit', () => resolve())),
-        new Promise<void>(resolve => setTimeout(resolve, Math.max(35_000, config.piRuntimeStartTimeoutMs))),
+        new Promise<void>(resolveExit => record.worker.once('exit', () => resolveExit())),
+        new Promise<void>(resolveTimeout => setTimeout(resolveTimeout, Math.max(35_000, config.piRuntimeStartTimeoutMs))),
       ])
     } finally {
       await record.worker.terminate().catch(() => {})

@@ -2,6 +2,7 @@ import { readdir, stat, readFile, mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, extname, relative, resolve, sep, basename } from 'node:path'
 import { atomicWriteFile, atomicWriteTextFile } from '../lib/atomic-file.js'
 import { config } from '../lib/config.js'
+import { assertGlobalFilesPathSafe, isProjectStoragePath } from '../lib/global-files-path.js'
 import { isPiRuntimeResourcePath } from '../lib/data-sync-policy.js'
 import { AppError } from '../lib/errors.js'
 import { sseHub } from '../lib/sse.js'
@@ -67,7 +68,7 @@ export class FileService {
   private isHiddenPath(filePath: string): boolean {
     const relPath = this.normalizeRelativePath(filePath)
     if (!relPath) return false
-    if (this.isSensitivePath(relPath)) return true
+    if (this.isSensitivePath(relPath) || isProjectStoragePath(relPath)) return true
     if (relPath === '.pi/agent/runtime-streams' || relPath.startsWith('.pi/agent/runtime-streams/')) return true
 
     const segments = relPath.split('/').filter(Boolean)
@@ -86,7 +87,7 @@ export class FileService {
     return EXCLUDED_NAMES.has(name)
   }
 
-  private resolvePath(filePath = ''): string {
+  private async resolvePath(filePath = ''): Promise<string> {
     const relPath = this.normalizeRelativePath(filePath)
     if (this.isHiddenPath(relPath) || this.isSensitivePath(relPath)) {
       throw new AppError('FORBIDDEN', 'Access denied', 403)
@@ -95,6 +96,7 @@ export class FileService {
     if (fullPath !== this.rootDir && !fullPath.startsWith(`${this.rootDir}${sep}`)) {
       throw new AppError('FORBIDDEN', 'Access denied', 403)
     }
+    await assertGlobalFilesPathSafe(this.rootDir, fullPath)
     return fullPath
   }
 
@@ -240,6 +242,12 @@ export class FileService {
     const relPath = this.toRelativePath(fullPath)
     const name = basename(fullPath)
     if (this.isHiddenPath(relPath) || this.isSensitivePath(relPath) || this.isExcludedPath(relPath) || name === 'node_modules') return null
+    try {
+      await assertGlobalFilesPathSafe(this.rootDir, fullPath)
+    } catch (error) {
+      if (error instanceof AppError && (error.code === 'FORBIDDEN' || error.code === 'PROTECTED_PATH')) return null
+      throw error
+    }
     const entryStat = await stat(fullPath)
     const common = {
       name,
@@ -283,7 +291,7 @@ export class FileService {
 
   async getFileTree(dirPath = ''): Promise<FileNode[]> {
     await this.ensureRootReady()
-    const fullPath = this.resolvePath(dirPath)
+    const fullPath = await this.resolvePath(dirPath)
     const rootStat = await this.assertExists(fullPath)
     if (!rootStat.isDirectory()) {
       throw new AppError('NOT_DIRECTORY', 'Path is not a directory', 400)
@@ -313,10 +321,9 @@ export class FileService {
     contentHash?: string
     diskHash?: string
   }> {
+    const fullPath = await this.resolvePath(filePath)
     const liveSnapshot = liveFileService.getSnapshot(filePath)
     if (liveSnapshot) return liveSnapshot
-
-    const fullPath = this.resolvePath(filePath)
     const entryStat = await this.assertExists(fullPath)
     if (!entryStat.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
     if (!this.isEditable(filePath, entryStat.size)) {
@@ -358,6 +365,7 @@ export class FileService {
   }
 
   async saveFileContent(filePath: string, content: string): Promise<void> {
+    const fullPath = await this.resolvePath(filePath)
     if (liveFileService.hasSession(filePath)) {
       await liveFileService.replaceContent(filePath, content, 'api')
       const result = await liveFileService.flush(filePath)
@@ -366,7 +374,6 @@ export class FileService {
     }
 
     if (this.isProtectedPath(filePath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
-    const fullPath = this.resolvePath(filePath)
     const entryStat = await this.assertExists(fullPath)
     if (!entryStat.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
     if (!this.isEditable(filePath, Buffer.byteLength(content, 'utf-8'))) {
@@ -377,36 +384,6 @@ export class FileService {
     void this.emitFilesChanged('save', this.toRelativePath(fullPath))
   }
 
-  async writeTextFile(filePath: string, content: string, create = false): Promise<FileNode> {
-    if (this.isProtectedPath(filePath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
-    const fullPath = this.resolvePath(filePath)
-    const contentSize = Buffer.byteLength(content, 'utf-8')
-    if (!this.isEditable(filePath, contentSize)) {
-      throw new AppError('UNSUPPORTED_FILE', 'Only supported text files up to 2MB can be written', 400)
-    }
-
-    try {
-      const entryStat = await stat(fullPath)
-      if (!entryStat.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
-    } catch (err) {
-      if (!create) throw new AppError('NOT_FOUND', 'File not found', 404)
-      if (err instanceof AppError && err.code === 'NOT_FILE') throw err
-      await mkdir(dirname(fullPath), { recursive: true })
-    }
-
-    if (liveFileService.hasSession(filePath)) {
-      await liveFileService.replaceContent(filePath, content, 'api')
-      const result = await liveFileService.flush(filePath)
-      if (result?.conflict) throw new AppError('CONFLICT', '文件存在外部修改冲突，请先处理冲突', 409)
-    } else {
-      await liveFileService.withWorkspaceMutationLock(() => atomicWriteTextFile(fullPath, content))
-    }
-    const node = await this.buildNode(fullPath, DEFAULT_TREE_DEPTH)
-    if (!node) throw new AppError('WRITE_FAILED', 'Failed to write file', 500)
-    void this.emitFilesChanged('write', node.path)
-    return node
-  }
-
   async createFile(filePath: string, content = ''): Promise<FileNode> {
     if (!filePath) throw new AppError('MISSING_PATH', 'Path is required', 400)
     if (this.isProtectedPath(filePath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
@@ -414,7 +391,7 @@ export class FileService {
       throw new AppError('UNSUPPORTED_FILE', 'Only editable text files can be created here', 400)
     }
 
-    const fullPath = this.resolvePath(filePath)
+    const fullPath = await this.resolvePath(filePath)
     try {
       await stat(fullPath)
       throw new AppError('ALREADY_EXISTS', 'File already exists', 409)
@@ -432,7 +409,7 @@ export class FileService {
   async createDirectory(dirPath: string): Promise<FileNode> {
     if (!dirPath) throw new AppError('MISSING_PATH', 'Path is required', 400)
     if (this.isProtectedPath(dirPath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
-    const fullPath = this.resolvePath(dirPath)
+    const fullPath = await this.resolvePath(dirPath)
     await mkdir(fullPath, { recursive: false })
     const node = await this.buildNode(fullPath, DEFAULT_TREE_DEPTH)
     if (!node) throw new AppError('CREATE_FAILED', 'Failed to create directory', 500)
@@ -445,8 +422,8 @@ export class FileService {
     if (this.isProtectedPath(fromPath) || this.isProtectedPath(toPath)) {
       throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
     }
-    const from = this.resolvePath(fromPath)
-    const to = this.resolvePath(toPath)
+    const from = await this.resolvePath(fromPath)
+    const to = await this.resolvePath(toPath)
     await this.assertExists(from)
     try {
       await stat(to)
@@ -467,7 +444,7 @@ export class FileService {
   async deletePath(filePath: string): Promise<void> {
     if (!filePath) throw new AppError('MISSING_PATH', 'Path is required', 400)
     if (this.isProtectedPath(filePath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
-    const fullPath = this.resolvePath(filePath)
+    const fullPath = await this.resolvePath(filePath)
     await this.assertExists(fullPath)
     await liveFileService.withWorkspaceMutationLock(() => rm(fullPath, { recursive: true, force: false }))
     void this.emitFilesChanged('delete', this.normalizeRelativePath(filePath))
@@ -480,7 +457,7 @@ export class FileService {
     const targetRelPath = this.normalizeRelativePath(`${dirPath || ''}/${safeName}`)
     if (this.isProtectedPath(targetRelPath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
     if (file.size > config.maxFileSize) throw new AppError('FILE_TOO_LARGE', 'File is too large', 400)
-    const target = this.resolvePath(targetRelPath)
+    const target = await this.resolvePath(targetRelPath)
     try {
       await stat(target)
       throw new AppError('ALREADY_EXISTS', 'File already exists', 409)
@@ -511,7 +488,7 @@ export class FileService {
       throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
     }
 
-    const fullPath = this.resolvePath(relativePath)
+    const fullPath = await this.resolvePath(relativePath)
     const entryStat = await this.assertExists(fullPath)
     if (!entryStat.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
 
@@ -524,7 +501,7 @@ export class FileService {
   }
 
   async getFileForDownload(filePath: string): Promise<{ fullPath: string; size: number; mime: string; name: string }> {
-    const fullPath = this.resolvePath(filePath)
+    const fullPath = await this.resolvePath(filePath)
     const entryStat = await this.assertExists(fullPath)
     if (!entryStat.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
     return { fullPath, size: entryStat.size, mime: this.mimeFor(filePath), name: basename(filePath) }
@@ -538,7 +515,7 @@ export class FileService {
   }
 
   async getFilePath(filePath: string): Promise<string> {
-    const fullPath = this.resolvePath(filePath)
+    const fullPath = await this.resolvePath(filePath)
     const entryStat = await this.assertExists(fullPath)
     if (!entryStat.isFile()) throw new AppError('NOT_FILE', 'Path is not a file', 400)
     const ext = this.extensionFor(filePath)

@@ -12,6 +12,7 @@ const props = withDefaults(defineProps<{
   sourceColumn?: number
   autoStart?: boolean
   engine?: LatexEngine
+  buildApi?: Pick<ReturnType<typeof useApi>, 'compileLatex' | 'getLatexBuild' | 'getLatexBuildLog' | 'cancelLatexBuild' | 'getLatexPdfUrl' | 'getLatexSyncTex'>
 }>(), {
   autoStart: false,
   engine: 'xelatex',
@@ -24,7 +25,8 @@ const emit = defineEmits<{
   'update:engine': [engine: LatexEngine]
 }>()
 
-const api = useApi()
+const defaultApi = useApi()
+const api = computed(() => props.buildApi || defaultApi)
 const engine = computed({
   get: () => props.engine || 'xelatex',
   set: (value: LatexEngine) => emit('update:engine', value),
@@ -49,7 +51,7 @@ let syncedBuildId = ''
 const isActive = computed(() => build.value?.status === 'queued' || build.value?.status === 'running')
 const pdfUrl = computed(() => {
   if (!build.value?.pdfAvailable || build.value.status !== 'completed') return ''
-  return api.getLatexPdfUrl(build.value.id, build.value.completedAt || build.value.id)
+  return api.value.getLatexPdfUrl(build.value.id, build.value.completedAt || build.value.id)
 })
 const pdfDocumentId = computed(() => build.value ? `latex-${build.value.id}` : '')
 const diagnostics = computed<LatexDiagnostic[]>(() => build.value?.diagnostics || [])
@@ -105,7 +107,7 @@ const handlePdfNavigationComplete = () => {
 }
 
 const loadLog = async (id: string, sequence: number) => {
-  const result = await api.getLatexBuildLog(id)
+  const result = await api.value.getLatexBuildLog(id)
   if (sequence !== requestSequence) return
   log.value = result.log
   if (build.value) build.value.diagnostics = result.diagnostics
@@ -118,7 +120,7 @@ const syncToCurrentSource = async (id: string, sequence: number, highlight = fal
   syncLoading.value = true
   syncError.value = ''
   try {
-    const result = await api.getLatexSyncTex(id, {
+    const result = await api.value.getLatexSyncTex(id, {
       direction: 'forward',
       file: props.sourceFile || props.name,
       line: props.sourceLine || 1,
@@ -152,7 +154,7 @@ const syncToCurrentSource = async (id: string, sequence: number, highlight = fal
 
 const pollBuild = async (id: string, sequence: number) => {
   try {
-    const result = await api.getLatexBuild(id)
+    const result = await api.value.getLatexBuild(id)
     if (sequence !== requestSequence) return
     build.value = result.build
     await loadLog(id, sequence)
@@ -184,7 +186,7 @@ const startBuild = async () => {
   clearPdfHighlight()
   syncedBuildId = ''
   try {
-    const result = await api.compileLatex(props.path, engine.value)
+    const result = await api.value.compileLatex(props.path, engine.value)
     if (sequence !== requestSequence) return
     build.value = result.build
     await pollBuild(result.build.id, sequence)
@@ -199,12 +201,14 @@ const cancelBuild = async () => {
   const current = build.value
   if (!current || !isActive.value) return
   error.value = ''
+  const sequence = requestSequence
   try {
-    const result = await api.cancelLatexBuild(current.id)
+    const result = await api.value.cancelLatexBuild(current.id)
+    if (sequence !== requestSequence) return
     build.value = result.build
-    await loadLog(current.id, requestSequence)
+    await loadLog(current.id, sequence)
   } catch (err) {
-    error.value = (err as Error).message || '取消编译失败'
+    if (sequence === requestSequence) error.value = (err as Error).message || '取消编译失败'
   }
 }
 
@@ -233,13 +237,15 @@ const handlePdfPosition = async (position: { page: number; x: number; y: number 
   syncLoading.value = true
   syncError.value = ''
   clearPdfHighlight()
+  const sequence = requestSequence
   try {
-    const result = await api.getLatexSyncTex(current.id, {
+    const result = await api.value.getLatexSyncTex(current.id, {
       direction: 'backward',
       page: position.page,
       x: position.x,
       y: position.y,
     })
+    if (sequence !== requestSequence) return
     const file = typeof result.file === 'string' ? result.file : ''
     const line = Number(result.line)
     const column = Number(result.column)
@@ -253,9 +259,9 @@ const handlePdfPosition = async (position: { page: number; x: number; y: number 
       column: Number.isFinite(column) && column > 0 ? Math.round(column) : 1,
     })
   } catch (err) {
-    syncError.value = (err as Error).message || 'PDF 反向定位失败'
+    if (sequence === requestSequence) syncError.value = (err as Error).message || 'PDF 反向定位失败'
   } finally {
-    syncLoading.value = false
+    if (sequence === requestSequence) syncLoading.value = false
   }
 }
 

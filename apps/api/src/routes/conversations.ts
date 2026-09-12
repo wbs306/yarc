@@ -14,62 +14,48 @@ import type { ChatEvent } from '@yarc/shared'
 
 const conversations = new Hono()
 
-// GET /api/conversations
 conversations.get('/', async (c) => {
-  const list = await conversationService.list()
+  const projectId = c.req.query('projectId')
+  const list = await conversationService.list(projectId === undefined ? {} : { projectId: projectId || null })
   return c.json({ conversations: list })
 })
 
-// POST /api/conversations
 conversations.post('/', async (c) => {
   const body = await c.req.json()
   const conv = await conversationService.create(body)
   return c.json({ conversation: conv }, 201)
 })
 
-// GET /api/conversations/:id
 conversations.get('/:id', async (c) => {
   const id = c.req.param('id')
   const conv = await conversationService.getById(id)
   return c.json({ conversation: conv })
 })
 
-// DELETE /api/conversations/:id
 conversations.delete('/:id', async (c) => {
   const id = c.req.param('id')
-  // Read metadata before deleting so we can clean up Pi session files.
   const conv = await prisma.conversation.findUnique({ where: { id }, select: { metadata: true } })
   const activeStream = streamingRegistry.get(id)
   if (activeStream) chatStreamControl.cancel(activeStream.messageId)
   agentInteractionRegistry.cancelByConversation(id, 'conversation_deleted')
-
-  // Stop Runtime Workers and drain any legacy producer before removing the
-  // Conversation row. Otherwise a final metadata event can race the delete
-  // and fail with Prisma P2025 while the stream is still running.
   await piService.disposeConversationRuntime(id, 'conversation_deleted')
   const remainingStream = streamingRegistry.get(id)
   if (remainingStream) {
     chatStreamControl.cancel(remainingStream.messageId)
     await streamingRegistry.waitForMessage(remainingStream.messageId)
-    if (streamingRegistry.get(id)) {
-      throw new AppError('CONVERSATION_BUSY', 'Conversation is still processing a stream', 409)
-    }
+    if (streamingRegistry.get(id)) throw new AppError('CONVERSATION_BUSY', 'Conversation is still processing a stream', 409)
   }
-
   await conversationService.delete(id)
-  // Best-effort cleanup of Pi session files on disk.
   await piService.deleteSessionFiles(conv?.metadata as Record<string, unknown>).catch(() => {})
   return c.json({ message: 'Deleted' })
 })
 
-// GET /api/conversations/:id/branches
 conversations.get('/:id/branches', async (c) => {
   const id = c.req.param('id')
   const branches = await piConversationService.listBranches(id)
   return c.json({ branches })
 })
 
-// GET /api/conversations/:id/context-usage
 conversations.get('/:id/context-usage', async (c) => {
   const id = c.req.param('id')
   const branchId = c.req.query('branchId') || 'main'
@@ -77,7 +63,6 @@ conversations.get('/:id/context-usage', async (c) => {
   return c.json({ contextUsage })
 })
 
-// POST /api/conversations/:id/switch-branch/:branchId
 conversations.post('/:id/switch-branch/:branchId', async (c) => {
   const convId = c.req.param('id')
   const branchId = c.req.param('branchId')
@@ -85,7 +70,6 @@ conversations.post('/:id/switch-branch/:branchId', async (c) => {
   return c.json({ messages })
 })
 
-// PUT /api/conversations/:id/title
 conversations.put('/:id/title', async (c) => {
   const id = c.req.param('id')
   const { title } = await c.req.json()
@@ -93,8 +77,6 @@ conversations.put('/:id/title', async (c) => {
   return c.json({ conversation: conv })
 })
 
-// POST /api/conversations/:id/btw
-// Start a streaming /btw side question. Returns runId for SSE tracking.
 conversations.post('/:id/btw', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json().catch(() => ({}))
@@ -106,11 +88,8 @@ conversations.post('/:id/btw', async (c) => {
 
   const branchId = typeof body.branchId === 'string' ? body.branchId : null
   const run = btwRunRegistry.create(id, branchId, question)
-
-  // Emit start event via SSE
   sseHub.emit({ type: 'btw_start', runId: run.id, conversationId: id, question, at: run.createdAt })
 
-  // Run async (fire-and-forget from the request handler)
   ;(async () => {
     try {
       const result = await piService.answerSideQuestion({
@@ -133,12 +112,10 @@ conversations.post('/:id/btw', async (c) => {
           }
         },
       })
-
       if (run.status === 'cancelled') {
         sseHub.emit({ type: 'btw_cancelled', runId: run.id })
         return
       }
-
       btwRunRegistry.complete(run.id, result.answer, result.thinking)
       sseHub.emit({ type: 'btw_done', runId: run.id, answer: result.answer })
     } catch (err) {
@@ -151,7 +128,6 @@ conversations.post('/:id/btw', async (c) => {
   return c.json({ runId: run.id, status: run.status })
 })
 
-// GET /api/conversations/:id/btw/runs — list btw runs for a conversation
 conversations.get('/:id/btw/runs', async (c) => {
   const id = c.req.param('id')
   const runs = btwRunRegistry.getByConversation(id)
@@ -166,7 +142,6 @@ conversations.get('/:id/btw/runs', async (c) => {
   })) })
 })
 
-// POST /api/conversations/:id/btw/:runId/cancel — cancel a running btw
 conversations.post('/:id/btw/:runId/cancel', async (c) => {
   const runId = c.req.param('runId')
   const ok = btwRunRegistry.cancel(runId)
@@ -175,30 +150,18 @@ conversations.post('/:id/btw/:runId/cancel', async (c) => {
   return c.json({ ok: true })
 })
 
-// DELETE /api/conversations/:id/btw/:runId — delete a btw run (in-memory only, ephemeral)
 conversations.delete('/:id/btw/:runId', async (c) => {
   const runId = c.req.param('runId')
   btwRunRegistry.delete(runId)
   return c.json({ ok: true })
 })
 
-// ── Streaming reconnection ───────────────────────────────────────────────────
-
-// GET /api/conversations/:id/streaming-message
 conversations.get('/:id/streaming-message', async (c) => {
   const id = c.req.param('id')
-
-  // Check in-memory streaming registry first
   const activeStream = streamingRegistry.get(id)
   if (activeStream) {
     const bufferedStream = streamBuffer.get(activeStream.messageId)
-    if (!bufferedStream) {
-      // The WebSocket handler reserves producer ownership before awaited edit
-      // branch/session setup. A refreshed client should retry shortly rather
-      // than attach to a buffer that has not started and mistake it for done.
-      return c.json({ message: null, preparing: true })
-    }
-
+    if (!bufferedStream) return c.json({ message: null, preparing: true })
     const message = {
       id: activeStream.messageId,
       conversationId: id,
@@ -209,7 +172,6 @@ conversations.get('/:id/streaming-message', async (c) => {
       metadata: { pending: true, segments: [], streamStatus: 'streaming' },
       createdAt: new Date(bufferedStream?.createdAt || activeStream.startedAt).toISOString(),
     }
-
     return c.json({
       message,
       userMessage: bufferedStream.userMessage || null,
@@ -217,30 +179,20 @@ conversations.get('/:id/streaming-message', async (c) => {
       fromBuffer: true,
     })
   }
-
   return c.json({ message: null })
 })
 
-// POST /api/conversations/:id/streaming-message/:messageId/stop
 conversations.post('/:id/streaming-message/:messageId/stop', async (c) => {
   const convId = c.req.param('id')
   const messageId = c.req.param('messageId')
-
-  // Cancel the stream and any pending web interaction owned by it. The
-  // producer owns final stream persistence and registry cleanup; wait for it
-  // before returning so the next prompt cannot race the aborted Pi session.
   chatStreamControl.cancel(messageId)
   agentInteractionRegistry.cancelByStream(messageId, 'stream_stopped')
-
   const activeStream = streamingRegistry.get(convId)
   if (activeStream?.messageId === messageId) {
     await streamingRegistry.waitForMessage(messageId)
   } else if (streamBuffer.has(messageId)) {
-    // Fallback for a stream whose producer has already disappeared. There is
-    // no active session left to drain, so close the buffer locally.
     await streamBuffer.fail(messageId, '已停止生成')
   }
-
   return c.json({ ok: true })
 })
 

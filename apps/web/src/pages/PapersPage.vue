@@ -7,12 +7,25 @@ import { useNoteStore, type Note } from '@/stores/note'
 import { useThemeStore } from '@/stores/theme'
 import { useWebDavSyncStore } from '@/stores/webdavSync'
 import { useApi, useTemporaryPdfUrl } from '@/composables/useApi'
+import { requestJson } from '@/lib/api-request'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
 import { normalizeWorkspaceFileReferencePath } from '@/lib/workspace-file-reference'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
-import type { CurrentChatResource, IeeeJournalBrowserPreferences, LatexEngine, ReparseAction, ReparsePaperInfo } from '@yarc/shared'
+import { useProjectsStore } from '@/stores/projects'
+import ProjectWorkspaceTools from '@/components/projects/ProjectWorkspaceTools.vue'
+import HistoryCompareEditor from '@/components/projects/HistoryCompareEditor.vue'
+import type {
+  CurrentChatResource,
+  FileNode,
+  IeeeJournalBrowserPreferences,
+  LatexEngine,
+  ProjectHistoryCheckpoint,
+  ProjectHistoryRevision,
+  ReparseAction,
+  ReparsePaperInfo,
+} from '@yarc/shared'
 
 import PdfViewer from '@/components/pdf/PdfViewer.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
@@ -31,6 +44,9 @@ import Modal from '@/components/ui/Modal.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import Select from '@/components/ui/Select.vue'
 import SortControl, { type SortOption } from '@/components/ui/SortControl.vue'
+import ProjectsPage from '@/pages/ProjectsPage.vue'
+import ProjectSettingsPage from '@/pages/ProjectSettingsPage.vue'
+import ProjectNavigation from '@/components/projects/ProjectNavigation.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -42,6 +58,7 @@ const noteStore = useNoteStore()
 const theme = useThemeStore()
 const webDavSyncStore = useWebDavSyncStore()
 const prefs = usePrefsStore()
+const projectsStore = useProjectsStore()
 
 const sidebarOpen = ref(true)
 const chatOpen = ref(true)
@@ -106,12 +123,42 @@ const selectedCategory = ref<string | null>(initialLibraryView
   ? (initialLibraryView.kind === 'category' ? initialLibraryView.id : null)
   : localStorage.getItem('yarc_category') || null)
 // Route takes precedence over localStorage for sidebar mode
-const getInitialSidebarMode = (): 'library' | 'files' | 'settings' | 'ieee' => {
+const getInitialSidebarMode = (): 'library' | 'files' | 'settings' | 'ieee' | 'projects' => {
+  if (route.name === 'project-workspace') return 'files'
+  if (route.name === 'projects' || route.name === 'project-settings') return 'projects'
   if (route.name === 'files') return 'files'
   if (route.name === 'settings') return 'settings'
   return readPersistedLibraryView()?.kind === 'ieee_journal' ? 'ieee' : 'library'
 }
-const sidebarMode = ref<'library' | 'files' | 'settings' | 'ieee'>(getInitialSidebarMode())
+const sidebarMode = ref<'library' | 'files' | 'settings' | 'ieee' | 'projects'>(getInitialSidebarMode())
+const isProjectMode = computed(() => route.name === 'projects' || route.name === 'project-workspace' || route.name === 'project-settings')
+const projectResource = ref<CurrentChatResource | null>(null)
+const projectPanel = ref<'files' | 'git' | 'history'>('files')
+const isProjectWorkspace = computed(() => route.name === 'project-workspace' && typeof route.params.id === 'string')
+const projectWorkspaceId = computed(() => isProjectWorkspace.value ? String(route.params.id) : '')
+const conversationProjectIdForRoute = (name: unknown, id?: string) =>
+  (name === 'project-workspace' || name === 'project-settings') && id ? id : null
+const projectDirectoryLabel = computed(() => projectsStore.currentProject?.directoryName || 'project')
+type ProjectHistoryCompareRequest =
+  | { kind: 'revision'; revision: ProjectHistoryRevision & { checkpoint?: ProjectHistoryCheckpoint } }
+  | { kind: 'checkpoint'; checkpoint: ProjectHistoryCheckpoint }
+type ProjectHistoryCompareFile = {
+  path: string
+  revisionId: string
+  sourceLabel: string
+  sourceContent: string | null
+  currentContent: string | null
+}
+type ProjectHistoryCompareState = {
+  kind: ProjectHistoryCompareRequest['kind']
+  title: string
+  files: ProjectHistoryCompareFile[]
+}
+const projectHistoryCompare = ref<ProjectHistoryCompareState | null>(null)
+const projectHistoryCompareExpanded = ref<Set<string>>(new Set())
+let projectHistoryCompareRequestId = 0
+const projectHistoryCompareLoading = ref(false)
+const projectHistoryCompareError = ref('')
 const settingsSection = ref(typeof route.query.section === 'string' ? route.query.section : 'general')
 
 const ieeeJournalPreferences = ref<IeeeJournalBrowserPreferences>({ journals: [], defaultRankingKeywords: '' })
@@ -172,21 +219,6 @@ const flattenedCategories = computed(() => {
   return result
 })
 
-interface FileNode {
-  name: string
-  path: string
-  type: 'file' | 'directory'
-  children?: FileNode[]
-  size?: number
-  modified?: string
-  extension?: string
-  mime?: string
-  editable?: boolean
-  office?: boolean
-  legacyOffice?: boolean
-  readonly?: boolean
-}
-
 type MarkdownViewMode = 'edit' | 'preview' | 'split'
 
 type MarkdownScrollPane = 'editor' | 'preview'
@@ -231,6 +263,7 @@ const loadRecentWorkspaceFiles = (): FileNode[] => {
 const workspaceFiles = ref<FileNode[]>([])
 let workspaceFilesRefreshTimer: number | null = null
 let workspaceFilesStale = false
+let workspaceLoadGeneration = 0
 const selectedWorkspaceFile = ref<FileNode | null>(null)
 const recentWorkspaceFiles = ref<FileNode[]>(loadRecentWorkspaceFiles())
 const openWorkspaceTabs = ref<WorkspaceFileTab[]>([])
@@ -305,6 +338,10 @@ const latexEntryDirectoryPath = computed(() => {
 })
 const latexSourceFile = computed(() => {
   const activePath = selectedWorkspacePath.value
+  // Project builds snapshot the whole Project root, so SyncTeX expects the
+  // Project-relative path. Global Files builds snapshot the entry directory
+  // and therefore keep the historical entry-relative contract.
+  if (isProjectWorkspace.value) return activePath || selectedWorkspaceFile.value?.name || ''
   const root = latexEntryDirectoryPath.value
   if (root && activePath.startsWith(`${root}/`)) return activePath.slice(root.length + 1)
   return selectedWorkspaceFile.value?.name || ''
@@ -789,8 +826,8 @@ const touchWorkspaceFile = (node: FileNode) => {
 }
 
 const removeRecentWorkspacePath = (path: string) => {
-  for (const livePath of Array.from(liveFiles.clients.keys())) {
-    if (livePath === path || livePath.startsWith(`${path}/`)) void liveFiles.release(livePath)
+  for (const liveClient of Array.from(liveFiles.clients.values())) {
+    if (liveClient.path === path || liveClient.path.startsWith(`${path}/`)) liveClient.close()
   }
   recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter((file) => file.path !== path && !file.path.startsWith(`${path}/`))
   openWorkspaceTabs.value = openWorkspaceTabs.value.filter((tab) => tab.file.path !== path && !tab.file.path.startsWith(`${path}/`))
@@ -871,6 +908,7 @@ const creatingParentPath = ref<string | undefined>(undefined) // undefined = not
 const creatingType = ref<'file' | 'directory'>('file')
 
 function isPapersWorkspacePath(path?: string | null) {
+  if (isProjectWorkspace.value) return false
   const normalized = (path || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '')
   return normalized === 'papers' || normalized.startsWith('papers/')
 }
@@ -1033,7 +1071,7 @@ const ensureWorkspaceNodeLoaded = async (path: string): Promise<FileNode | null>
     workspaceFiles.value = replaceWorkspaceDirectoryChildren(workspaceFiles.value, directory.path, response.files as FileNode[])
     workspaceFilesStale = false
     workspaceTreeFromCache.value = false
-    void putOfflineWorkspaceTree(workspaceFiles.value)
+    void putOfflineWorkspaceTree(workspaceFiles.value, isProjectWorkspace.value ? `project:${projectWorkspaceId.value}` : 'global')
     lastHydratedPath = directory.path
     node = findWorkspaceNode(workspaceFiles.value, path)
   }
@@ -1052,7 +1090,7 @@ const removeWorkspacePathLocally = (path: string) => {
   if (!normalizedPath) return
   workspaceFiles.value = removeWorkspaceTreePath(workspaceFiles.value, normalizedPath)
   workspaceFilesStale = false
-  void putOfflineWorkspaceTree(workspaceFiles.value)
+  void putOfflineWorkspaceTree(workspaceFiles.value, isProjectWorkspace.value ? `project:${projectWorkspaceId.value}` : 'global')
 
   if (selectedWorkspacePath.value === normalizedPath || selectedWorkspacePath.value.startsWith(`${normalizedPath}/`)) {
     selectedWorkspaceFile.value = null
@@ -1078,6 +1116,36 @@ const clearWorkspaceEditor = () => {
   pendingMarkdownScroll.clear()
 }
 
+// The router keeps PapersPage mounted while moving between project routes so
+// the shell can animate instead of flashing through a full remount. Reset the
+// file scope explicitly before a new project tree is requested; otherwise a
+// selected file/live editor from the previous route can briefly leak into the
+// next project.
+const resetWorkspaceScope = () => {
+  workspaceLoadGeneration += 1
+  void liveFiles.releaseAll()
+  workspaceFiles.value = []
+  workspaceFilesStale = true
+  workspaceTreeFromCache.value = false
+  selectedWorkspaceFile.value = null
+  openWorkspaceTabs.value = []
+  recentWorkspaceFiles.value = []
+  filesError.value = ''
+  filesLoading.value = false
+  workspaceContentLoading.value = false
+  workspaceSaving.value = false
+  workspaceUploading.value = false
+  workspaceOpeningSystem.value = false
+  workspaceUploadTargetPath.value = ''
+  projectHistoryCompareRequestId += 1
+  projectHistoryCompare.value = null
+  projectHistoryCompareExpanded.value = new Set()
+  projectHistoryCompareError.value = ''
+  projectHistoryCompareLoading.value = false
+  clearWorkspaceEditor()
+  localStorage.removeItem('yarc_workspace_file')
+}
+
 const workspaceParentPath = (path: string) => {
   const parts = path.split('/').filter(Boolean)
   parts.pop()
@@ -1095,19 +1163,24 @@ const fileContextCreateParentPath = () => {
 const canCreateInFileContext = () => !isPapersWorkspacePath(fileContextCreateParentPath())
 
 const loadWorkspaceFiles = async (silent = false) => {
+  const generation = ++workspaceLoadGeneration
+  const cacheKey = isProjectWorkspace.value ? `project:${projectWorkspaceId.value}` : 'global'
   if (!silent) filesLoading.value = true
   filesError.value = ''
   try {
     const res = await api.getFileTree()
+    if (generation !== workspaceLoadGeneration) return
     workspaceFiles.value = res.files
     workspaceFilesStale = false
     workspaceTreeFromCache.value = false
-    void putOfflineWorkspaceTree(res.files)
+    void putOfflineWorkspaceTree(res.files, cacheKey)
     if (selectedWorkspacePath.value) {
       selectedWorkspaceFile.value = findWorkspaceNode(workspaceFiles.value, selectedWorkspacePath.value) || selectedWorkspaceFile.value
     }
   } catch (err) {
-    const cachedTree = await getOfflineWorkspaceTree()
+    if (generation !== workspaceLoadGeneration) return
+    const cachedTree = await getOfflineWorkspaceTree(cacheKey)
+    if (generation !== workspaceLoadGeneration) return
     if (cachedTree?.files && Array.isArray(cachedTree.files)) {
       workspaceFiles.value = cachedTree.files as FileNode[]
       workspaceTreeFromCache.value = true
@@ -1119,7 +1192,7 @@ const loadWorkspaceFiles = async (silent = false) => {
       filesError.value = (err as Error).message || '加载文件失败'
     }
   } finally {
-    if (!silent) filesLoading.value = false
+    if (!silent && generation === workspaceLoadGeneration) filesLoading.value = false
   }
 }
 
@@ -1285,14 +1358,20 @@ const openIeeeJournal = (id: string) => {
   setSidebarMode('ieee')
 }
 
-const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee') => {
+const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee' | 'projects') => {
   sidebarMode.value = mode
   localStorage.setItem('yarc_sidebar_mode', mode)
   // Like the existing library category, the active IEEE workspace and
   // journal are restored from localStorage rather than encoded in the URL.
   const target = mode === 'settings'
     ? { path: '/settings', query: { section: settingsSection.value } }
-    : { path: mode === 'files' ? '/files' : '/' }
+    : mode === 'projects'
+      ? (route.name === 'project-workspace' && typeof route.params.id === 'string'
+        ? { path: `/projects/${route.params.id}` }
+        : route.name === 'project-settings' && typeof route.params.id === 'string'
+          ? { path: `/projects/${route.params.id}/settings` }
+          : { path: '/projects' })
+      : { path: mode === 'files' ? '/files' : '/' }
   if (route.fullPath !== router.resolve(target).fullPath) {
     router.replace(target).catch(() => {})
   }
@@ -1405,7 +1484,7 @@ const selectWorkspaceFile = async (node: FileNode) => {
 
 const openWorkspaceFileReference = async (rawPath: string) => {
   const path = normalizeWorkspaceFileReferencePath(rawPath)
-  const filesWorkspaceActive = sidebarMode.value === 'files' && route.name === 'files'
+  const filesWorkspaceActive = sidebarMode.value === 'files' && (route.name === 'files' || route.name === 'project-workspace')
   if (isMobile.value) {
     mobileChat.value = false
     mobileSidebar.value = false
@@ -1520,7 +1599,11 @@ const openLatexSourcePosition = async (position: LatexSourcePosition) => {
 
   const rootParts = entryPath.split('/').filter(Boolean)
   rootParts.pop()
-  const targetPath = joinWorkspacePath(rootParts.join('/'), sourceFile)
+  // Project SyncTeX paths are relative to the Project root; global Files
+  // SyncTeX paths are relative to the compiled entry directory.
+  const targetPath = isProjectWorkspace.value
+    ? sourceFile
+    : joinWorkspacePath(rootParts.join('/'), sourceFile)
   try {
     filesError.value = ''
     const node = await ensureWorkspaceNodeLoaded(targetPath)
@@ -1893,13 +1976,44 @@ const fileCtxDownload = () => {
   downloadWorkspaceFile(node)
 }
 
-watch(() => route.name, (name) => {
-  if (name === 'files') setSidebarMode('files')
-  else if (name === 'settings') setSidebarMode('settings')
-  else if (name === 'home') {
-    setSidebarMode(readPersistedLibraryView()?.kind === 'ieee_journal' ? 'ieee' : 'library')
-  }
-}, { immediate: true })
+watch(
+  () => [route.name, String(route.params.id || '')] as const,
+  ([name, projectId], previous) => {
+    const [previousName, previousProjectId] = previous || []
+    const enteringProjectWorkspace = name === 'project-workspace'
+      && (previousName !== 'project-workspace' || previousProjectId !== projectId)
+    const leavingProjectWorkspace = previousName === 'project-workspace' && name !== 'project-workspace'
+    if (enteringProjectWorkspace || leavingProjectWorkspace) resetWorkspaceScope()
+
+    const nextConversationProjectId = conversationProjectIdForRoute(name, projectId)
+    const previousConversationProjectId = previous
+      ? conversationProjectIdForRoute(previousName, previousProjectId)
+      : undefined
+    if (previousConversationProjectId === undefined || nextConversationProjectId !== previousConversationProjectId) {
+      void chatStore.fetchConversations(nextConversationProjectId)
+    }
+
+    if (name === 'project-workspace') {
+      projectResource.value = null
+      projectPanel.value = 'files'
+      sidebarMode.value = 'files'
+      localStorage.setItem('yarc_sidebar_mode', 'files')
+      if (!projectsStore.loading && projectsStore.currentProject?.id !== projectId) {
+        void projectsStore.fetchProject(projectId).catch(() => {})
+      }
+      if (!projectsStore.projects.length && !projectsStore.loading) void projectsStore.fetchProjects().catch(() => {})
+      if (!filesLoading.value && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFiles()
+    } else if (name === 'projects' || name === 'project-settings') {
+      projectResource.value = null
+      setSidebarMode('projects')
+    } else if (name === 'files') setSidebarMode('files')
+    else if (name === 'settings') setSidebarMode('settings')
+    else if (name === 'home') {
+      setSidebarMode(readPersistedLibraryView()?.kind === 'ieee_journal' ? 'ieee' : 'library')
+    }
+  },
+  { immediate: true },
+)
 
 watch(() => route.query.section, (section) => {
   if (typeof section === 'string' && settingsSections.some(item => item.id === section)) {
@@ -1982,7 +2096,7 @@ const pendingSearchPage = ref<number | null>(null)
 const expandedAbstracts = ref<Set<string>>(new Set())
 const isSearchCategoryView = computed(() => !!selectedSearchCategory.value)
 
-const activePaperId = computed(() => (typeof route.params.id === 'string' ? route.params.id : ''))
+const activePaperId = computed(() => route.name === 'paper-detail' && typeof route.params.id === 'string' ? route.params.id : '')
 const hasPaper = computed(() => !!activePaperId.value)
 type ReaderTab = {
   paper: Paper
@@ -2015,9 +2129,12 @@ const currentChatResource = computed<CurrentChatResource | null>(() => {
   if (!hasPaper.value && sidebarMode.value === 'files' && selectedWorkspaceFile.value?.type === 'file') {
     return { type: 'file', path: selectedWorkspaceFile.value.path, name: selectedWorkspaceFile.value.name }
   }
+  if (isProjectMode.value) return projectResource.value
   return null
 })
 const currentChatResourceNotice = computed(() => {
+  if (isProjectWorkspace.value && !selectedWorkspaceFile.value) return '请先在项目文件中选择一个文件'
+  if (isProjectMode.value && !projectResource.value && !isProjectWorkspace.value) return '请先在 Project Files 中选择一个文件'
   if (!isTemporaryReader.value || !activeReaderTab.value) return ''
   if (activeReaderTab.value.temporaryPdfStatus === 'failed') {
     return `临时 PDF 解析失败：${activeReaderTab.value.temporaryPdfError || '未知错误'}`
@@ -2025,8 +2142,101 @@ const currentChatResourceNotice = computed(() => {
   if (activeReaderTab.value.temporaryPdfStatus !== 'ready') return '临时 PDF 正在通过 MinerU 解析，完成后可使用 @current'
   return ''
 })
+
+const projectHistoryCompareLanguage = (path: string) => {
+  if (path === selectedWorkspacePath.value && workspaceLanguage.value) return workspaceLanguage.value
+  const extension = path.toLowerCase().split('.').pop() || ''
+  if (extension === 'ts' || extension === 'tsx') return 'typescript'
+  if (extension === 'js' || extension === 'jsx' || extension === 'mjs' || extension === 'cjs') return 'javascript'
+  if (extension === 'json' || extension === 'jsonl') return 'json'
+  if (extension === 'md' || extension === 'markdown') return 'markdown'
+  if (extension === 'py') return 'python'
+  if (extension === 'css' || extension === 'scss') return 'css'
+  if (extension === 'html') return 'html'
+  if (extension === 'xml') return 'xml'
+  if (extension === 'yaml' || extension === 'yml') return 'yaml'
+  if (extension === 'sql') return 'sql'
+  if (extension === 'vue') return 'vue'
+  return 'plaintext'
+}
+
+const projectHistoryCompareFileChanged = (file: ProjectHistoryCompareFile) => file.sourceContent !== file.currentContent
+const projectHistoryCompareFileExpanded = (file: ProjectHistoryCompareFile) => projectHistoryCompareExpanded.value.has(file.revisionId)
+const toggleProjectHistoryCompareFile = (revisionId: string) => {
+  const next = new Set(projectHistoryCompareExpanded.value)
+  if (next.has(revisionId)) next.delete(revisionId)
+  else next.add(revisionId)
+  projectHistoryCompareExpanded.value = next
+}
+
+const openProjectHistoryCompare = async (request: ProjectHistoryCompareRequest) => {
+  if (!isProjectWorkspace.value) return
+
+  const requestId = ++projectHistoryCompareRequestId
+  projectHistoryCompareLoading.value = true
+  projectHistoryCompareError.value = ''
+  projectHistoryCompare.value = null
+  try {
+    // Checkpoints are stored as a sparse journal. Fetch the effective state at
+    // the checkpoint so unchanged files inherited from earlier revisions are
+    // included in this project-level comparison as well.
+    const checkpoint = request.kind === 'checkpoint'
+      ? (await requestJson<{ checkpoint: ProjectHistoryCheckpoint }>(`/api/projects/${encodeURIComponent(projectWorkspaceId.value)}/history/checkpoints/${encodeURIComponent(request.checkpoint.id)}`)).checkpoint
+      : null
+    const revisions: Array<ProjectHistoryRevision & { checkpoint?: ProjectHistoryCheckpoint }> = request.kind === 'revision'
+      ? [request.revision]
+      : (checkpoint?.snapshotRevisions || checkpoint?.revisions || request.checkpoint.revisions || [])
+    if (!revisions.length) throw new Error('这个检查点没有可比较的文件版本。')
+
+    const files = await Promise.all(revisions.map(async revision => {
+      const historical = await requestJson<{ content: string | null }>(`/api/projects/${encodeURIComponent(projectWorkspaceId.value)}/history/revisions/${encodeURIComponent(revision.id)}`)
+      let currentContent: string | null = null
+      if (revision.path === selectedWorkspacePath.value && selectedWorkspaceFile.value?.editable && !workspaceContentLoading.value) {
+        currentContent = workspaceContent.value
+      } else {
+        try {
+          const current = await requestJson<{ content: string }>(`/api/projects/${encodeURIComponent(projectWorkspaceId.value)}/files/content?path=${encodeURIComponent(revision.path)}`)
+          currentContent = current.content
+        } catch {
+          // The current file may have been deleted; an empty right side is a valid diff.
+        }
+      }
+      return {
+        path: revision.path,
+        revisionId: revision.id,
+        sourceLabel: request.kind === 'checkpoint'
+          ? (request.checkpoint.label || request.checkpoint.kind)
+          : (revision.checkpoint?.label || revision.checkpoint?.kind || '版本留痕'),
+        sourceContent: historical.content,
+        currentContent,
+      }
+    }))
+    if (requestId !== projectHistoryCompareRequestId) return
+    projectHistoryCompareExpanded.value = new Set(files.filter(projectHistoryCompareFileChanged).map(file => file.revisionId))
+    projectHistoryCompare.value = {
+      kind: request.kind,
+      title: request.kind === 'checkpoint'
+        ? `写作检查点 · ${request.checkpoint.label || request.checkpoint.kind}`
+        : `版本留痕 · ${request.revision.path}`,
+      files,
+    }
+  } catch (error) {
+    if (requestId === projectHistoryCompareRequestId) projectHistoryCompareError.value = (error as Error).message || '无法加载历史差异'
+  } finally {
+    if (requestId === projectHistoryCompareRequestId) projectHistoryCompareLoading.value = false
+  }
+}
+const closeProjectHistoryCompare = () => {
+  projectHistoryCompareRequestId++
+  projectHistoryCompare.value = null
+  projectHistoryCompareExpanded.value = new Set()
+  projectHistoryCompareError.value = ''
+  projectHistoryCompareLoading.value = false
+}
+
 const workSwitcherLabel = computed(() => {
   if (hasPaper.value) return activePaper.value?.title || `${readerTabs.value.length} 篇已打开`
+  if (isProjectMode.value) return '项目工作区'
   if (sidebarMode.value === 'files' && selectedWorkspaceFile.value) return `${workspaceDirty.value ? '• ' : ''}${selectedWorkspaceFile.value.name}`
   if (readerTabs.value.length) return `${readerTabs.value.length} 篇已打开`
   if (selectedWorkspaceFile.value) return `${workspaceDirty.value ? '• ' : ''}${selectedWorkspaceFile.value.name}`
@@ -2419,7 +2629,9 @@ onMounted(async () => {
   await Promise.all([
     paperStore.fetchPapers({ limit: 500 }),
     api.getCategories().then((res) => { categories.value = res.categories }).catch(() => {}),
-    chatStore.fetchConversations(),
+    isProjectWorkspace.value
+      ? projectsStore.fetchProject(projectWorkspaceId.value).catch(() => null)
+      : Promise.resolve(),
     chatStore.fetchModels(),
     fetchSearchCategories(),
     loadIeeeJournalPreferences(),
@@ -2519,8 +2731,8 @@ const stopResize = () => {
 
 // ── Paper / note selection ──────────────────────────────────────────────────
 
-watch(() => route.params.id, async (id) => {
-  if (id && typeof id === 'string') {
+watch(() => [route.name, route.params.id], async ([name, id]) => {
+  if (name === 'paper-detail' && id && typeof id === 'string') {
     if (readerTabs.value.find((tab) => tab.paper.id === id)?.temporaryPdfUrl) {
       paperStore.currentPaper = null
       noteStore.notes = []
@@ -2534,6 +2746,7 @@ watch(() => route.params.id, async (id) => {
     await noteStore.fetchNotes(id)
     if (isMobile.value) mobileSidebar.value = false
   } else {
+    paperStore.currentPaper = null
     noteStore.notes = []
     notesDraft.value = ''
     editingNoteId.value = null
@@ -2706,6 +2919,12 @@ const onRealtimeFilesChanged = (event: Event) => {
   }
 }
 
+const onRealtimeProjectFilesChanged = (event: Event) => {
+  const detail = (event as CustomEvent)?.detail || {}
+  if (!isProjectWorkspace.value || detail.projectId !== projectWorkspaceId.value) return
+  onRealtimeFilesChanged(event)
+}
+
 onMounted(() => {
   window.addEventListener('yarc-library-changed', onRealtimeLibraryChanged)
   window.addEventListener('yarc-categories-changed', onRealtimeCategoriesChanged)
@@ -2713,6 +2932,7 @@ onMounted(() => {
   window.addEventListener('yarc-pi-config-changed', onPiConfigChanged)
   window.addEventListener('yarc-notes-changed', onRealtimeNotesChanged)
   window.addEventListener('yarc-files-changed', onRealtimeFilesChanged)
+  window.addEventListener('yarc-project-files-changed', onRealtimeProjectFilesChanged)
 })
 
 onBeforeUnmount(() => {
@@ -2722,6 +2942,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('yarc-pi-config-changed', onPiConfigChanged)
   window.removeEventListener('yarc-notes-changed', onRealtimeNotesChanged)
   window.removeEventListener('yarc-files-changed', onRealtimeFilesChanged)
+  window.removeEventListener('yarc-project-files-changed', onRealtimeProjectFilesChanged)
   if (libraryRefreshTimer !== null) window.clearTimeout(libraryRefreshTimer)
   if (searchCategoryRefreshTimer !== null) window.clearTimeout(searchCategoryRefreshTimer)
   if (workspaceFilesRefreshTimer !== null) window.clearTimeout(workspaceFilesRefreshTimer)
@@ -3571,11 +3792,27 @@ const showSearchPaperPopup = (paper: any) => {
         :class="{ 'mobile-drawer': isMobile, closed: !isMobile && !sidebarOpen }"
         :style="!isMobile ? { width: sidebarPanelWidth + 'px', minWidth: sidebarPanelWidth + 'px' } : {}"
       >
-        <section v-if="!hasPaper || isTemporaryReader" class="side-panel category-panel">
-          <div class="side-header">
+        <Transition name="sidebar-panel">
+        <section v-if="isProjectMode && !isProjectWorkspace" key="project-navigation-panel" class="side-panel category-panel">
+          <ProjectNavigation :workspace="false" :embedded="true" />
+        </section>
+        <section v-else-if="!hasPaper || isTemporaryReader" :key="isProjectWorkspace ? 'project-workspace-panel' : `sidebar-${sidebarMode}`" class="side-panel category-panel">
+          <div v-if="isProjectWorkspace" class="side-header project-workspace-header">
+            <div class="project-workspace-switcher">
+              <button class="project-back-btn" title="返回项目列表" @click="router.push('/projects')">←</button>
+              <strong class="project-workspace-title">{{ projectsStore.currentProject?.name || '项目' }}</strong>
+            </div>
+            <button class="side-mini-btn" :disabled="filesLoading" @click="loadWorkspaceFiles()">刷新</button>
+          </div>
+          <div v-else class="side-header">
             <h2>{{ sidebarMode === 'files' ? '文件' : sidebarMode === 'settings' ? '设置' : '文献库' }}</h2>
             <button v-if="sidebarMode === 'files'" class="side-mini-btn" :disabled="filesLoading" @click="loadWorkspaceFiles()">刷新</button>
           </div>
+          <nav v-if="isProjectWorkspace" class="project-file-tabs" aria-label="项目工作区视图">
+            <button :class="{ active: projectPanel === 'files' }" @click="projectPanel = 'files'; closeProjectHistoryCompare()">文件</button>
+            <button :class="{ active: projectPanel === 'git' }" @click="projectPanel = 'git'; closeProjectHistoryCompare()">Git</button>
+            <button :class="{ active: projectPanel === 'history' }" @click="projectPanel = 'history'">历史</button>
+          </nav>
 
           <Transition name="panel" mode="out-in">
           <div v-if="sidebarMode === 'library' || sidebarMode === 'ieee'" key="m-library" class="category-list" @contextmenu="openContextMenu($event)" @click="onCategoryListBlankClick">
@@ -3757,7 +3994,7 @@ const showSearchPaperPopup = (paper: any) => {
           </div>
 
           <div
-            v-else-if="sidebarMode === 'files'"
+            v-else-if="sidebarMode === 'files' && (!isProjectWorkspace || projectPanel === 'files')"
             key="m-files"
             class="category-list files-inline-list"
             :class="{ 'root-drop-target': workspaceRootDropActive }"
@@ -3767,7 +4004,7 @@ const showSearchPaperPopup = (paper: any) => {
             @drop="handleWorkspaceRootDrop"
           >
             <div class="section-divider">
-              <span class="divider-text">data/</span>
+              <span class="divider-text">{{ isProjectWorkspace ? `${projectDirectoryLabel}/` : 'data/' }}</span>
               <button class="add-search-cat-btn" :disabled="workspaceUploading" @click.stop="openWorkspaceUploadPicker('')" title="上传文件">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
@@ -3798,6 +4035,17 @@ const showSearchPaperPopup = (paper: any) => {
                 @upload="(targetDirPath, files) => uploadWorkspaceFiles(files, targetDirPath)"
               />
             </template>
+          </div>
+
+          <div v-else-if="isProjectWorkspace && projectPanel !== 'files'" :key="`m-project-tools-${projectPanel}`" class="project-sidebar-tools">
+            <ProjectWorkspaceTools
+              :key="`${projectWorkspaceId}-${projectPanel}`"
+              :project-id="projectWorkspaceId"
+              :mode="projectPanel === 'git' ? 'git' : 'history'"
+              :selected-path="selectedWorkspacePath"
+              @open-file="(path) => { projectPanel = 'files'; void openWorkspaceFileReference(path) }"
+              @compare-history="openProjectHistoryCompare"
+            />
           </div>
 
           <div v-else-if="sidebarMode === 'settings'" key="m-settings" class="category-list settings-inline-list">
@@ -3975,16 +4223,20 @@ const showSearchPaperPopup = (paper: any) => {
             </div>
           </Teleport>
 
-          <div class="side-bottom">
+          <div v-if="!isProjectMode" class="side-bottom">
             <button v-if="sidebarMode !== 'library' && sidebarMode !== 'ieee'" class="settings-link" @click="setSidebarMode('library')">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
               <span>文献库</span>
             </button>
-            <button v-if="sidebarMode !== 'files'" class="settings-link" @click="setSidebarMode('files')">
+            <button v-if="sidebarMode !== 'files' || isProjectWorkspace" class="settings-link" :class="{ active: isProjectWorkspace }" @click="setSidebarMode('files')">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
               </svg>
               <span>文件</span>
+            </button>
+            <button v-if="!isProjectWorkspace && sidebarMode !== 'projects'" class="settings-link" @click="setSidebarMode('projects')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+              <span>项目</span>
             </button>
             <button v-if="sidebarMode !== 'settings'" class="settings-link" @click="setSidebarMode('settings')">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -3996,7 +4248,7 @@ const showSearchPaperPopup = (paper: any) => {
           </div>
         </section>
 
-        <section v-else class="side-panel notes-panel">
+        <section v-else key="notes-panel" class="side-panel notes-panel">
           <div class="side-header notes-side-header">
             <h2>笔记</h2>
             <div class="note-count">{{ sortedNotes.length }} 条</div>
@@ -4043,22 +4295,41 @@ const showSearchPaperPopup = (paper: any) => {
             <button :disabled="!notesDraft.trim()" @click="createSideNote">保存笔记</button>
           </div>
         </section>
+        </Transition>
+        <div v-if="isProjectMode" class="side-bottom project-route-bottom">
+          <button class="settings-link" @click="router.push('/')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <span>文献库</span>
+          </button>
+          <button class="settings-link" @click="router.push('/files')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+            <span>文件</span>
+          </button>
+          <button class="settings-link" @click="router.push('/settings')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 1 .33 1.82l.06.06a2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 1 17 19.4a1.65 1.65 0 0 1-1.82.33A1.65 1.65 0 0 1 14 21v.09A2 2 0 0 1 12 23a2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 1 9 19.4a1.65 1.65 0 0 1-1.82.33A2 2 0 0 1 4.35 17.2l.06-.06A1.65 1.65 0 0 1 4.68 15 1.65 1.65 0 0 1 3 14H2.91A2 2 0 0 1 1 12a2 2 0 0 1 2-2h.09A1.65 1.65 0 0 1 4.6 9a1.65 1.65 0 0 1-.33-1.82l.06-.06A2 2 0 0 1 7.16 4.3l.06.06A1.65 1.65 0 0 1 9 4.68 1.65 1.65 0 0 1 10 3.09V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09A1.65 1.65 0 0 1 15 4.6a1.65 1.65 0 0 1 1.82-.33l.06-.06A2 2 0 0 1 19.71 7l-.06.06A1.65 1.65 0 0 1 19.4 9 1.65 1.65 0 0 1 21 10.09V10a2 2 0 0 1 2 2v.09A1.65 1.65 0 0 1 21 14h-.09A1.65 1.65 0 0 1 19.4 15z"/></svg>
+            <span>设置</span>
+          </button>
+        </div>
       </aside>
 
       <div v-if="!isMobile && sidebarOpen" class="resizer side-resizer" :class="{ active: resizing === 'left' }" @mousedown="startResize('left', $event)" />
 
       <!-- Center: paper list page or PDF page -->
       <main class="app-main">
-        <PdfViewer
-          v-for="tab in readerTabs"
-          :key="tab.paper.id"
-          :ref="(viewer) => setPdfViewer(tab.paper.id, viewer)"
-          v-show="hasPaper && tab.paper.id === activePaperId"
-          :paper="tab.paper"
-          :source-url="tab.temporaryPdfUrl"
-          @back="backToLibrary"
-          @show-details="showPaperDetails"
-        />
+        <Transition name="workspace-view">
+          <ProjectsPage v-if="route.name === 'projects'" key="projects-view" embedded />
+          <ProjectSettingsPage v-else-if="route.name === 'project-settings'" :key="`project-settings-${String(route.params.id || '')}`" embedded />
+          <div v-else key="workbench-view" class="app-main-workbench">
+          <PdfViewer
+            v-for="tab in readerTabs"
+            :key="tab.paper.id"
+            :ref="(viewer) => setPdfViewer(tab.paper.id, viewer)"
+            v-show="hasPaper && tab.paper.id === activePaperId"
+            :paper="tab.paper"
+            :source-url="tab.temporaryPdfUrl"
+            @back="backToLibrary"
+            @show-details="showPaperDetails"
+          />
 
         <section v-show="!hasPaper && sidebarMode === 'library'" class="paper-library">
           <div class="library-header" :class="{ condensed: libraryScrolled }">
@@ -4220,7 +4491,7 @@ const showSearchPaperPopup = (paper: any) => {
           <div v-if="!selectedWorkspaceFile" class="workspace-empty">
             <div class="empty-icon">📁</div>
             <h2>选择一个文件开始查看或编辑</h2>
-            <p>左侧显示 data 工作区文件；papers/ 为受保护目录。</p>
+            <p>{{ isProjectWorkspace ? '左侧显示项目文件；编辑器、右键菜单和实时保存与文件页面一致。' : '左侧显示 data 工作区文件；papers/ 为受保护目录。' }}</p>
           </div>
 
           <section v-else class="workspace-editor-shell">
@@ -4564,6 +4835,69 @@ const showSearchPaperPopup = (paper: any) => {
           </section>
         </section>
 
+        <Teleport to="body">
+          <Transition name="history-compare">
+            <div
+              v-if="projectHistoryCompareLoading || projectHistoryCompare || projectHistoryCompareError"
+              class="project-history-compare-layer"
+              @click.self="closeProjectHistoryCompare"
+            >
+              <section class="project-history-compare-dialog" role="dialog" aria-modal="true" aria-label="历史版本对比">
+                <header class="project-history-compare-header">
+                  <div>
+                    <span class="project-history-compare-kicker">Writing History</span>
+                    <h2>{{ projectHistoryCompare?.title || '加载历史差异' }}</h2>
+                    <p v-if="projectHistoryCompare">历史版本 → 当前版本 · {{ projectHistoryCompare.files.length }} 个文件</p>
+                  </div>
+                  <button type="button" class="project-history-compare-close" aria-label="关闭对比窗口" @click="closeProjectHistoryCompare">×</button>
+                </header>
+
+                <div v-if="projectHistoryCompareLoading" class="project-history-compare-loading">正在加载历史版本和当前版本…</div>
+                <div v-else-if="projectHistoryCompareError" class="project-history-compare-error">{{ projectHistoryCompareError }}</div>
+                <div v-else-if="projectHistoryCompare" class="project-history-compare-body">
+                  <div class="project-history-compare-summary">
+                    <span>本次检查点包含 {{ projectHistoryCompare.files.length }} 个文件</span>
+                    <div class="project-history-compare-file-list">
+                      <span v-for="file in projectHistoryCompare.files" :key="file.path" :title="file.path">{{ file.path }}</span>
+                    </div>
+                  </div>
+
+                  <div class="project-history-compare-files">
+                    <article
+                      v-for="file in projectHistoryCompare.files"
+                      :key="file.revisionId"
+                      class="project-history-compare-file"
+                      :class="{ collapsed: !projectHistoryCompareFileExpanded(file), unchanged: !projectHistoryCompareFileChanged(file) }"
+                    >
+                      <header class="project-history-compare-file-header">
+                        <div>
+                          <strong :title="file.path">{{ file.path }}</strong>
+                          <span>{{ file.sourceLabel }} → 当前版本 · {{ projectHistoryCompareFileChanged(file) ? '有变更' : '无变更' }}</span>
+                        </div>
+                        <div class="project-history-compare-file-actions">
+                          <span v-if="file.currentContent === null" class="project-history-compare-file-status">文件已删除</span>
+                          <button type="button" class="project-history-compare-file-toggle" @click="toggleProjectHistoryCompareFile(file.revisionId)">
+                            {{ projectHistoryCompareFileExpanded(file) ? '收起' : '展开' }}
+                          </button>
+                        </div>
+                      </header>
+                      <HistoryCompareEditor
+                        v-if="projectHistoryCompareFileExpanded(file)"
+                        class="project-history-compare-file-editor"
+                        :before="file.sourceContent || ''"
+                        :after="file.currentContent || ''"
+                        :before-label="file.sourceLabel"
+                        after-label="当前版本"
+                        :language="projectHistoryCompareLanguage(file.path)"
+                      />
+                    </article>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </Transition>
+        </Teleport>
+
         <section v-show="!hasPaper && sidebarMode === 'ieee'" class="paper-library workspace-panel ieee-workspace-panel">
           <IeeeJournalBrowser
             :journals="ieeeJournalPreferences.journals"
@@ -4585,6 +4919,8 @@ const showSearchPaperPopup = (paper: any) => {
           </div>
           <SettingsContent :active-tab="settingsSection" />
         </section>
+          </div>
+        </Transition>
       </main>
 
       <div v-if="!isMobile && chatOpen" class="resizer side-resizer" :class="{ active: resizing === 'right' }" @mousedown="startResize('right', $event)" />
@@ -4600,6 +4936,8 @@ const showSearchPaperPopup = (paper: any) => {
         <ChatPanel
           :current-resource="currentChatResource"
           :current-resource-notice="currentChatResourceNotice"
+          :show-current-resource-notice="!isProjectMode"
+          :create-conversation="isProjectMode && route.params.id ? () => chatStore.createConversation(undefined, String(route.params.id)) : undefined"
           @close="isMobile ? (mobileChat = false) : (chatOpen = false)"
           @open-file="openWorkspaceFileReference"
         />
@@ -5137,10 +5475,46 @@ const showSearchPaperPopup = (paper: any) => {
   transform: translateX(-100%);
 }
 
+.sidebar-panel-enter-active,
+.sidebar-panel-leave-active {
+  transition: opacity 190ms ease, transform 190ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sidebar-panel-enter-from { opacity: 0; transform: translate3d(10px, 0, 0); }
+.sidebar-panel-leave-to { opacity: 0; transform: translate3d(-8px, 0, 0); }
+.sidebar-panel-leave-active {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
 .app-main {
   flex: 1;
   overflow: hidden;
   min-width: 0;
+  position: relative;
+}
+
+.app-main-workbench {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-view-enter-active,
+.workspace-view-leave-active {
+  transition: opacity 220ms ease, transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.workspace-view-enter-from { opacity: 0; transform: translate3d(14px, 0, 0); }
+.workspace-view-leave-to { opacity: 0; transform: translate3d(-10px, 0, 0); }
+.workspace-view-leave-active {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .app-chat {
@@ -5180,6 +5554,8 @@ const showSearchPaperPopup = (paper: any) => {
 .side-panel {
   height: 100%;
   min-height: 0;
+  width: 100%;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
 }
@@ -5193,6 +5569,7 @@ const showSearchPaperPopup = (paper: any) => {
   border-bottom: 1px solid var(--color-border);
 }
 
+.project-workspace-header{padding:10px 12px}.project-workspace-switcher{display:flex;align-items:center;gap:7px;min-width:0;flex:1}.project-workspace-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text);font-size:14px;font-weight:600}.project-back-btn{width:28px;height:28px;flex:0 0 auto;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--color-text-muted);font-size:17px;cursor:pointer}.project-back-btn:hover{background:var(--color-bg-muted);color:var(--color-primary)}
 .side-header h2 {
   font-size: 16px;
   font-weight: 600;
@@ -5458,6 +5835,7 @@ const showSearchPaperPopup = (paper: any) => {
 .side-mini-btn:hover:not(:disabled) { background: var(--color-primary-soft); color: var(--color-primary); }
 .side-mini-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .error-text { color: var(--color-error); }
+.project-file-tabs{display:flex;gap:4px;padding:8px 10px;border-bottom:1px solid var(--color-border);background:transparent}.project-file-tabs button{position:relative;flex:1;border:0;border-radius:var(--radius-sm);padding:6px 8px;background:transparent;color:var(--color-text-secondary);font-size:12px;cursor:pointer;transition:background var(--transition),color var(--transition)}.project-file-tabs button:hover{background:var(--color-bg-muted);color:var(--color-text)}.project-file-tabs button.active{background:var(--color-primary-soft);color:var(--color-primary);font-weight:600}.project-sidebar-tools{flex:1;min-height:0;overflow:hidden;background:transparent}.project-sidebar-tools :deep(.project-tools-panel){padding:14px 10px;background:transparent}.project-sidebar-tools :deep(.project-tools-header){margin-bottom:12px}.project-sidebar-tools :deep(.project-tools-header h1){font-size:17px}.project-sidebar-tools :deep(.project-tools-kicker){font-size:10px}.project-sidebar-tools :deep(.project-tools-toolbar){display:grid;grid-template-columns:1fr 1fr;gap:5px}.project-sidebar-tools :deep(.project-tools-toolbar select){grid-column:1 / -1;min-width:0}.project-sidebar-tools :deep(.project-git-row){display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:5px;align-items:center;flex-wrap:nowrap}.project-sidebar-tools :deep(.project-path-button){min-width:0;flex-basis:auto;order:initial}.project-sidebar-tools :deep(.project-git-row > button:last-child){margin-left:0}.project-sidebar-tools :deep(.project-history-row){display:flex}.project-sidebar-tools :deep(.project-row-actions){margin-top:8px}.project-sidebar-tools :deep(.project-history-preview pre){max-height:220px}
 .files-inline-list {
   padding: 8px 4px calc(8px + var(--list-scroll-bottom-gap, 84px));
 }
@@ -5473,7 +5851,7 @@ const showSearchPaperPopup = (paper: any) => {
   padding: 0 8px;
 }
 
-.workspace-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.workspace-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .workspace-empty {
   flex: 1;
   min-height: 0;
@@ -5486,6 +5864,36 @@ const showSearchPaperPopup = (paper: any) => {
   color: var(--color-text-secondary);
 }
 .workspace-empty.compact { min-height: 260px; flex: none; }
+.project-history-compare-layer { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 28px; background: rgba(var(--color-bg-rgb), .56); backdrop-filter: blur(7px); }
+.project-history-compare-dialog { display: flex; flex-direction: column; width: min(1400px, calc(100vw - 56px)); height: min(90vh, 900px); min-height: 520px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--color-bg-card) 96%, transparent); box-shadow: var(--shadow-lg); }
+.project-history-compare-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 24px 14px; border-bottom: 1px solid var(--color-border); }
+.project-history-compare-header > div { min-width: 0; }
+.project-history-compare-kicker { margin-bottom: 4px; color: var(--color-primary); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.project-history-compare-header h2 { overflow: hidden; color: var(--color-text); font-size: 17px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.project-history-compare-header p { margin-top: 5px; overflow: hidden; color: var(--color-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.project-history-compare-close { width: 30px; height: 30px; flex: 0 0 auto; border: 0; border-radius: 50%; background: transparent; color: var(--color-text-muted); font-size: 22px; line-height: 1; cursor: pointer; }
+.project-history-compare-close:hover { background: var(--color-bg-muted); color: var(--color-text); }
+.project-history-compare-body { flex: 1; min-height: 0; overflow: auto; padding: 16px 24px 24px; }
+.project-history-compare-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 16px; color: var(--color-text-secondary); font-size: 12px; }
+.project-history-compare-file-list { display: flex; flex: 1; justify-content: flex-end; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.project-history-compare-file-list span { max-width: 360px; overflow: hidden; padding: 4px 7px; border: 1px solid var(--color-border); border-radius: 999px; background: color-mix(in srgb, var(--color-bg-muted) 42%, transparent); color: var(--color-text-muted); font: 10px var(--font-mono, ui-monospace, monospace); text-overflow: ellipsis; white-space: nowrap; }
+.project-history-compare-files { display: grid; gap: 18px; }
+.project-history-compare-file { display: flex; flex-direction: column; min-height: 420px; height: min(58vh, 620px); overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md, 10px); background: color-mix(in srgb, var(--color-bg-muted) 18%, transparent); }
+.project-history-compare-file.collapsed { min-height: 0; height: auto; }
+.project-history-compare-file.unchanged { border-color: color-mix(in srgb, var(--color-border) 70%, var(--color-text-muted)); }
+.project-history-compare-file-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 10px 14px; border-bottom: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-bg-muted) 42%, transparent); }
+.project-history-compare-file.collapsed .project-history-compare-file-header { border-bottom: 0; }
+.project-history-compare-file-header > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.project-history-compare-file-header strong { overflow: hidden; color: var(--color-text); font: 12px var(--font-mono, ui-monospace, monospace); text-overflow: ellipsis; white-space: nowrap; }
+.project-history-compare-file-header span { color: var(--color-text-muted); font-size: 10px; }
+.project-history-compare-file-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: 0 0 auto; }
+.project-history-compare-file-status { flex: 0 0 auto; padding: 3px 7px; border-radius: 999px; background: color-mix(in srgb, var(--color-error) 12%, transparent); color: var(--color-error) !important; }
+.project-history-compare-file-toggle { flex: 0 0 auto; border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 4px 8px; background: transparent; color: var(--color-text-secondary); font-size: 10px; cursor: pointer; }
+.project-history-compare-file-toggle:hover { background: var(--color-bg-muted); color: var(--color-text); }
+.project-history-compare-file-editor { flex: 1; min-height: 0; margin: 12px 14px 14px; }
+.project-history-compare-loading,.project-history-compare-error { display: grid; place-items: center; min-height: 260px; padding: 24px; color: var(--color-text-secondary); font-size: 13px; text-align: center; }.project-history-compare-error { color: var(--color-error); }
+.history-compare-enter-active,.history-compare-leave-active { transition: opacity 180ms ease; }.history-compare-enter-from,.history-compare-leave-to { opacity: 0; }
+@media (max-width: 800px) { .project-history-compare-layer { padding: 12px; }.project-history-compare-dialog { width: calc(100vw - 24px); height: 92vh; min-height: 360px; }.project-history-compare-header { padding: 16px; }.project-history-compare-body { padding: 12px 16px 16px; }.project-history-compare-summary { display: block; }.project-history-compare-file-list { justify-content: flex-start; margin-top: 10px; }.project-history-compare-file-list span { max-width: 100%; }.project-history-compare-file { min-height: 360px; height: 58vh; } }
 .workspace-empty .empty-icon { font-size: 42px; margin-bottom: 12px; }
 .workspace-empty h2 { font-size: 18px; color: var(--color-text); margin-bottom: 8px; }
 .workspace-empty p { max-width: 520px; line-height: 1.7; }
@@ -6917,4 +7325,6 @@ const showSearchPaperPopup = (paper: any) => {
   }
 }
 
+
+.workspace-sidebar-enter-active,.workspace-sidebar-leave-active{transition:opacity 180ms ease,transform 180ms ease}.workspace-sidebar-enter-from{opacity:0;transform:translateX(-10px)}.workspace-sidebar-leave-to{opacity:0;transform:translateX(-10px)}
 </style>

@@ -12,12 +12,18 @@ import ExtensionTuiSurface from '@/components/agent/ExtensionTuiSurface.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import type { CurrentChatResource } from '@yarc/shared'
 
-const props = defineProps<{ currentResource?: CurrentChatResource | null; currentResourceNotice?: string }>()
+const props = defineProps<{
+  currentResource?: CurrentChatResource | null
+  currentResourceNotice?: string
+  showCurrentResourceNotice?: boolean
+  createConversation?: () => Promise<unknown>
+}>()
 const emit = defineEmits<{
   close: []
   openFile: [path: string]
 }>()
 const chatStore = useChatStore()
+const createConversation = () => props.createConversation ? props.createConversation() : chatStore.createConversation()
 const theme = useThemeStore()
 const paperStore = usePaperStore()
 const currentModelReasoning = computed(() => chatStore.models.find(m => m.id === chatStore.currentModel)?.reasoning)
@@ -592,7 +598,7 @@ const resetComposer = () => {
 const handleWebSlashCommand = async (text: string): Promise<boolean> => {
   if (/^\/new\s*$/i.test(text)) {
     resetComposer()
-    await chatStore.createConversation()
+    await createConversation()
     return true
   }
 
@@ -1040,16 +1046,6 @@ const contextUsageTitle = computed(() => {
   return `当前分支上下文 token：${tokenText} / ${windowText}（${percentText}）`
 })
 
-// Extract session state from the latest assistant message that has it
-const sessionState = computed(() => {
-  const msgs = chatStore.messages
-  if (!msgs?.length) return null
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const state = msgs[i].metadata?.sessionState
-    if (state?.model) return state
-  }
-  return null
-})
 </script>
 
 <template>
@@ -1103,7 +1099,7 @@ const sessionState = computed(() => {
           <div v-if="convMenuOpen" class="conv-dropdown">
             <div class="conv-dropdown-header">
               <span class="conv-dropdown-title">对话列表</span>
-              <button class="conv-new-btn" @click="chatStore.createConversation(); convMenuOpen = false">
+              <button class="conv-new-btn" @click="createConversation(); convMenuOpen = false">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               </button>
             </div>
@@ -1130,7 +1126,7 @@ const sessionState = computed(() => {
         <div v-if="contextUsageLabel" class="session-state">
           <span class="state-context" :title="contextUsageTitle">CTX {{ contextUsageLabel }}</span>
         </div>
-        <button class="tb-btn" @click="chatStore.createConversation()" title="新对话"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <button class="tb-btn" @click="createConversation()" title="新对话"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="tb-btn" @click="emit('close')" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
     </div>
@@ -1336,7 +1332,7 @@ const sessionState = computed(() => {
         <span>📄 {{ chatStore.pdfContext.documentTitle || currentPaperTitle || (chatStore.pdfContext.temporaryPdf ? '临时 PDF' : '论文') }} · 第{{ chatStore.pdfContext.pageNumber }}页</span>
         <button @click="chatStore.pdfContext = null">✕</button>
       </div>
-      <div v-if="props.currentResourceNotice" class="context-badge">
+      <div v-if="props.currentResourceNotice && props.showCurrentResourceNotice !== false" class="context-badge">
         <span>⏳ {{ props.currentResourceNotice }}</span>
       </div>
       <div v-if="chatStore.chatError" class="chat-error">

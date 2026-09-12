@@ -1,4 +1,5 @@
 import type {
+  FileNode,
   IeeeJournalBrowserPreferences,
   LatexBuild,
   LatexBuildLog,
@@ -36,6 +37,27 @@ export interface TemporaryPdfDocument {
   error?: string
   timedOut?: boolean
   expiresAt?: string
+}
+
+const currentProjectId = () => {
+  if (typeof window === 'undefined') return null
+  const match = window.location.pathname.match(/^\/projects\/([^/]+)(?:\/|$)/)
+  if (!match?.[1]) return null
+  try { return decodeURIComponent(match[1]) } catch { return match[1] }
+}
+
+const filesEndpoint = (suffix = '') => {
+  const projectId = currentProjectId()
+  return projectId
+    ? `/projects/${encodeURIComponent(projectId)}/files${suffix}`
+    : `/files${suffix}`
+}
+
+const latexBuildsEndpoint = (suffix = '') => {
+  const projectId = currentProjectId()
+  return projectId
+    ? `/projects/${encodeURIComponent(projectId)}/latex/builds${suffix}`
+    : `/latex/builds${suffix}`
 }
 
 async function request<T>(endpoint: string, options: RequestInitExt = {}): Promise<T> {
@@ -236,9 +258,12 @@ export function useApi() {
       }),
 
     // Conversations
-    getConversations: () => request<{ conversations: any[] }>('/conversations'),
+    getConversations: (projectId?: string | null) =>
+      request<{ conversations: any[] }>('/conversations', {
+        params: projectId === undefined ? undefined : { projectId: projectId || '' },
+      }),
 
-    createConversation: (data?: { paperId?: string; title?: string; model?: string }) =>
+    createConversation: (data?: { paperId?: string; projectId?: string; title?: string; model?: string }) =>
       request<{ conversation: any }>('/conversations', {
         method: 'POST',
         body: JSON.stringify(data || {}),
@@ -453,9 +478,10 @@ export function useApi() {
 
     retryTask: (id: string) => request(`/tasks/${id}/retry`, { method: 'POST' }),
 
-    // Files
+    // Files. The same methods are used by the global Files page and by a
+    // Project workspace; the URL is scoped from the current /projects/:id route.
     getFileTree: (path?: string) =>
-      request<{ files: any[] }>('/files', { params: path ? { path } : {} }),
+      request<{ files: FileNode[] }>(filesEndpoint(), { params: path ? { path } : {} }),
 
     getFileContent: (path: string, options?: { refreshLive?: boolean }) =>
       request<{
@@ -471,87 +497,88 @@ export function useApi() {
         sessionEpoch?: string
         contentHash?: string
         diskHash?: string
-      }>('/files/content', {
+      }>(`${filesEndpoint('/content')}`, {
         params: { path, ...(options?.refreshLive ? { refreshLive: '1' } : {}) },
       }),
 
     saveFileContent: (path: string, content: string) =>
-      request('/files/content', {
+      request(`${filesEndpoint('/content')}`, {
         method: 'PUT',
         body: JSON.stringify({ path, content }),
       }),
 
     openFileWithSystemApp: (path: string) =>
-      request<{ message: string }>('/files/open-system', {
+      request<{ message: string }>(filesEndpoint('/open-system'), {
         method: 'POST',
         body: JSON.stringify({ path }),
       }),
 
     createFile: (path: string, content = '') =>
-      request<{ file: any }>('/files/file', {
+      request<{ file: any }>(filesEndpoint('/file'), {
         method: 'POST',
         body: JSON.stringify({ path, content }),
       }),
 
     createDirectory: (path: string) =>
-      request<{ file: any }>('/files/directory', {
+      request<{ file: any }>(filesEndpoint('/directory'), {
         method: 'POST',
         body: JSON.stringify({ path }),
       }),
 
     renamePath: (from: string, to: string) =>
-      request<{ file: any }>('/files/path', {
+      request<{ file: any }>(filesEndpoint('/path'), {
         method: 'PATCH',
         body: JSON.stringify({ from, to }),
       }),
 
     deletePath: (path: string) =>
-      request('/files/path', { method: 'DELETE', params: { path } }),
+      request(filesEndpoint('/path'), { method: 'DELETE', params: { path } }),
 
     uploadFile: (path: string, file: File) => {
       const formData = new FormData()
       formData.append('path', path)
       formData.append('file', file)
-      return request<{ file: any }>('/files/upload', {
+      return request<{ file: any }>(filesEndpoint('/upload'), {
         method: 'POST',
         body: formData as any,
       })
     },
 
-    getFileDownloadUrl: (path: string) => `${API_BASE}/files/download?path=${encodeURIComponent(path)}`,
+    getFileDownloadUrl: (path: string) => `${API_BASE}${filesEndpoint('/download')}?path=${encodeURIComponent(path)}`,
     getFileImageUrl: (path: string, version?: string | number) => {
       const versionParam = version === undefined || version === ''
         ? ''
         : `&v=${encodeURIComponent(String(version))}`
-      return `${API_BASE}/files/image?path=${encodeURIComponent(path)}${versionParam}`
+      return `${API_BASE}${filesEndpoint('/image')}?path=${encodeURIComponent(path)}${versionParam}`
     },
 
     getOfficeView: (path: string, mode: OfficeViewMode) =>
-      request<{ mode: OfficeViewMode; content: string }>('/files/office/view', { params: { path, mode } }),
+      request<{ mode: OfficeViewMode; content: string }>(filesEndpoint('/office/view'), { params: { path, mode } }),
 
-    // LaTeX builds
+    // LaTeX builds. Project routes are selected from the current /projects/:id URL;
+    // the same panel can therefore serve both the global Files workspace and a Project.
     compileLatex: (path: string, engine: LatexEngine = 'xelatex') =>
-      request<{ build: LatexBuild }>('/latex/builds', {
+      request<{ build: LatexBuild }>(latexBuildsEndpoint(), {
         method: 'POST',
         body: JSON.stringify({ path, engine }),
       }),
 
     getLatexBuild: (id: string) =>
-      request<{ build: LatexBuild }>(`/latex/builds/${encodeURIComponent(id)}`),
+      request<{ build: LatexBuild }>(latexBuildsEndpoint(`/${encodeURIComponent(id)}`)),
 
     getLatexBuildLog: (id: string) =>
-      request<LatexBuildLog>(`/latex/builds/${encodeURIComponent(id)}/log`),
+      request<LatexBuildLog>(latexBuildsEndpoint(`/${encodeURIComponent(id)}/log`)),
 
     cancelLatexBuild: (id: string) =>
-      request<{ build: LatexBuild }>(`/latex/builds/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+      request<{ build: LatexBuild }>(latexBuildsEndpoint(`/${encodeURIComponent(id)}/cancel`), { method: 'POST' }),
 
     getLatexPdfUrl: (id: string, version?: string | number) => {
       const versionParam = version === undefined || version === '' ? '' : `?v=${encodeURIComponent(String(version))}`
-      return `${API_BASE}/latex/builds/${encodeURIComponent(id)}/pdf${versionParam}`
+      return `${API_BASE}${latexBuildsEndpoint(`/${encodeURIComponent(id)}/pdf`)}${versionParam}`
     },
 
     getLatexSyncTex: <T extends 'forward' | 'backward'>(id: string, params: Record<string, string | number> & { direction: T }) =>
-      request<Extract<LatexSyncTexForwardResult | LatexSyncTexBackwardResult, { direction: T }>>(`/latex/builds/${encodeURIComponent(id)}/synctex`, {
+      request<Extract<LatexSyncTexForwardResult | LatexSyncTexBackwardResult, { direction: T }>>(latexBuildsEndpoint(`/${encodeURIComponent(id)}/synctex`), {
         params: Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)])),
       }),
 

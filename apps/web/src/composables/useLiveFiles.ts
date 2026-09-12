@@ -61,6 +61,13 @@ type PendingOperation = {
 }
 
 const clients = new Map<string, LiveFileClient>()
+const projectIdFromLocation = () => {
+  if (typeof window === 'undefined') return null
+  const match = window.location.pathname.match(/^\/projects\/([^/]+)(?:\/|$)/)
+  if (!match?.[1]) return null
+  try { return decodeURIComponent(match[1]) } catch { return match[1] }
+}
+const clientKey = (projectId: string | null, path: string) => `${projectId || 'global'}:${path}`
 const RECONNECT_BASE_MS = 500
 const RECONNECT_MAX_MS = 15_000
 const INITIAL_CONNECTION_TIMEOUT_MS = 5_000
@@ -85,18 +92,25 @@ const createRequestId = () => {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 }
 
-const liveFileUrl = (path: string) => {
+const liveFileUrl = (path: string, projectId: string | null) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/api/files/live?path=${encodeURIComponent(path)}`
+  const base = projectId ? `/api/projects/${encodeURIComponent(projectId)}/files/live` : '/api/files/live'
+  return `${protocol}//${window.location.host}${base}?path=${encodeURIComponent(path)}`
 }
 
 const isIgnoredOrigin = (origin: unknown) => origin === 'server' || origin === 'cache' || origin === 'recovery'
 
 export function useLiveFiles() {
-  const get = (path?: string | null) => (path ? clients.get(path) || null : null)
+  const get = (path?: string | null) => {
+    const projectId = projectIdFromLocation()
+    return path ? clients.get(clientKey(projectId, path)) || null : null
+  }
 
   const open = async (path: string): Promise<LiveFileClient> => {
-    const existing = clients.get(path)
+    const projectId = projectIdFromLocation()
+    const key = clientKey(projectId, path)
+    const workspace = projectId || 'global'
+    const existing = clients.get(key)
     if (existing) return existing
 
     const ydoc = new Y.Doc()
@@ -202,6 +216,7 @@ export function useLiveFiles() {
         serverRevision: serverRevision.value,
         sessionEpoch: sessionEpoch.value,
         savedAt: status.value?.savedAt ? Date.parse(status.value.savedAt) : Date.now(),
+        workspace,
       }
       cachedAt.value = Date.now()
       void putOfflineWorkspaceFile(snapshot)
@@ -218,6 +233,7 @@ export function useLiveFiles() {
         kind: 'local-draft',
         serverRevision: serverRevision.value,
         sessionEpoch: sessionEpoch.value,
+        workspace,
       }
       draftAvailable.value = true
       void putOfflineWorkspaceFile(snapshot)
@@ -234,7 +250,7 @@ export function useLiveFiles() {
     const clearLocalDraft = () => {
       localDraftContent = null
       draftAvailable.value = false
-      void removeOfflineWorkspaceFile(path, 'local-draft')
+      void removeOfflineWorkspaceFile(path, 'local-draft', workspace)
     }
 
     const applyCachedSnapshot = (snapshot: OfflineWorkspaceFileSnapshot) => {
@@ -390,16 +406,16 @@ export function useLiveFiles() {
     }
 
     const loadOfflineFallback = async () => {
-      const cachedSnapshot = await getOfflineWorkspaceFile(path, 'last-known-good')
+      const cachedSnapshot = await getOfflineWorkspaceFile(path, 'last-known-good', workspace)
       if (!cachedSnapshot) return false
       applyCachedSnapshot(cachedSnapshot)
       return true
     }
 
     const loadCachedDraft = async (serverContent: string) => {
-      const draft = await getOfflineWorkspaceFile(path, 'local-draft')
+      const draft = await getOfflineWorkspaceFile(path, 'local-draft', workspace)
       if (!draft || draft.content === serverContent) {
-        if (draft) await removeOfflineWorkspaceFile(path, 'local-draft')
+        if (draft) await removeOfflineWorkspaceFile(path, 'local-draft', workspace)
         return
       }
       localDraftContent = draft.content
@@ -550,7 +566,7 @@ export function useLiveFiles() {
         return
       }
       try { ws?.close() } catch { /* ignore */ }
-      ws = new WebSocket(liveFileUrl(path))
+      ws = new WebSocket(liveFileUrl(path, projectId))
 
       ws.onopen = () => {
         connected.value = true
@@ -651,17 +667,17 @@ export function useLiveFiles() {
         failPendingOperations(new Error('实时文件客户端已关闭'))
         try { ws?.close() } catch { /* ignore */ }
         ydoc.destroy()
-        clients.delete(path)
+        clients.delete(key)
       },
     }
 
-    clients.set(path, client)
+    clients.set(key, client)
     window.addEventListener('online', reconnectWhenOnline)
     window.addEventListener('offline', pauseWhenOffline)
 
     if (navigator.onLine === false) {
       if (await loadOfflineFallback()) return client
-      clients.delete(path)
+      clients.delete(key)
       closedByClient = true
       window.removeEventListener('online', reconnectWhenOnline)
       window.removeEventListener('offline', pauseWhenOffline)
@@ -683,7 +699,7 @@ export function useLiveFiles() {
   }
 
   const release = async (path: string) => {
-    const client = clients.get(path)
+    const client = clients.get(clientKey(projectIdFromLocation(), path))
     if (!client) return
     if (!client.conflict.value && (client.dirty.value || client.saving.value) && !client.offline.value) {
       await client.flush().catch(() => undefined)
@@ -692,8 +708,13 @@ export function useLiveFiles() {
   }
 
   const releaseAll = async () => {
-    const paths = Array.from(clients.keys())
-    await Promise.all(paths.map((path) => release(path)))
+    const entries = Array.from(clients.entries())
+    for (const [, client] of entries) {
+      if (!client.conflict.value && (client.dirty.value || client.saving.value) && !client.offline.value) {
+        await client.flush().catch(() => undefined)
+      }
+      client.close()
+    }
   }
 
   return { clients, get, open, release, releaseAll }

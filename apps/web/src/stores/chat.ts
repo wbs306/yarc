@@ -10,7 +10,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system'; content: string; toolCalls: any[] | null
   metadata: Record<string, any> & { segments?: ChatSegment[] }; createdAt: string
 }
-export interface Conversation { id: string; paperId: string | null; title: string; model: string | null; createdAt: string; updatedAt: string }
+export interface Conversation { id: string; paperId: string | null; projectId: string | null; title: string; model: string | null; createdAt: string; updatedAt: string }
 export interface ModelInfo { id: string; name: string; provider: string; model?: string; reasoning?: boolean; images?: boolean; contextWindow?: string; maxTokens?: string; thinkingLevels?: string[]; source?: string }
 export interface BranchInfo { id: string; branchName: string; parentBranchId: string | null; forkMessageId: string | null }
 export type AgentInteractionKind = 'confirm' | 'select' | 'input' | 'editor' | 'questionnaire' | 'notification'
@@ -51,6 +51,8 @@ export interface ContextUsageInfo { tokens: number | null; contextWindow: number
 const MODEL_KEY = 'yarc-current-model'
 const EFFORT_KEY = 'yarc-reasoning-effort'
 const BRANCH_KEY = 'yarc-conv-branches'
+const CONVERSATION_KEY = 'yarc-current-conversations'
+const GLOBAL_CONVERSATION_SCOPE = '__global__'
 
 /** Keep one thinking card per interval bounded by tool calls. */
 const mergeThinkingSegmentsByToolPhase = (segments: ChatSegment[]): ChatSegment[] => {
@@ -87,6 +89,9 @@ export const useChatStore = defineStore('chat', () => {
   // Core
   const conversations = ref<Conversation[]>([])
   const currentConvId = ref<string | null>(null)
+  // The chat list is scoped to either the global workspace (null) or one project.
+  // Keep this alongside the list so background refreshes can preserve the same scope.
+  const conversationScope = ref<string | null>(null)
   const models = ref<ModelInfo[]>([])
   const currentModel = ref(localStorage.getItem(MODEL_KEY) || '')
   const storedReasoningEffort = localStorage.getItem(EFFORT_KEY) as ChatThinkingLevel | null
@@ -112,8 +117,18 @@ export const useChatStore = defineStore('chat', () => {
   const abortControllers = new Map<string, AbortController>()
   const streamEventSequences = new Map<string, number>()
   const textQueues = new Map<string, { buf: string; timer: number | null }>()
+  // A detached client socket must not cancel the server-owned producer. Keep a
+  // marker so returning to the conversation can reconcile a stream that
+  // finished while the conversation was off-screen.
+  const detachedStreams = new Set<string>()
   const streamReconnectTimers = new Map<string, number>()
+  // A conversation can have one producer but several short-lived browser
+  // subscriptions. Tokens prevent a stale socket/finally handler from
+  // clearing a newer subscription after a fast switch-away/switch-back.
+  let streamConnectionSeq = 0
+  const streamConnectionTokens = new Map<string, number>()
   let conversationSelectionSeq = 0
+  let conversationFetchSeq = 0
   let branchSelectionSeq = 0
 
   // PDF context
@@ -334,7 +349,26 @@ export const useChatStore = defineStore('chat', () => {
   const savePrefs = () => {
     try { const o: Record<string, string> = {}; for (const [k, v] of convBranchPrefs.entries()) o[k] = v; localStorage.setItem(BRANCH_KEY, JSON.stringify(o)) } catch {}
   }
+  const conversationScopeKey = (scope: string | null) => scope || GLOBAL_CONVERSATION_SCOPE
+  const conversationPrefs = new Map<string, string>()
+  const loadConversationPrefs = () => {
+    try {
+      const raw = localStorage.getItem(CONVERSATION_KEY)
+      if (!raw) return
+      for (const [scope, id] of Object.entries(JSON.parse(raw)) as [string, string][]) {
+        if (scope && id) conversationPrefs.set(scope, id)
+      }
+    } catch {}
+  }
+  const saveConversationPrefs = () => {
+    try {
+      const values: Record<string, string> = {}
+      for (const [scope, id] of conversationPrefs.entries()) values[scope] = id
+      localStorage.setItem(CONVERSATION_KEY, JSON.stringify(values))
+    } catch {}
+  }
   loadPrefs()
+  loadConversationPrefs()
 
   const setCurrentModel = (m: string) => { currentModel.value = m; if (m) localStorage.setItem(MODEL_KEY, m) }
   const setReasoningEffort = (e: string) => {
@@ -370,8 +404,20 @@ export const useChatStore = defineStore('chat', () => {
     if (activeInteractionId.value === requestId) activeInteractionId.value = null
     refreshActiveInteraction()
   }
+  const beginStreamConnection = (convId: string) => {
+    const token = ++streamConnectionSeq
+    streamConnectionTokens.set(convId, token)
+    return token
+  }
+  const ownsStreamConnection = (convId: string, token: number) => streamConnectionTokens.get(convId) === token
+  const invalidateStreamConnection = (convId: string) => { streamConnectionTokens.delete(convId) }
   const markActive = (c: string, m = '') => { activeStreams.set(c, m); syncStream() }
-  const markInactive = (c: string, m?: string) => { const cur = activeStreams.get(c); if (m && cur && cur !== m) return; activeStreams.delete(c); syncStream() }
+  const markInactive = (c: string, m?: string) => {
+    const cur = activeStreams.get(c)
+    if (m !== undefined && cur !== undefined && cur !== m) return
+    activeStreams.delete(c)
+    syncStream()
+  }
   const acceptStreamEvent = (messageId: string, event: any) => {
     const sequence = Number(event?.eventSequence || 0)
     if (!sequence) return true
@@ -388,9 +434,30 @@ export const useChatStore = defineStore('chat', () => {
     return true
   }
   const detachConversationStream = (convId: string) => {
+    const messageId = activeStreams.get(convId)
+    const hadClientStream = activeStreams.has(convId)
+      || abortControllers.has(convId)
+      || streamConnectionTokens.has(convId)
+    if (hadClientStream) {
+      // This only closes the browser subscription. The API producer is
+      // server-owned and keeps writing to streamBuffer for later replay.
+      detachedStreams.add(convId)
+      if (messageId) {
+        const queued = textQueues.get(messageId)
+        if (queued && queued.timer !== null) window.clearTimeout(queued.timer)
+        textQueues.delete(messageId)
+        // Replaying from zero after a route switch avoids losing events that
+        // were accepted by the old socket but still sitting in its UI queue.
+        streamEventSequences.delete(messageId)
+      }
+    }
+    // Invalidate before aborting. Abort callbacks from the old socket must not
+    // be able to clear a replacement subscription created immediately after
+    // this route switch.
+    invalidateStreamConnection(convId)
     abortControllers.get(convId)?.abort()
     abortControllers.delete(convId)
-    markInactive(convId)
+    if (activeStreams.has(convId)) markInactive(convId, messageId)
     const reconnectTimer = streamReconnectTimers.get(convId)
     if (reconnectTimer) window.clearTimeout(reconnectTimer)
     streamReconnectTimers.delete(convId)
@@ -529,10 +596,51 @@ export const useChatStore = defineStore('chat', () => {
 
   // ── API calls ──────────────────────────────────────────────────────
 
-  const fetchConversations = async () => {
-    const res = await api.getConversations()
-    conversations.value = res.conversations || []
-    if (conversations.value.length && !currentConvId.value) await selectConversation(conversations.value[0].id)
+  const fetchConversations = async (projectId: string | null = null) => {
+    const fetchSeq = ++conversationFetchSeq
+    // Publish the requested scope before awaiting the network so late runtime
+    // events cannot start a refresh for the route we just left.
+    conversationScope.value = projectId
+    const res = await api.getConversations(projectId)
+    if (fetchSeq !== conversationFetchSeq) return
+
+    const nextConversations = (res.conversations || []) as Conversation[]
+    const previousConversationId = currentConvId.value
+    const currentConversationStillVisible = !!previousConversationId
+      && nextConversations.some(conversation => conversation.id === previousConversationId)
+
+    // A route change can replace the conversation list while the old project
+    // conversation is still selected. Clear it before rendering the new list;
+    // otherwise the message pane and composer continue operating on the old
+    // project's conversation even though the history menu has changed.
+    if (previousConversationId && !currentConversationStillVisible) {
+      detachConversationStream(previousConversationId)
+      if (pendingEmptyConvs.has(previousConversationId)) {
+        pendingEmptyConvs.delete(previousConversationId)
+        void deleteEmptyConv(previousConversationId)
+      }
+      conversationSelectionSeq++
+      branchSelectionSeq++
+      currentConvId.value = null
+      branchCache.value.clear()
+      branches.value = []
+      currentBranchId.value = null
+      currentContextUsage.value = null
+      clearRuntimeUi()
+      syncStream()
+    }
+
+    conversations.value = nextConversations
+    if (conversations.value.length && !currentConvId.value) {
+      const preferredId = conversationPrefs.get(conversationScopeKey(projectId))
+      const preferred = preferredId && conversations.value.some(conversation => conversation.id === preferredId)
+        ? preferredId
+        : conversations.value[0].id
+      await selectConversation(preferred)
+    } else if (!conversations.value.length) {
+      conversationPrefs.delete(conversationScopeKey(projectId))
+      saveConversationPrefs()
+    }
   }
 
   const fetchModels = async () => {
@@ -670,6 +778,8 @@ export const useChatStore = defineStore('chat', () => {
 
   const selectConversation = async (id: string) => {
     if (!id) return
+    conversationPrefs.set(conversationScopeKey(conversationScope.value), id)
+    saveConversationPrefs()
     const selection = ++conversationSelectionSeq
     branchSelectionSeq++
     const previousConversationId = currentConvId.value
@@ -747,7 +857,7 @@ export const useChatStore = defineStore('chat', () => {
     await loadRuntimeSnapshot(convId, branchId)
   }
 
-  const createConversation = async (paperId?: string) => {
+  const createConversation = async (paperId?: string, projectId?: string) => {
     // If current conversation is empty, delete it first
     if (currentConvId.value && pendingEmptyConvs.has(currentConvId.value)) {
       const emptyId = currentConvId.value
@@ -757,7 +867,8 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     ensureModel()
-    const r = await api.createConversation({ paperId, model: currentModel.value || undefined })
+    const r = await api.createConversation({ paperId, projectId, model: currentModel.value || undefined })
+    conversationScope.value = projectId || null
     const previousConversationId = currentConvId.value
     if (previousConversationId && previousConversationId !== r.conversation.id) {
       detachConversationStream(previousConversationId)
@@ -766,6 +877,8 @@ export const useChatStore = defineStore('chat', () => {
     branchSelectionSeq++
     conversations.value.unshift(r.conversation)
     currentConvId.value = r.conversation.id
+    conversationPrefs.set(conversationScopeKey(conversationScope.value), r.conversation.id)
+    saveConversationPrefs()
     chatError.value = ''
     pendingEmptyConvs.add(r.conversation.id)
     branchCache.value.clear()
@@ -956,6 +1069,10 @@ export const useChatStore = defineStore('chat', () => {
   const deleteConversation = async (id: string) => {
     await api.deleteConversation(id)
     pendingEmptyConvs.delete(id)
+    if (conversationPrefs.get(conversationScopeKey(conversationScope.value)) === id) {
+      conversationPrefs.delete(conversationScopeKey(conversationScope.value))
+      saveConversationPrefs()
+    }
     conversations.value = conversations.value.filter(c => c.id !== id)
     for (const [requestId, interaction] of Object.entries(interactions.value)) {
       if (interaction.conversationId === id) delete interactions.value[requestId]
@@ -975,6 +1092,7 @@ export const useChatStore = defineStore('chat', () => {
     chatError.value = ''
     let assistantMsg: Message | null = null
     let convId = ''
+    let streamConnectionToken: number | null = null
     let shouldReconnect = false
     const requestContext = pdfContext.value || opts.currentResource
       ? {
@@ -1000,6 +1118,7 @@ export const useChatStore = defineStore('chat', () => {
         if (currentBranchId.value) appendToBranch(currentBranchId.value, um)
       }
 
+      streamConnectionToken = beginStreamConnection(convId)
       markActive(convId)
       streamingContent.value = ''
 
@@ -1011,7 +1130,7 @@ export const useChatStore = defineStore('chat', () => {
         context: requestContext || undefined, branchId: currentBranchId.value || undefined,
         ...(opts.editMessageId ? { editMessageId: opts.editMessageId } : {}),
         ...(opts.editForkMessageId ? { editForkMessageId: opts.editForkMessageId } : {}),
-      })
+      }, streamConnectionToken)
     } catch (e) {
       const err = e as Error
       shouldReconnect = err.name !== 'AbortError'
@@ -1020,8 +1139,14 @@ export const useChatStore = defineStore('chat', () => {
       }
     } finally {
       if (convId) {
-        markInactive(convId, assistantMsg?.id)
-        if (shouldReconnect) scheduleStreamReconnect(convId)
+        // A route switch invalidates this token. In that case the old
+        // sendMessage promise is only settling its detached socket and must
+        // not clear or reconnect a newer subscription for the same conversation.
+        if (streamConnectionToken !== null && ownsStreamConnection(convId, streamConnectionToken)) {
+          invalidateStreamConnection(convId)
+          markInactive(convId, assistantMsg?.id)
+          if (shouldReconnect) scheduleStreamReconnect(convId)
+        }
       } else syncStream()
       // A detached background send may settle after the user has moved to a
       // different conversation/resource; do not clear that new view's context.
@@ -1031,7 +1156,10 @@ export const useChatStore = defineStore('chat', () => {
 
   // ── WebSocket streaming ──────────────────────────────────────────
 
-  const streamWs = async (convId: string, payload: any): Promise<Message | null> => {
+  const streamWs = async (convId: string, payload: any, connectionToken: number | null): Promise<Message | null> => {
+    if (connectionToken === null || !ownsStreamConnection(convId, connectionToken)) {
+      throw new DOMException('Detached', 'AbortError')
+    }
     abortControllers.get(convId)?.abort()
     const abort = new AbortController()
     abortControllers.set(convId, abort)
@@ -1065,14 +1193,21 @@ export const useChatStore = defineStore('chat', () => {
         rejectOnce(new DOMException('Aborted', 'AbortError'))
         ws.close()
       })
-      ws.onopen = () => ws.send(JSON.stringify(payload))
+      ws.onopen = () => {
+        if (abort.signal.aborted || currentConvId.value !== convId || connectionToken === null || !ownsStreamConnection(convId, connectionToken)) {
+          rejectOnce(new DOMException('Detached', 'AbortError'))
+          ws.close()
+          return
+        }
+        ws.send(JSON.stringify(payload))
+      }
 
       ws.onmessage = async (ev) => {
         try {
           const d = JSON.parse(ev.data)
           // The server keeps producing after a conversation switch, but this
           // detached socket must never mutate the newly selected conversation.
-          if (currentConvId.value !== convId) {
+          if (currentConvId.value !== convId || connectionToken === null || !ownsStreamConnection(convId, connectionToken)) {
             rejectOnce(new DOMException('Detached', 'AbortError'))
             ws.close()
             return
@@ -1397,7 +1532,7 @@ export const useChatStore = defineStore('chat', () => {
         break
       case 'runtime_branch_changed':
         if (d.previousConversationId && d.previousConversationId !== d.conversationId && d.previousConversationId === currentConvId.value) {
-          void fetchConversations().then(() => selectConversation(d.conversationId))
+          void fetchConversations(conversationScope.value).then(() => selectConversation(d.conversationId))
         } else if (d.conversationId === currentConvId.value) {
           currentBranchId.value = d.branchId
           convBranchPrefs.set(d.conversationId, d.branchId)
@@ -1497,15 +1632,32 @@ export const useChatStore = defineStore('chat', () => {
 
   const attachStream = async (convId: string): Promise<boolean> => {
     if (activeStreams.has(convId)) { syncStream(); return true }
+    const wasDetached = detachedStreams.has(convId)
 
     let r: any
     try { r = await api.getStreamingMessage(convId) }
-    catch { syncStream(); return false }
+    catch {
+      if (wasDetached && currentConvId.value === convId) scheduleStreamReconnect(convId)
+      syncStream()
+      return false
+    }
 
     if (currentConvId.value !== convId) return false
 
     const sm = r.message as Message | null
     if (!sm?.id) {
+      if (wasDetached && !r.preparing) {
+        // The producer may have completed between the REST probe and the
+        // attach socket. Reload canonical messages so the detached view does
+        // not retain a pre-completion snapshot.
+        detachedStreams.delete(convId)
+        const bid = currentBranchId.value
+        if (bid) {
+          branchCache.value.delete(bid)
+          await loadBranchMsgs(convId, bid, true)
+          await loadContextUsage(convId, bid)
+        }
+      }
       syncStream()
       if (r.preparing && currentConvId.value === convId) scheduleStreamReconnect(convId, 500)
       return false
@@ -1547,6 +1699,7 @@ export const useChatStore = defineStore('chat', () => {
       msgRef = branchCache.value.get(bid)![idx >= 0 ? idx : arr.length - 1]!
     }
 
+    const attachToken = beginStreamConnection(convId)
     markActive(convId, sm.id)
 
     const attachAbort = new AbortController()
@@ -1562,7 +1715,7 @@ export const useChatStore = defineStore('chat', () => {
     let streamFailed = false
     attachAbort.signal.addEventListener('abort', () => ws.close())
     ws.onopen = () => {
-      if (attachAbort.signal.aborted || currentConvId.value !== convId) {
+      if (attachAbort.signal.aborted || currentConvId.value !== convId || !ownsStreamConnection(convId, attachToken)) {
         ws.close()
         return
       }
@@ -1575,7 +1728,7 @@ export const useChatStore = defineStore('chat', () => {
     ws.onmessage = (ev) => {
       try {
         const d = JSON.parse(ev.data)
-        if (currentConvId.value !== convId) {
+        if (currentConvId.value !== convId || !ownsStreamConnection(convId, attachToken)) {
           ws.close()
           return
         }
@@ -1585,6 +1738,7 @@ export const useChatStore = defineStore('chat', () => {
           flushTextQueue(msgRef, convId)
           flushBranchTextQueues(bid, convId)
           streamCompleted = true
+          detachedStreams.delete(convId)
           streamEventSequences.delete(sm.id)
           ws.close(); return
         }
@@ -1599,6 +1753,8 @@ export const useChatStore = defineStore('chat', () => {
     ws.onerror = () => { /* onclose handles retry/reload */ }
     ws.onclose = () => {
       clearAttachController()
+      if (!ownsStreamConnection(convId, attachToken)) return
+      invalidateStreamConnection(convId)
       markInactive(convId, sm.id)
       if (currentConvId.value !== convId) return
       if (streamCompleted && !streamFailed) {

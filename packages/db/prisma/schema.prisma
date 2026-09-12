@@ -76,31 +76,75 @@ model Note {
   @@map("notes")
 }
 
+model Project {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name          String
+  directoryName String    @unique @map("directory_name")
+  description   String?
+  settings      Json      @default("{}")
+  archivedAt    DateTime? @map("archived_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @default(now()) @map("updated_at")
+
+  conversations      Conversation[]
+  historyCheckpoints ProjectHistoryCheckpoint[]
+
+  @@index([updatedAt(sort: Desc)])
+  @@map("projects")
+}
+
 model Conversation {
   id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   paperId       String?  @map("paper_id") @db.Uuid
+  projectId     String?  @map("project_id") @db.Uuid
   title         String   @default("新对话")
   model         String?
   systemPrompt  String?  @map("system_prompt")
   metadata      Json     @default("{}")
-  // metadata 结构:
-  // {
-  //   "pi": {
-  //     "sessions": {
-  //       "main": { "sessionFile": "/path/to/session.jsonl", "leafEntryId": "xxx" },
-  //       "edit-123": { "sessionFile": "/path/to/branch.jsonl", "leafEntryId": "yyy" }
-  //     }
-  //   }
-  // }
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @default(now()) @map("updated_at")
 
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
   @@map("conversations")
 }
 
+model ProjectHistoryCheckpoint {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sequence  Int      @default(autoincrement())
+  projectId String   @map("project_id") @db.Uuid
+  kind      String
+  label     String?
+  pinned    Boolean  @default(false)
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
 
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  revisions ProjectHistoryRevision[]
 
+  @@unique([projectId, sequence])
+  @@index([projectId, sequence(sort: Desc)])
+  @@index([projectId, createdAt(sort: Desc)])
+  @@map("project_history_checkpoints")
+}
 
+model ProjectHistoryRevision {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  checkpointId String   @map("checkpoint_id") @db.Uuid
+  projectId    String   @map("project_id") @db.Uuid
+  path         String
+  contentHash  String   @map("content_hash")
+  blobHash     String?  @map("blob_hash")
+  size         Int
+  deleted      Boolean  @default(false)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  checkpoint ProjectHistoryCheckpoint @relation(fields: [checkpointId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, path, createdAt(sort: Desc)])
+  @@map("project_history_revisions")
+}
 
 model PaperChunk {
   id         String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -131,8 +175,6 @@ model Task {
   @@index([status, createdAt])
   @@map("tasks")
 }
-
-
 
 model Setting {
   key       String   @id

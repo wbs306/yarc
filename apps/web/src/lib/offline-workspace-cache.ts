@@ -1,7 +1,6 @@
 const DATABASE_NAME = 'yarc-offline-workspace'
 const DATABASE_VERSION = 2
 const STORE_NAME = 'snapshots'
-const TREE_KEY = 'tree'
 
 export type OfflineWorkspaceFileKind = 'last-known-good' | 'local-draft'
 
@@ -16,6 +15,7 @@ export interface OfflineWorkspaceFileSnapshot {
   serverRevision?: number
   sessionEpoch?: string
   savedAt?: number
+  workspace?: string
 }
 
 export interface OfflineWorkspaceTreeSnapshot {
@@ -116,37 +116,40 @@ const deleteSnapshot = async (key: string): Promise<void> => {
   })
 }
 
-const fileCacheKey = (path: string, kind: OfflineWorkspaceFileKind) => `file:${path}:${kind}`
+const workspacePrefix = (workspace = 'global') => workspace && workspace !== 'global' ? `workspace:${workspace}:` : ''
+const fileCacheKey = (path: string, kind: OfflineWorkspaceFileKind, workspace = 'global') => `${workspacePrefix(workspace)}file:${path}:${kind}`
+const treeCacheKey = (workspace = 'global') => `${workspacePrefix(workspace)}tree`
 
 export const getOfflineWorkspaceFile = async (
   path: string,
-  kind: OfflineWorkspaceFileKind = 'last-known-good'
+  kind: OfflineWorkspaceFileKind = 'last-known-good',
+  workspace = 'global'
 ): Promise<OfflineWorkspaceFileSnapshot | null> => {
-  const current = await readSnapshot<OfflineWorkspaceFileSnapshot>(fileCacheKey(path, kind))
+  const current = await readSnapshot<OfflineWorkspaceFileSnapshot>(fileCacheKey(path, kind, workspace))
   if (current) return { ...current, kind: current.kind || kind }
 
   // Read snapshots written by the pre-v2 cache as last-known-good content. They
   // are never used to seed an online Y.Doc; this fallback is only for offline UI.
-  if (kind !== 'last-known-good') return null
+  if (kind !== 'last-known-good' || workspace !== 'global') return null
   const legacy = await readSnapshot<Omit<OfflineWorkspaceFileSnapshot, 'kind'>>(`file:${path}`)
   return legacy ? { ...legacy, kind } : null
 }
 
 export const putOfflineWorkspaceFile = (
   snapshot: Omit<OfflineWorkspaceFileSnapshot, 'cachedAt'>
-) => writeSnapshot(fileCacheKey(snapshot.path, snapshot.kind), {
+) => writeSnapshot(fileCacheKey(snapshot.path, snapshot.kind, snapshot.workspace), {
   ...snapshot,
   cachedAt: Date.now(),
 })
 
-export const removeOfflineWorkspaceFile = (path: string, kind: OfflineWorkspaceFileKind) =>
-  deleteSnapshot(fileCacheKey(path, kind))
+export const removeOfflineWorkspaceFile = (path: string, kind: OfflineWorkspaceFileKind, workspace = 'global') =>
+  deleteSnapshot(fileCacheKey(path, kind, workspace))
 
-export const getOfflineWorkspaceTree = () =>
-  readSnapshot<OfflineWorkspaceTreeSnapshot>(TREE_KEY)
+export const getOfflineWorkspaceTree = (workspace = 'global') =>
+  readSnapshot<OfflineWorkspaceTreeSnapshot>(treeCacheKey(workspace))
 
-export const putOfflineWorkspaceTree = (files: unknown[]) =>
-  writeSnapshot(TREE_KEY, { files, cachedAt: Date.now() })
+export const putOfflineWorkspaceTree = (files: unknown[], workspace = 'global') =>
+  writeSnapshot(treeCacheKey(workspace), { files, cachedAt: Date.now() })
 
 export const getOfflinePdf = (sourceUrl: string) =>
   readSnapshot<OfflinePdfSnapshot>(`pdf:${sourceUrl}`)

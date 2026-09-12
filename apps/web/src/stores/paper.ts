@@ -51,6 +51,8 @@ export const usePaperStore = defineStore('paper', () => {
 
   // SSE connection for real-time updates
   let evtSource: EventSource | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let pageSuspended = false
 
   // Text selection context
   const selection = ref<{
@@ -90,9 +92,11 @@ export const usePaperStore = defineStore('paper', () => {
 
   /** Start SSE connection (idempotent) */
   const connectSSE = () => {
-    if (evtSource) return
-    evtSource = new EventSource('/api/events')
-    evtSource.onmessage = (e) => {
+    if (evtSource || pageSuspended) return
+    const source = new EventSource('/api/events')
+    evtSource = source
+    source.onmessage = (e) => {
+      if (evtSource !== source) return
       try {
         const evt = JSON.parse(e.data)
         window.dispatchEvent(new CustomEvent('yarc-sse-event', { detail: evt }))
@@ -107,12 +111,28 @@ export const usePaperStore = defineStore('paper', () => {
         }
       } catch { /* ignore parse errors */ }
     }
-    evtSource.onerror = () => {
+    source.onerror = () => {
+      if (evtSource !== source) return
+      source.close()
+      evtSource = null
+      // Reconnect after 3s, unless the document has left the page.
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      reconnectTimer = setTimeout(() => { reconnectTimer = null; connectSSE() }, 3000)
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pagehide', () => {
+      pageSuspended = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      reconnectTimer = null
       evtSource?.close()
       evtSource = null
-      // Reconnect after 3s
-      setTimeout(connectSSE, 3000)
-    }
+    })
+    window.addEventListener('pageshow', () => {
+      pageSuspended = false
+      connectSSE()
+    })
   }
 
   /** Fetch fresh status for one paper and update local state */

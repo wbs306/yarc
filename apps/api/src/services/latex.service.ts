@@ -1,6 +1,6 @@
 import { access, copyFile, lstat, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, isAbsolute, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { config } from '../lib/config.js'
 import { AppError } from '../lib/errors.js'
@@ -29,6 +29,8 @@ const EXCLUDED_SOURCE_NAMES = new Set([
   'papers',
   'backgrounds',
   'temporary-pdfs',
+  'projects',
+  '.project-history',
   'node_modules',
 ])
 
@@ -37,7 +39,19 @@ export interface LatexCompileOptions {
   engine?: LatexEngine
 }
 
+// Trusted server-side input, never accepted directly from an HTTP body.
+export interface LatexWorkspaceCompileOptions {
+  projectId?: string
+  path: string
+  sourceRoot: string
+  entryName: string
+  engine: LatexEngine
+  onSettled?: (build: LatexBuild) => Promise<void>
+}
+
 interface LatexBuildJob extends LatexBuild {
+  projectId?: string
+  onSettled?: (build: LatexBuild) => Promise<void>
   jobDir: string
   sourceDir: string
   outputDir: string
@@ -283,7 +297,7 @@ export class LatexService {
     }
   }
 
-  private async copySourceDirectory(sourceDir: string, targetDir: string, excludedPaths: string[] = []): Promise<SourceSnapshot> {
+  private async copySourceDirectory(sourceDir: string, targetDir: string, excludedPaths: string[] = [], project = false): Promise<SourceSnapshot> {
     const maxBytes = this.maxSourceBytes()
     const maxFiles = this.maxSourceFiles()
     let files = 0
@@ -293,20 +307,21 @@ export class LatexService {
       await mkdir(to, { recursive: true })
       const entries = await readdir(from, { withFileTypes: true })
       for (const entry of entries) {
-        if (EXCLUDED_SOURCE_NAMES.has(entry.name) || entry.name.startsWith('.')) continue
+        if (project
+          ? ['.git', '.pi', 'node_modules'].includes(entry.name)
+          : EXCLUDED_SOURCE_NAMES.has(entry.name) || entry.name.startsWith('.')) continue
         const sourcePath = join(from, entry.name)
         const targetPath = join(to, entry.name)
         if (excludedPaths.some((excludedPath) => sourcePath === excludedPath || sourcePath.startsWith(`${excludedPath}${sep}`))) continue
-        if (entry.isSymbolicLink()) {
+        const info = await lstat(sourcePath)
+        if (info.isSymbolicLink()) {
           throw new AppError('LATEX_UNSAFE_SOURCE', `Symbolic links are not allowed in LaTeX sources: ${entry.name}`, 400)
         }
-        if (entry.isDirectory()) {
+        if (info.isDirectory()) {
           await visit(sourcePath, targetPath)
           continue
         }
-        if (!entry.isFile()) continue
-
-        const info = await lstat(sourcePath)
+        if (!info.isFile()) continue
         if (info.nlink > 1) {
           throw new AppError('LATEX_UNSAFE_SOURCE', `Hard links are not allowed in LaTeX sources: ${entry.name}`, 400)
         }
@@ -409,19 +424,32 @@ export class LatexService {
     if (flushed?.conflict) throw new AppError('CONFLICT', '文件存在外部修改冲突，请先处理冲突', 409)
 
     const context = await fileService.getLatexCompileContext(options.path)
-    const sourceRootStat = await lstat(context.sourceRoot)
-    if (!sourceRootStat.isDirectory()) throw new AppError('NOT_DIRECTORY', 'LaTeX source root is not a directory', 400)
+    return this.startWorkspaceBuild({ path: context.relativePath, sourceRoot: context.sourceRoot, entryName: context.entryName, engine })
+  }
+
+  async startWorkspaceBuild(options: LatexWorkspaceCompileOptions): Promise<LatexBuild> {
+    if (!config.latexEnabled) throw new AppError('LATEX_DISABLED', 'LaTeX compilation is disabled', 503)
+    if (!ENGINES.includes(options.engine)) throw new AppError('LATEX_INVALID_ENGINE', 'Unsupported LaTeX engine', 400)
+    const entryName = options.entryName.replace(/\\/g, '/')
+    if (isAbsolute(entryName) || /^[A-Za-z]:/.test(entryName) || entryName.includes('\0') || !isSafeRelativePath(entryName) || !/\.tex$/i.test(entryName)) {
+      throw new AppError('LATEX_INVALID_SOURCE', 'Invalid LaTeX entry path', 400)
+    }
+    const sourceRoot = resolve(options.sourceRoot)
+    const sourceRootStat = await lstat(sourceRoot)
+    if (sourceRootStat.isSymbolicLink() || !sourceRootStat.isDirectory()) throw new AppError('NOT_DIRECTORY', 'LaTeX source root is not a directory', 400)
 
     const id = randomUUID()
     const jobDir = resolve(config.latexOutputDir, id)
     const sourceDir = join(jobDir, 'source')
     const outputDir = join(jobDir, 'out')
-    const stem = context.entryName.replace(/\.tex$/i, '')
+    const stem = basename(entryName).replace(/\.tex$/i, '')
     const job: LatexBuildJob = {
       id,
-      path: context.relativePath,
-      entry: context.entryName,
-      engine,
+      projectId: options.projectId,
+      onSettled: options.onSettled,
+      path: options.path,
+      entry: entryName,
+      engine: options.engine,
       status: 'queued',
       createdAt: new Date().toISOString(),
       pdfAvailable: false,
@@ -430,7 +458,7 @@ export class LatexService {
       jobDir,
       sourceDir,
       outputDir,
-      entryName: context.entryName,
+      entryName,
       pdfPath: join(outputDir, `${stem}.pdf`),
       synctexPath: join(outputDir, `${stem}.synctex.gz`),
       logPath: join(outputDir, 'build.log'),
@@ -445,10 +473,12 @@ export class LatexService {
       // The default artifact directory lives under DATA_DIR. If the selected
       // entry is directly under DATA_DIR, exclude the newly-created job from
       // its own recursive source snapshot.
-      const snapshot = await this.copySourceDirectory(context.sourceRoot, sourceDir, [jobDir])
+      const excludedPaths = [resolve(config.latexOutputDir)]
+      if (!options.projectId) excludedPaths.push(resolve(config.projectsDir), resolve(config.projectHistoryDir))
+      const snapshot = await this.copySourceDirectory(sourceRoot, sourceDir, excludedPaths, !!options.projectId)
       job.sourceFiles = snapshot.files
       job.sourceBytes = snapshot.bytes
-      if (!(await fileExists(join(sourceDir, context.entryName)))) {
+      if (!(await fileExists(join(sourceDir, entryName)))) {
         throw new AppError('LATEX_ENTRY_MISSING', 'LaTeX entry file is missing from the source snapshot', 500)
       }
     } catch (error) {
@@ -477,7 +507,8 @@ export class LatexService {
           job.completedAt = new Date().toISOString()
           job.diagnostics = parseDiagnostics(job.logText)
         })
-        .finally(() => {
+        .finally(async () => {
+          await this.notifySettled(job)
           this.runningJobs -= 1
           void this.processQueue()
         })
@@ -543,15 +574,25 @@ export class LatexService {
     }
   }
 
-  getBuild(id: string): LatexBuild {
-    const job = this.jobs.get(id)
-    if (!job) throw new AppError('NOT_FOUND', 'LaTeX build not found', 404)
-    return this.buildView(job)
+  private async notifySettled(job: LatexBuildJob) {
+    const callback = job.onSettled
+    job.onSettled = undefined
+    try { await callback?.(this.buildView(job)) }
+    catch { console.warn('[LaTeX] Could not update build history metadata') }
   }
 
-  getBuildLog(id: string): LatexBuildLog {
+  private jobForScope(id: string, projectId?: string) {
     const job = this.jobs.get(id)
-    if (!job) throw new AppError('NOT_FOUND', 'LaTeX build not found', 404)
+    if (!job || job.projectId !== projectId) throw new AppError('NOT_FOUND', 'LaTeX build not found', 404)
+    return job
+  }
+
+  getBuild(id: string, projectId?: string): LatexBuild {
+    return this.buildView(this.jobForScope(id, projectId))
+  }
+
+  getBuildLog(id: string, projectId?: string): LatexBuildLog {
+    const job = this.jobForScope(id, projectId)
     return {
       id,
       log: job.logText,
@@ -559,15 +600,20 @@ export class LatexService {
     }
   }
 
-  async cancelBuild(id: string): Promise<LatexBuild> {
-    const job = this.jobs.get(id)
-    if (!job) throw new AppError('NOT_FOUND', 'LaTeX build not found', 404)
+  async cancelProjectBuilds(projectId: string) {
+    const jobs = [...this.jobs.values()].filter(job => job.projectId === projectId && ['queued', 'running'].includes(job.status))
+    await Promise.all(jobs.map(job => this.cancelBuild(job.id, projectId)))
+  }
+
+  async cancelBuild(id: string, projectId?: string): Promise<LatexBuild> {
+    const job = this.jobForScope(id, projectId)
     if (job.status === 'queued') {
       job.cancelReason = 'user'
       job.status = 'cancelled'
       job.completedAt = new Date().toISOString()
       const pendingIndex = this.pendingJobIds.indexOf(id)
       if (pendingIndex >= 0) this.pendingJobIds.splice(pendingIndex, 1)
+      await this.notifySettled(job)
       return this.buildView(job)
     }
     if (job.status === 'running') {
@@ -577,9 +623,8 @@ export class LatexService {
     return this.buildView(job)
   }
 
-  async getArtifact(id: string, kind: 'pdf' | 'synctex') {
-    const job = this.jobs.get(id)
-    if (!job) throw new AppError('NOT_FOUND', 'LaTeX build not found', 404)
+  async getArtifact(id: string, kind: 'pdf' | 'synctex', projectId?: string) {
+    const job = this.jobForScope(id, projectId)
     if (job.status !== 'completed' && kind === 'pdf') {
       throw new AppError('LATEX_BUILD_NOT_READY', 'LaTeX PDF is not ready', 409)
     }
@@ -592,7 +637,6 @@ export class LatexService {
       path,
       size: info.size,
       name: basename(path),
-      job,
     }
   }
 
@@ -643,9 +687,8 @@ export class LatexService {
     page?: number
     x?: number
     y?: number
-  }): Promise<LatexSyncTexForwardResult | LatexSyncTexBackwardResult> {
-    const job = this.jobs.get(id)
-    if (!job) throw new AppError('NOT_FOUND', 'LaTeX build not found', 404)
+  }, projectId?: string): Promise<LatexSyncTexForwardResult | LatexSyncTexBackwardResult> {
+    const job = this.jobForScope(id, projectId)
     if (!job.synctexAvailable) throw new AppError('LATEX_SYNCTEX_NOT_READY', 'SyncTeX artifact is not ready', 409)
 
     const pdfName = basename(job.pdfPath)
