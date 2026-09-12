@@ -1,22 +1,8 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
+import type { FileNode } from '@yarc/shared'
 
 defineOptions({ name: 'FileTree' })
-
-export interface FileNode {
-  name: string
-  path: string
-  type: 'file' | 'directory'
-  children?: FileNode[]
-  size?: number
-  modified?: string
-  extension?: string
-  mime?: string
-  editable?: boolean
-  office?: boolean
-  legacyOffice?: boolean
-  readonly?: boolean
-}
 
 const props = withDefaults(defineProps<{
   nodes: FileNode[]

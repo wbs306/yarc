@@ -46,4 +46,3 @@ export function validateProjectLatexSettings(input: { defaultTarget?: unknown; t
   if (requestedDefault && !ids.has(requestedDefault)) throw new AppError('VALIDATION_ERROR', 'defaultTarget must reference a configured LaTeX target', 400)
   return { defaultTarget: requestedDefault || targets[0]?.id || null, targets }
 }
-

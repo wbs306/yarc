@@ -119,10 +119,6 @@ function collectInlineText(nodes: unknown, options: { includeInlineEquations: bo
   return joinInline(parts)
 }
 
-function collectTextOnly(nodes: unknown): string {
-  return collectInlineText(nodes, { includeInlineEquations: false })
-}
-
 function titleText(block: JsonObject, includeInlineEquations = false): string {
   const content = asObject(block.content)
   return collectInlineText(content.title_content, { includeInlineEquations })
