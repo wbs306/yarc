@@ -1,7 +1,7 @@
 import { prisma } from '@yarc/db'
 import { randomUUID } from 'node:crypto'
 import { access, mkdir } from 'node:fs/promises'
-import { extname, join } from 'node:path'
+import { extname, join, resolve } from 'node:path'
 import { searchService } from './search.service.js'
 import { searchCategoryService } from './search-category.service.js'
 import { ieeeXploreService } from './ieee-xplore.service.js'
@@ -58,6 +58,24 @@ const orderThinkingLevels = (levels: Iterable<string>): string[] => {
     if (bOrder != null) return 1
     return a.localeCompare(b)
   })
+}
+
+type AgentContextFile = { path: string; content: string }
+
+// YARC's global data instructions apply to every chat. A research project's
+// own AGENTS.md is additionally allowed, but repository-level YARC instructions
+// must not leak into project conversations through ancestor discovery.
+const filterAgentContextFiles = (
+  base: { agentsFiles: AgentContextFile[] },
+  workspace: { cwd: string; agentsMd: string },
+) => {
+  const allowedPaths = new Set([
+    resolve(workspace.agentsMd),
+    resolve(join(workspace.cwd, 'AGENTS.md')),
+  ])
+  return {
+    agentsFiles: base.agentsFiles.filter(file => allowedPaths.has(resolve(file.path))),
+  }
 }
 
 export class PiService {
@@ -490,9 +508,7 @@ export class PiService {
       const resourceLoader = new DefaultResourceLoader({
         cwd: agentWorkspace.cwd,
         agentDir: agentWorkspace.agentDir,
-        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
-          agentsFiles: base.agentsFiles.filter((file) => file.path !== agentWorkspace.legacyAgentsMd),
-        }),
+        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => filterAgentContextFiles(base, agentWorkspace),
         systemPromptOverride: (baseSystemPrompt?: string) => baseSystemPrompt?.trim() || DEFAULT_CHAT_SYSTEM_PROMPT,
       })
       await resourceLoader.reload()
@@ -546,9 +562,7 @@ export class PiService {
       resourceLoader = new DefaultResourceLoader({
         cwd: agentWorkspace.cwd,
         agentDir: agentWorkspace.agentDir,
-        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
-          agentsFiles: base.agentsFiles.filter((file) => file.path !== agentWorkspace.legacyAgentsMd),
-        }),
+        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => filterAgentContextFiles(base, agentWorkspace),
         systemPromptOverride: () => DEFAULT_CHAT_SYSTEM_PROMPT,
       })
       await resourceLoader.reload()
@@ -2316,9 +2330,7 @@ export class PiService {
       resourceLoader = new DefaultResourceLoader({
         cwd: agentWorkspace.cwd,
         agentDir: agentWorkspace.agentDir,
-        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
-          agentsFiles: base.agentsFiles.filter((file) => file.path !== agentWorkspace.legacyAgentsMd),
-        }),
+        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => filterAgentContextFiles(base, agentWorkspace),
         systemPromptOverride: () => DEFAULT_CHAT_SYSTEM_PROMPT,
       })
       await resourceLoader.reload()
@@ -2479,9 +2491,7 @@ export class PiService {
       resourceLoader = new DefaultResourceLoader({
         cwd: agentWorkspace.cwd,
         agentDir: agentWorkspace.agentDir,
-        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
-          agentsFiles: base.agentsFiles.filter((file) => file.path !== agentWorkspace.legacyAgentsMd),
-        }),
+        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => filterAgentContextFiles(base, agentWorkspace),
         systemPromptOverride: (baseSystemPrompt?: string) => baseSystemPrompt?.trim() || DEFAULT_CHAT_SYSTEM_PROMPT,
       })
       await resourceLoader.reload()
@@ -2734,9 +2744,7 @@ export class PiService {
       resourceLoader = new DefaultResourceLoader({
         cwd: agentWorkspace.cwd,
         agentDir: agentWorkspace.agentDir,
-        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
-          agentsFiles: base.agentsFiles.filter((file) => file.path !== agentWorkspace.legacyAgentsMd),
-        }),
+        agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => filterAgentContextFiles(base, agentWorkspace),
         systemPromptOverride: (baseSystemPrompt?: string) => {
           if (options.systemPrompt !== undefined) return options.systemPrompt
           return baseSystemPrompt?.trim() || DEFAULT_CHAT_SYSTEM_PROMPT

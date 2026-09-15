@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { parentPort } from 'node:worker_threads'
 import { createRequire } from 'node:module'
-import { dirname, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Unsafe } from 'typebox'
 import {
@@ -1177,20 +1177,17 @@ const initialize = async (payload: RuntimeInitPayload) => {
       agentDir,
       resourceLoaderOptions: {
         agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => {
-          const legacyAgentsMd = resolve(dirname(agentDir), 'AGENTS.md')
-          const seen = new Set<string>()
-          const discovered = base.agentsFiles.filter(file => {
-            const absolute = resolve(file.path)
-            if (absolute === legacyAgentsMd || (globalAgentsPath && absolute === globalAgentsPath) || seen.has(absolute)) return false
-            seen.add(absolute)
-            return true
-          })
+          const projectAgentsPath = resolve(cwd, 'AGENTS.md')
+          const projectAgentsFile = base.agentsFiles.find(file => resolve(file.path) === projectAgentsPath)
           return {
+            // A research project's own instructions are more specific than the
+            // shared data workspace instructions. Do not inherit AGENTS.md from
+            // the YARC repository root or other ancestor directories.
             agentsFiles: [
               ...(globalAgentsPath && globalAgentsContent !== null
                 ? [{ path: globalAgentsPath, content: globalAgentsContent }]
                 : []),
-              ...discovered,
+              ...(projectAgentsFile && projectAgentsPath !== globalAgentsPath ? [projectAgentsFile] : []),
             ],
           }
         },
