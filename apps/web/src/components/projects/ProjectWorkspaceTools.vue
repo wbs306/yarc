@@ -27,6 +27,7 @@ type GitRemote = { name: string; fetch?: string; push?: string }
 type FileRevision = ProjectHistoryRevision & { checkpoint?: ProjectHistoryCheckpoint }
 
 const loading = ref(false)
+const contentReady = ref(false)
 const error = ref('')
 const gitStatus = ref<ProjectGitStatus | null>(null)
 const commits = ref<ProjectGitCommit[]>([])
@@ -102,6 +103,7 @@ const reload = async (options: { flushHistory?: boolean } = {}) => {
       if (options.flushHistory) await requestJson(`${apiRoot.value}/history/flush`, { method: 'POST' })
       await loadHistory()
     }
+    contentReady.value = true
   } catch (err) {
     error.value = (err as Error).message || '加载项目数据失败'
   } finally {
@@ -129,7 +131,12 @@ onBeforeUnmount(() => {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer)
 })
 
-watch(() => [props.projectId, props.mode, props.selectedPath] as const, () => { void reload() }, { immediate: true })
+watch(() => [props.projectId, props.mode, props.selectedPath] as const, () => {
+  // A project/panel switch must not show the previous project's data while loading.
+  // Background refreshes keep contentReady=true so the current view stays stable.
+  contentReady.value = false
+  void reload()
+}, { immediate: true })
 
 const runMutation = async (operation: () => Promise<void>) => {
   error.value = ''
@@ -201,7 +208,7 @@ const restoreRevision = async (revision: FileRevision) => {
 </script>
 
 <template>
-  <section class="project-tools-panel" :class="`project-tools-${mode}`">
+  <section class="project-tools-panel" :class="`project-tools-${mode}`" :aria-busy="loading">
     <div class="project-tools-header">
       <div class="project-tools-heading">
         <span class="project-tools-icon" aria-hidden="true">
@@ -218,19 +225,19 @@ const restoreRevision = async (revision: FileRevision) => {
           <p class="project-tools-subtitle">{{ mode === 'git' ? '整理变更并创建可追踪的版本' : '查看写作留痕，安全回到任意版本' }}</p>
         </div>
       </div>
-      <button class="project-tools-refresh" :disabled="loading" :title="mode === 'history' ? '刷新历史；必要时同步待处理记录' : '刷新'" @click="manualReload">
+      <button class="project-tools-refresh" :class="{ refreshing: loading }" :disabled="loading" :title="mode === 'history' ? '刷新历史；必要时同步待处理记录' : '刷新'" @click="manualReload">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.7-4L4 9" /><path d="M4 4v5h5" /><path d="M4 13a8 8 0 0 0 14.7 4L20 15" /><path d="M20 20v-5h-5" /></svg>
         <span>刷新</span>
       </button>
     </div>
 
     <p v-if="error" class="project-tools-error"><span>!</span>{{ error }}</p>
-    <div v-else-if="loading" class="project-tools-loading" aria-live="polite">
+    <div v-if="loading && !contentReady" class="project-tools-loading" aria-live="polite">
       <span class="loading-line wide" /><span class="loading-line" /><span class="loading-line short" />
       <span class="loading-card" /><span class="loading-card" />
     </div>
 
-    <template v-else-if="mode === 'git'">
+    <template v-else-if="contentReady && mode === 'git'">
       <div class="project-tools-toolbar">
         <label class="project-branch-control">
           <span>当前分支</span>
@@ -300,7 +307,7 @@ const restoreRevision = async (revision: FileRevision) => {
       </details>
     </template>
 
-    <template v-else>
+    <template v-else-if="contentReady">
       <div v-if="selectedPath" class="project-selected-history">
         <span class="history-file-icon">⌁</span>
         <div><span>当前文件</span><code :title="selectedPath">{{ selectedPath }}</code></div>
@@ -404,6 +411,7 @@ const restoreRevision = async (revision: FileRevision) => {
   transition: background var(--transition), border-color var(--transition), color var(--transition), transform var(--transition);
 }
 .project-tools-refresh svg { width: 13px; height: 13px; }
+.project-tools-refresh.refreshing svg { animation: project-tools-spin .8s linear infinite; }
 .project-tools-refresh:hover:not(:disabled) { border-color: var(--color-primary); background: var(--color-primary-soft); color: var(--color-primary); }
 .project-tools-refresh:active:not(:disabled) { transform: scale(.96); }
 .project-tools-refresh:disabled { cursor: wait; opacity: .5; }
@@ -425,6 +433,7 @@ const restoreRevision = async (revision: FileRevision) => {
 .loading-line,.loading-card { display: block; border-radius: 999px; background: color-mix(in srgb, var(--color-text-muted) 16%, transparent); animation: project-tools-pulse 1.1s ease-in-out infinite alternate; }
 .loading-line { width: 70%; height: 9px; }.loading-line.wide { width: 92%; }.loading-line.short { width: 46%; }.loading-card { width: 100%; height: 54px; border-radius: 10px; }.loading-card + .loading-card { animation-delay: .12s; }
 @keyframes project-tools-pulse { from { opacity: .45; } to { opacity: .9; } }
+@keyframes project-tools-spin { to { transform: rotate(360deg); } }
 .project-tools-toolbar { display: grid; gap: 8px; margin-bottom: 12px; }
 .project-branch-control { display: grid; gap: 5px; color: var(--color-text-muted); font-size: 11px; font-weight: 600; }
 .project-branch-control select {
