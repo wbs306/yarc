@@ -18,6 +18,12 @@ const DEFAULT_GITIGNORE = `# LaTeX transient files
 *.bbl
 *.blg
 
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
