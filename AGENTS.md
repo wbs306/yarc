@@ -1,15 +1,30 @@
 # YARC (Yet Another Research Claw) Agent 指南
 
-本文件是仓库级、长期有效的 Agent 操作规范。目标是在不破坏用户数据和未提交工作的前提下，可靠地修改、验证和解释 YARC 代码库。
+本文件仅用于 **YARC 应用的开发与实现**，约束在本代码仓库中工作的开发 Agent。它不管理通用工作区或科研项目内部的研究活动、文件操作及 Agent 行为，也不作为这些工作区的运行时指导。下文涉及工作区的内容仅用于说明产品架构、开发约束及用户数据保护边界。
 
 ## 角色与优先级
 
-- 你是 YARC 项目的工程协作者，重点关注：PDF 阅读/解析、文献库管理、AI 对话、检索、前后端契约、数据库一致性与可维护性。
-- 优先级：用户明确要求 > 当前目录及更深层 `AGENTS.md` > 本文件 > 通用经验。
+- 你是 YARC 代码仓库的工程协作者，重点关注：PDF 阅读/解析、文献库管理、科研项目工作区、AI 对话、检索、前后端契约、数据库一致性与可维护性。
+- 在系统与开发者指令约束下，优先遵循用户明确要求；文件操作遵循其作用域内更具体的 `AGENTS.md`，再参考本文件与通用经验。
 - 如果进入子目录发现更近的 `AGENTS.md`，同时遵循更具体的规则；若冲突，遵循更安全、更具体、与用户意图更一致的规则。
 - 默认使用中文回复；代码、命令、错误信息和 API 字段保持原文。
 
-## 项目概览
+## 术语与作用域：两种“项目”
+
+用户可能把以下两者都简称为“项目”，不要仅凭这个词判断操作目标：
+
+| 明确称呼 | 含义与定位 |
+|----------|------------|
+| **YARC 仓库 / YARC 应用** | 本代码仓库；包含 `apps/`、`packages/`、根 `package.json` 和本文件，负责产品开发、构建与部署。 |
+| **科研项目 / Project / 项目工作区** | 产品内的 `Project` 实体；由 `projectId` 标识，独立目录由 `directoryName` 定位，默认在 `data/projects/<directoryName>/`，拥有自己的 Git 仓库、文件、对话和历史。 |
+| **通用工作区 / 全局文件区** | `/files` 对应的文件区，根目录为 `config.filesDir`（默认 `data/`）；不是 YARC 仓库，也不是某个科研项目。 |
+
+- 除非另注所属目录，本文件中的源码路径和 `pnpm` 命令均相对于 **YARC 仓库根**；科研项目文件接口中的 `path` 则相对于该科研项目根。`projectId`、显示名 `name`、目录名 `directoryName` 不可互换。
+- 在本仓库的开发对话中，“当前项目”默认指 **YARC 仓库**；产品功能中的“项目管理”“项目页面”“Project”指 **科研项目功能**。无法判断是在修改产品实现还是操作实际科研材料时，先澄清任务，不自行切换工作范围。
+- 修改“项目管理功能”不等于操作实际科研项目。开发对话中的“提交/commit”针对本轮 YARC 代码改动，不包含科研项目的独立 Git 仓库。
+- `data/AGENTS.md` 和科研项目根的 `AGENTS.md` 属于应用运行时的独立指导入口，不由本文件定义其操作规范；修改本文件不应传播到这些文件。
+
+## 应用概览
 
 YARC 是以 PDF 阅读为中心的 AI 学术研究工作台。
 
@@ -17,15 +32,16 @@ YARC 是以 PDF 阅读为中心的 AI 学术研究工作台。
 - **后端**：`apps/api`，Hono + TypeScript，统一监听 `PORT`（默认 3000），同时提供前端静态文件和 `/api/*`
 - **数据库**：`packages/db`，Prisma + PostgreSQL/pgvector
 - **共享包**：`packages/shared`，跨端类型和工具
-- **Pi 工具包**：`packages/pi-tools`
-- **用户数据**：`data/`（包含论文 PDF、上传文件、MinerU 解析结果等；进入该目录时还要遵循 `data/AGENTS.md`）
+- **Pi 运行时与工具**：主要在 `apps/api/src/services/` 下的 `pi.service.ts`、`pi-runtime-registry.ts` 及 `apps/api/src/workers/pi-session.worker.ts`；当前没有 `packages/pi-tools`
+- **用户数据**：默认在 `data/`（论文、通用文件、科研项目、历史及 Pi 运行数据）；实际根目录以 `config.ts` 和对应配置为准，不能假定总在仓库内。它们是开发时需要保护的数据，不属于本文件管理的研究工作内容。
 
 ## 关键路径
 
 ```text
 apps/api/src/
 ├── routes/               # API 路由：HTTP 参数、状态码、响应形状
-├── services/             # 业务逻辑
+├── services/             # 业务逻辑，含 project-*、Pi runtime、实时文件服务
+├── workers/              # Pi 会话 Worker
 ├── lib/                  # 中间件、工具、配置
 │   └── config.ts         # 环境变量集中管理
 └── index.ts              # 入口、静态资源、认证跳过列表、路由注册
@@ -43,17 +59,34 @@ packages/db/
 └── src/seed.ts           # 种子数据
 
 packages/shared/          # 跨端共享类型
-packages/pi-tools/         # Pi/YARC 工具相关代码
 
-data/
+data/                     # 默认通用工作区根，不固定为 data/files/
+├── AGENTS.md             # 应用内研究 Agent 的共享指导（不是本文件）
 ├── papers/               # 用户论文、PDF、解析结果、向量/笔记相关数据
-└── files/                # 用户上传/工作区文件
+├── projects/             # 科研项目目录，每项有独立 Git
+├── .project-history/     # 科研项目历史对象存储，不是 Git 历史
+└── .pi/agent/            # 共享 Pi 配置、扩展与会话数据（含敏感配置，禁止读取）
 
 docs/
 └── technical.md          # 技术与产品合并文档
 ```
 
+## 工作区功能的实现边界
+
+以下是修改 YARC 实现时需要维护的约束，不是对工作区使用者或研究 Agent 的操作指令。
+
+- **入口与身份**：项目功能入口为 `apps/api/src/routes/projects.ts`，路径解析统一使用 `apps/api/src/lib/project-path.ts`。创建时生成新目录，不能直接接管已有目录；修改项目显示名不会改目录，更新接口禁止变更 `directoryName` 或绝对路径。
+- **文件隔离**：`/api/files/*` 处理通用文件；`/api/projects/:id/files/*` 处理项目文件。通用文件访问检查会阻止访问项目存储和历史存储；项目文件路径拒绝绝对路径、越界、符号链接和 `.git`。修改代码时保留这些校验，不引入通过通用接口或手拼路径绕过隔离的实现。依据：`apps/api/src/lib/` 下的 `global-files-path.ts`、`project-path.ts`。
+- **前端身份**：项目内文件路径是相对路径。同名文件可能属于不同工作区，列表、最近记录、缓存、选中态必须携带工作区身份（如 `projectId + path`）；点击跨项目文件时先切换路由，再加载目标文件。会话列表也按 `projectId` 区分。
+- **Git 与历史分开**：新建科研项目自动 `git init` 并写入默认 `.gitignore`，不自动首次提交或绑定远程。默认忽略含 Python 虚拟环境/缓存，仅影响新建项目。项目 Git、YARC 仓库 Git、应用的写作历史检查点是三种不同对象，不能在实现中混用；自动保存和历史检查点不等于 Git commit。
+- **生命周期实现**：归档保留数据；永久删除会影响项目目录、所属对话、会话文件和历史记录。修改删除、历史恢复、Git 切分支功能时，检查已有服务对实时编辑缓冲、历史和运行时的协调，保留必要的界面确认与错误处理，不以直接删目录或改 Git 内部文件替代服务流程。
+- **Agent 作用域**：`Conversation.projectId` 决定运行工作目录：全局对话用 `config.dataDir`，项目对话用项目根（见 `apps/api/src/lib/conversation-workspace.ts`）。Pi 的全局 `agentDir` 和会话存储仍共用 `DATA_DIR/.pi/agent/`（默认 `data/.pi/agent/`）；实现项目级设置时，不得误写共享配置。
+- **运行时指导**：当前 Worker 加载 `DATA_DIR/AGENTS.md`（默认 `data/AGENTS.md`），并在存在时追加当前工作区根的 `AGENTS.md`，不继承 YARC 仓库祖先指导。科研项目的 `.pi/SYSTEM.md` / `.pi/APPEND_SYSTEM.md` 是项目级资源。调整资源加载逻辑时保持来源与作用域清晰，不把本文件注入研究会话。
+- **不是完整沙箱**：上述路径限制是应用文件接口的边界，不能推断所有扩展、工具、`bash` 或操作系统访问都被同等隔离。开发时不要宣称已有完整沙箱保障；测试用临时目录/模拟数据，不拿真实科研项目做破坏性验证。
+
 ## 当前 Agent 工具使用总则
+
+以下工具/skill 仅在当前运行环境实际提供时使用；缺失时说明限制或采用已授权的替代方式，不为满足文档而擅自安装。
 
 - **先读后改**：编辑任何文件前，先读取相关文件和调用方/被调用方；不要凭记忆改代码。
 - **证据优先**：用项目文件、命令输出、官方文档或源码作为依据；不要把搜索摘要当成严格事实。
@@ -99,13 +132,13 @@ docs/
 
 - 读取与任务相关的源代码、配置样例、文档、日志片段和命令输出。
 - 小范围非破坏性命令：`git status --short`、定向 `find`/`ls`、构建、类型检查、dry-run。
-- 编辑用户明确要求修改的项目文件，且改动可解释、可回滚。
+- 编辑用户明确要求修改的 YARC 源码/文档，且改动可解释、可回滚；不将科研项目文件纳入默认修改范围。
 - 公共资料搜索、官方文档查询、开源源码查证。
 
 ### 执行前必须询问
 
 - 删除、移动、覆盖、批量重命名非临时文件。
-- 修改 `data/` 中用户论文、PDF、上传文件、笔记、向量、解析结果等用户数据。
+- 修改用户论文、上传文件、笔记、解析结果、科研项目文件或历史数据（含通过配置迁出 `data/` 的目录）；用户未明确授权具体对象和操作时先询问。开发功能的授权不包含批量修补已有项目数据。
 - 修改 `.env`、密钥、认证材料、shell 启动文件、全局配置、共享 agent/skill、系统服务、权限/属主、磁盘或容器基础设施。
 - 安装、卸载、升级依赖、模型、运行时或系统工具。
 - 执行数据库破坏性操作、生产迁移、远程写入、外部 API 写操作或可能产生费用/配额消耗的操作。
@@ -138,12 +171,15 @@ pnpm build
 pnpm --filter @yarc/api build
 pnpm --filter @yarc/web build
 
-# Docker 开发模式
-pnpm docker:dev
-pnpm docker:dev:up
+# API 测试（不包含全部前端测试）
+pnpm test
+
+# Docker 数据库 + 本地开发（容器操作先确认）
+pnpm docker:dev        # 启动数据库，再本地运行 pnpm dev
+pnpm docker:dev:up     # 仅启动数据库
 pnpm docker:logs
 
-# 数据库
+# 数据库（migrate/deploy/seed 前确认目标数据库和写入授权）
 pnpm db:migrate
 pnpm db:deploy
 pnpm db:generate
@@ -187,7 +223,7 @@ pnpm start
 ### 数据库 / Prisma
 
 - Prisma schema：`packages/db/prisma/schema.prisma`。
-- 修改 schema 后：`pnpm db:migrate` → `pnpm db:generate`；不要手写或修改已有迁移。
+- 修改 schema 后，先确认目标为已授权的开发数据库，再运行 `pnpm db:migrate` → `pnpm db:generate`；不要手写或修改已有迁移。构建不需要顺手执行迁移或 seed。
 - 种子逻辑：`packages/db/src/seed.ts`。
 - 不要在未确认的情况下执行会清空、重建或破坏用户数据的数据库操作。
 
@@ -220,6 +256,11 @@ pnpm start
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
+| `DATA_DIR` | 应用数据根目录 | YARC 仓库下 `data/` |
+| `FILES_DIR` | 通用文件区根目录 | `DATA_DIR` |
+| `PAPERS_DIR` | 文献存储目录 | `DATA_DIR/papers` |
+| `PROJECTS_DIR` | 科研项目目录的父目录 | `DATA_DIR/projects` |
+| `PROJECT_HISTORY_DIR` | 科研项目历史对象存储 | `DATA_DIR/.project-history` |
 | `PORT` | 服务端口 | `3000` |
 | `DATABASE_URL` | PostgreSQL 连接 | `postgresql://yarc:yarc@localhost:5432/yarc` |
 | `JWT_SECRET` | JWT 密钥 | `dev-secret` |
@@ -251,8 +292,11 @@ pnpm start
 | `/login` | 登录页 |
 | `/papers` | 重定向到 `/` |
 | `/paper/:id` | 打开指定文献 |
-| `/files` | 主页面的文件管理模式 |
-| `/settings` | 主页面的设置模式 |
+| `/files` | 通用文件工作区 |
+| `/settings` | YARC 全局设置 |
+| `/projects` | 科研项目列表 |
+| `/projects/:id` | 科研项目工作区（文件 / Git / 历史） |
+| `/projects/:id/settings` | 单个科研项目的设置 |
 
 ## 场景化工作流
 
@@ -271,18 +315,25 @@ pnpm start
 3. 不破坏路由、PDF viewer、聊天面板和文件编辑器的协同布局。
 4. 验证：`pnpm --filter @yarc/web build`；必要时用浏览器工具手测。
 
+### 修改科研项目功能
+
+1. 后端在 `apps/api/src/` 下读取 `routes/projects.ts`、相关 `services/project-*.ts`、`lib/project-path.ts`；前端在 `apps/web/src/` 下检查 `pages/PapersPage.vue`、`components/projects/`、`stores/projects.ts` 和对应 API 调用。
+2. 确认工作区身份贯穿文件、对话、实时编辑、缓存与 Git/历史流程；项目根失效时返回错误，不回退到全局工作区操作同名文件。
+3. 修改创建模板或默认值时，明确“仅新建生效”与“迁移已有数据”的区别；后者单独确认范围。
+4. 按改动跑 API/前端构建和相关测试；至少覆盖两个项目中的同名文件、项目与全局切换、越界拒绝、未保存编辑的处理。不要未经授权创建或删除真实项目来测试。
+
 ### 修改数据库 Schema
 
 1. 读取 `schema.prisma`、相关服务和共享类型。
 2. 设计向后兼容的数据变更；涉及数据丢失风险先询问。
-3. 运行 `pnpm db:migrate`，再 `pnpm db:generate`。
+3. 确认目标数据库与写入授权后运行 `pnpm db:migrate`，再 `pnpm db:generate`。
 4. 更新 seed、API、前端类型和验证命令。
 
-### PDF / 文件 / 用户数据
+### 修改 PDF / 文件 / 笔记功能
 
-- PDF 阅读、上传、Range 请求、MinerU 解析结果和笔记逻辑都可能影响用户数据。
-- 读取用户数据要限定到任务需要的具体文件；写入/删除/移动 `data/` 中内容前先确认。
-- 编辑普通工作区文件时遵循 `data/AGENTS.md`；论文笔记写入应使用 YARC 笔记工具（在对应运行环境可用时）。
+- PDF 阅读、上传、Range 请求、MinerU 解析结果和笔记逻辑都可能影响用户数据；修改时检查相关服务及读写链路。
+- 调试中读取用户数据须限定到任务需要的具体文件；开发授权不包含改写、删除或移动真实材料，不因文件处在 YARC 仓库内就视为源码。
+- 验证优先使用测试数据或临时副本，不直接改论文目录、笔记记录或科研项目材料来验证功能。
 
 ### AI / Pi 工具集成
 
@@ -292,15 +343,15 @@ pnpm start
 
 ### Docker / 部署
 
-- 读取 `docker-compose.yml`、`docker-compose.prod.yml` 和相关脚本后再改。
-- `docker compose down`、卷清理、生产 compose 操作都需确认。
+- 当前仓库只有 `docker-compose.yml`，以数据库服务为主；先读取实际存在的 compose 和 `package.json` 脚本，不假定存在 `docker-compose.prod.yml`。
+- 启停容器、`docker compose down`、卷清理、生产部署操作都需确认。`pnpm docker:down` 当前是停止数据库，不是删除卷。
 - 只看日志时可用 `pnpm docker:logs` 或定向 `docker compose logs`；不要打印含密钥的环境。
 
 ### 文档 / AGENTS / Skills
 
 - 修改规则文档时保持可执行、具体、不过度臃肿；删除旧规则前确认是否仍被使用。
 - 审计 AGENTS/Skill 使用 `agent-guidance-audit`，创建/优化 Skill 使用 `skill-creator` 或 `skill-design-optimizer`。
-- 文档中的命令、路径、环境变量要与实际文件交叉验证。
+- 文档中的命令、路径、环境变量要与实际文件交叉验证；架构或工作区边界变化时同步维护本文件。发现 `data/AGENTS.md` 或项目内指导过时，单独说明，不顺手覆盖用户维护的规则。
 
 ## 完成前检查
 
@@ -311,7 +362,7 @@ pnpm start
 | 仅 API / DB 类型 | `pnpm --filter @yarc/api build` |
 | 仅前端 | `pnpm --filter @yarc/web build` |
 | 跨包改动 | `pnpm build` |
-| Prisma schema | `pnpm db:migrate` → `pnpm db:generate` |
+| Prisma schema | 确认目标库与写入授权后 `pnpm db:migrate` → `pnpm db:generate` |
 | Docker 配置 | 读取 compose 语法和相关脚本；需要实际启动前询问 |
 | 文档/AGENTS | 检查路径、命令和 Markdown 结构；通常无需构建 |
 
@@ -324,6 +375,7 @@ pnpm start
 ## 用户改动与 Git
 
 - 默认不要提交、创建分支、rebase、reset、stash 或改写历史，除非用户明确要求。
+- 执行 Git 前确认仓库根（`git rev-parse --show-toplevel` 或明确的 `git -C <目标根>`）及 `status/diff`。YARC 源码提交与科研项目提交互不包含；提交授权也不包含 push。
 - 发现未提交改动时，视为用户工作；不要覆盖或删除。
 - 编辑同一文件前尽量读取当前内容，避免覆盖并发改动。
 - 最终回复中列出修改过的路径，格式：`[FILE:路径]`。
@@ -337,11 +389,12 @@ pnpm start
 - 搜索外部 API 字段不稳定；代码要容错空字段和不同来源字段名。
 - 认证跳过列表遗漏会导致前端公开页面或登录流程异常。
 
-## 构建产物（不要手动修改）
+## 用户数据与构建产物
 
-以下目录/文件是本地或构建产物，不要手动纳入代码改动：
+**用户数据不是可清理的构建缓存**：`data/` 中的论文、科研项目（含其 Git）、历史对象、会话和上传文件，以及配置到其他位置的同类数据，不纳入 YARC 源码修改，也不因构建或测试而清理。写操作须有明确授权。
 
-- `data/` 中的用户文件（除非用户明确要求且已确认风险）
+以下才是本地日志或构建产物，不要手动修改或纳入源码提交：
+
 - `logs/`
 - `dist/`
 - `node_modules/`
