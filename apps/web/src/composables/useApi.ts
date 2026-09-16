@@ -483,6 +483,9 @@ export function useApi() {
     getFileTree: (path?: string) =>
       request<{ files: FileNode[] }>(filesEndpoint(), { params: path ? { path } : {} }),
 
+    getGlobalFileTree: () =>
+      request<{ files: FileNode[] }>('/files'),
+
     getFileContent: (path: string, options?: { refreshLive?: boolean }) =>
       request<{
         content: string

@@ -6,6 +6,8 @@ import { searchService } from './search.service.js'
 import { embeddingService } from './embedding.service.js'
 import { piService } from './pi.service.js'
 import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
+import { resolveConversationWorkspace } from '../lib/conversation-workspace.js'
+import { resolvePublicSharedFileReference } from './global-shared-file.service.js'
 import type { ChatRequest, ChatEvent } from '@yarc/shared'
 
 interface ChatContext {
@@ -282,17 +284,29 @@ export class ChatService {
       }
     }
 
-    // @file references — inject file paths only; Pi can decide whether to read them.
+    // @file references normally point into the current workspace. A selected
+    // ../../ path is validated as a public shared-data reference and then
+    // passed through the same file-reference/toolchain as every other @file.
     const fileRefs: string[] = currentFileRef ? [currentFileRef] : []
     for (const match of userContent.matchAll(/@file\s+([^@\s]+)/gi)) fileRefs.push(match[1])
     const readMatch = userContent.match(/^\s*\/read\s+([^\s]+)/i)
     if (readMatch?.[1]) fileRefs.push(readMatch[1])
-    if (fileRefs.length) {
-      stored.fileRefs = fileRefs
-      for (const path of [...new Set(fileRefs)]) {
-        lines.push(`file: ${path}`)
+
+    const uniqueFileRefs = [...new Set(fileRefs)]
+    const sharedFileRefs = uniqueFileRefs.filter(reference => reference.replace(/\\/g, '/').startsWith('../'))
+    for (const reference of sharedFileRefs) {
+      const normalizedReference = reference.replace(/\\/g, '/')
+      if (!resolvePublicSharedFileReference(normalizedReference)) {
+        throw new Error('跨工作区文件引用必须使用项目根目录到 data 根目录的 ../../ 路径')
       }
     }
+    if (sharedFileRefs.length) {
+      const workspace = await resolveConversationWorkspace(conversationId)
+      if (workspace.kind !== 'project') throw new Error('项目外不能使用 ../../ 跨工作区文件引用')
+    }
+
+    if (uniqueFileRefs.length) stored.fileRefs = uniqueFileRefs
+    for (const path of uniqueFileRefs) lines.push(`file: ${path}`)
 
     // @category references — inject category metadata only. Resolve against known
     // names so text after the mention does not become part of the category name.

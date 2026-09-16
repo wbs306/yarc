@@ -89,7 +89,7 @@ export const CHAT_TOOLS_BLOCK = `# YARC 内置研究 Agent 指南
 - /write <path> 或 /edit <path>：创建或编辑 data 工作区文件；覆盖前确认。
 - /search <query>：搜索论文。
 - /list papers|categories|search-categories：列出论文或分类。
-- @file <path>：先读取该文件，再回答或编辑。
+- @file <path>：先读取该文件，再回答或编辑；项目对话中选择以 ../../ 开头的路径时，表示引用公共 data 文件，按普通文件引用处理，不要尝试用其他越界路径访问。
 - @paper <id>：先查询或读取该论文相关信息，再回答。
 - @category <name>：先列出或匹配分类，再处理。
 - @search-category <name>：先列出或匹配搜索收藏分类，再处理。

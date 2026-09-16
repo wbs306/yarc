@@ -1,7 +1,7 @@
 import { prisma } from '@yarc/db'
 import { randomUUID } from 'node:crypto'
 import { access, mkdir } from 'node:fs/promises'
-import { extname, join, resolve } from 'node:path'
+import { extname, join, relative, resolve } from 'node:path'
 import { searchService } from './search.service.js'
 import { searchCategoryService } from './search-category.service.js'
 import { ieeeXploreService } from './ieee-xplore.service.js'
@@ -15,11 +15,13 @@ import { rankingService } from './ranking.service.js'
 import { chatStreamControl } from '../lib/chat-stream-control.js'
 import { sseHub } from '../lib/sse.js'
 import { config } from '../lib/config.js'
+import { assertGlobalFilesPathSafe } from '../lib/global-files-path.js'
 import { applyAgentWorkspaceEnv, ensureAgentWorkspace, readAgentSettings } from '../lib/agent-workspace.js'
 import { getPiSessionMetadata, savePiSessionMetadata } from '../lib/pi-metadata.js'
 import { DEFAULT_CHAT_SYSTEM_PROMPT } from '../lib/prompts.js'
 import { agentInteractionRegistry } from '../lib/agent-interaction-registry.js'
 import { liveFileService } from './live-file.service.js'
+import { resolvePublicSharedFileReference } from './global-shared-file.service.js'
 import { persistFailedPromptIfMissing } from './pi-failed-turn.js'
 import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/mineru-content-v2.js'
 import { PiRuntimeRegistry } from './pi-runtime-registry.js'
@@ -3103,14 +3105,26 @@ export class PiService {
     if (typeof createEditToolDefinition !== 'function' || typeof createWriteToolDefinition !== 'function') return []
 
     const agentReadBases = new Map<string, string>()
+    const resolveToolPath = async (absolutePath: string) => {
+      const target = resolve(absolutePath)
+      const relativePath = relative(resolve(cwd), target).replace(/\\/g, '/')
+      if (relativePath !== '..' && !relativePath.startsWith('../')) return target
+
+      const sharedPath = resolvePublicSharedFileReference(relativePath)
+      if (!sharedPath) throw new Error('Path is outside the current project workspace')
+      const sharedTarget = resolve(config.filesDir, sharedPath)
+      await assertGlobalFilesPathSafe(config.filesDir, sharedTarget)
+      return sharedTarget
+    }
     const readFile = async (absolutePath: string) => {
-      const buffer = await liveFileService.readAgentFile(absolutePath)
+      const mappedPath = await resolveToolPath(absolutePath)
+      const buffer = await liveFileService.readAgentFile(mappedPath)
       agentReadBases.set(absolutePath, buffer.toString('utf-8'))
       return buffer
     }
     const readOperations = {
       readFile,
-      access: (absolutePath: string) => liveFileService.accessAgentFile(absolutePath),
+      access: async (absolutePath: string) => liveFileService.accessAgentFile(await resolveToolPath(absolutePath)),
       detectImageMimeType: async (absolutePath: string) => {
         const mimeTypes: Record<string, string> = {
           '.jpg': 'image/jpeg',
@@ -3125,19 +3139,23 @@ export class PiService {
     }
     const editOperations = {
       ...readOperations,
-      writeFile: (absolutePath: string, content: string) => {
+      writeFile: async (absolutePath: string, content: string) => {
+        const mappedPath = await resolveToolPath(absolutePath)
         const baseContent = agentReadBases.get(absolutePath)
         agentReadBases.delete(absolutePath)
-        return liveFileService.writeAgentFile(absolutePath, content, baseContent)
+        return liveFileService.writeAgentFile(mappedPath, content, baseContent)
       },
     }
     const writeOperations = {
-      writeFile: (absolutePath: string, content: string) => {
+      writeFile: async (absolutePath: string, content: string) => {
+        const mappedPath = await resolveToolPath(absolutePath)
         const baseContent = agentReadBases.get(absolutePath)
         agentReadBases.delete(absolutePath)
-        return liveFileService.writeAgentFile(absolutePath, content, baseContent)
+        return liveFileService.writeAgentFile(mappedPath, content, baseContent)
       },
-      mkdir: (directory: string) => mkdir(directory, { recursive: true }).then(() => undefined),
+      mkdir: async (directory: string) => {
+        await mkdir(await resolveToolPath(directory), { recursive: true })
+      },
     }
 
     const definitions: any[] = [

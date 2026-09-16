@@ -11,6 +11,7 @@ import AgentInteractionHost from '@/components/agent/AgentInteractionHost.vue'
 import ExtensionTuiSurface from '@/components/agent/ExtensionTuiSurface.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import type { CurrentChatResource } from '@yarc/shared'
+import { useRoute } from 'vue-router'
 
 const props = defineProps<{
   currentResource?: CurrentChatResource | null
@@ -23,8 +24,14 @@ const emit = defineEmits<{
   openFile: [path: string]
 }>()
 const chatStore = useChatStore()
+const route = useRoute()
 const createConversation = () => props.createConversation ? props.createConversation() : chatStore.createConversation()
 const theme = useThemeStore()
+const projectRouteScope = computed(() => {
+  const id = typeof route.params.id === 'string' ? route.params.id : ''
+  return id && (route.name === 'project-workspace' || route.name === 'project-settings') ? `project:${id}` : 'global'
+})
+const isProjectWorkspaceRoute = computed(() => route.name === 'project-workspace' && typeof route.params.id === 'string')
 const paperStore = usePaperStore()
 const currentModelReasoning = computed(() => chatStore.models.find(m => m.id === chatStore.currentModel)?.reasoning)
 const currentModelLevels = computed(() => chatStore.models.find(m => m.id === chatStore.currentModel)?.thinkingLevels)
@@ -181,16 +188,20 @@ const selectPaper = (paper: { id: string; title: string }) => {
   })
 }
 
-const fileTreeCache = ref<Array<{ path: string; type: 'file' | 'directory' }>>([])
+const fileTreeCache = ref<Array<{ path: string; type: 'file' | 'directory'; editable?: boolean }>>([])
+const fileTreeCacheScope = ref('')
+const fileTreeLoaded = ref(false)
+const globalFileTreeCache = ref<Array<{ path: string; type: 'file' | 'directory'; editable?: boolean }>>([])
+const globalFileTreeLoaded = ref(false)
 const categoriesCache = ref<Array<{ id: string; name: string }>>([])
 const dismissedSuggestionText = ref('')
 
-const flattenFileTree = (nodes: any[]): Array<{ path: string; type: 'file' | 'directory' }> => {
-  const items: Array<{ path: string; type: 'file' | 'directory' }> = []
+const flattenFileTree = (nodes: any[]): Array<{ path: string; type: 'file' | 'directory'; editable?: boolean }> => {
+  const items: Array<{ path: string; type: 'file' | 'directory'; editable?: boolean }> = []
   const walk = (list: any[]) => {
     for (const node of list || []) {
       if (!node?.path || (node.type !== 'file' && node.type !== 'directory')) continue
-      items.push({ path: node.path, type: node.type })
+      items.push({ path: node.path, type: node.type, editable: node.editable })
       if (node.type === 'directory' && Array.isArray(node.children)) walk(node.children)
     }
   }
@@ -199,12 +210,55 @@ const flattenFileTree = (nodes: any[]): Array<{ path: string; type: 'file' | 'di
 }
 
 const loadFileTree = async () => {
-  if (fileTreeCache.value.length) return
+  if (fileTreeLoaded.value && fileTreeCacheScope.value === projectRouteScope.value) return
   try {
     const api = (await import('@/composables/useApi')).useApi()
     const res = await api.getFileTree()
     fileTreeCache.value = flattenFileTree(res.files || [])
+    fileTreeCacheScope.value = projectRouteScope.value
+    fileTreeLoaded.value = true
   } catch {}
+}
+
+const isPublicGlobalFilePath = (path: string) => {
+  const segments = path.split('/').filter(Boolean)
+  if (!segments.length || ['papers', 'projects', '.pi', '.project-history'].includes(segments[0])) return false
+  return segments.every(segment => !segment.startsWith('.') || segment === '.env.example')
+}
+
+const loadGlobalFileTree = async () => {
+  if (globalFileTreeLoaded.value) return
+  try {
+    const api = (await import('@/composables/useApi')).useApi()
+    const res = await api.getGlobalFileTree()
+    globalFileTreeCache.value = flattenFileTree(res.files || [])
+      .filter(item => item.type === 'file' && isPublicGlobalFilePath(item.path))
+    globalFileTreeLoaded.value = true
+  } catch {}
+}
+
+const diversifyGlobalFileSuggestions = <T extends { path: string }>(items: T[]) => {
+  const groups = new Map<string, T[]>()
+  for (const item of items) {
+    const root = item.path.split('/')[0] || item.path
+    const group = groups.get(root) || []
+    group.push(item)
+    groups.set(root, group)
+  }
+
+  const result: T[] = []
+  let index = 0
+  while (true) {
+    let added = false
+    for (const group of groups.values()) {
+      const item = group[index]
+      if (!item) continue
+      result.push(item)
+      added = true
+    }
+    if (!added) return result
+    index += 1
+  }
 }
 
 const loadCategories = async () => {
@@ -266,16 +320,28 @@ const suggestions = computed<SuggestionItem[]>(() => {
     const matchEnd = matchStart + atCommandMatch[0].length
     
     if (command === 'file') {
-      return fileTreeCache.value
+      const projectItems = fileTreeCache.value.map(item => ({
+        path: item.path,
+        type: item.type,
+        hint: item.type === 'directory' ? '项目目录' : '项目文件',
+      }))
+      const sharedItems = isProjectWorkspaceRoute.value && partial.startsWith('..')
+        ? diversifyGlobalFileSuggestions(globalFileTreeCache.value).map(item => ({
+            path: `../../${item.path}`,
+            type: 'file' as const,
+            hint: 'data 公共文件',
+          }))
+        : []
+      return [...projectItems, ...sharedItems]
         .filter(item => item.path.toLowerCase().includes(partial))
         .slice(0, 8)
-        .map(item => ({ 
-          label: item.path, 
-          insert: `@file ${item.path} `, 
-          hint: item.type === 'directory' ? '目录' : '文件', 
+        .map(item => ({
+          label: item.path,
+          insert: `@file ${item.path} `,
+          hint: item.hint,
           type: 'file' as const,
           matchStart,
-          matchEnd
+          matchEnd,
         }))
     }
     
@@ -315,7 +381,7 @@ const suggestions = computed<SuggestionItem[]>(() => {
   }
 
   // Standalone @ at end of input — show command options
-  const atMatch = text.match(/@(\w*)$/)
+  const atMatch = text.match(/@([\w-]*)$/)
   if (atMatch) {
     const prefix = atMatch[1].toLowerCase()
     const matchStart = atMatch.index!
@@ -406,13 +472,25 @@ watch(inputText, (val) => {
   if (dismissedSuggestionText.value && val !== dismissedSuggestionText.value) dismissedSuggestionText.value = ''
   refreshExtensionAutocomplete(val)
   if (val.includes('@file')) loadFileTree()
+  if (isProjectWorkspaceRoute.value && /@file\s+\.\./i.test(val)) loadGlobalFileTree()
   if (val.includes('@category')) loadCategories()
   if (val.includes('@paper') && !paperStore.papers.length) paperStore.fetchPapers()
+})
+
+watch(projectRouteScope, () => {
+  fileTreeCache.value = []
+  fileTreeCacheScope.value = ''
+  fileTreeLoaded.value = false
+  if (inputText.value.includes('@file')) void loadFileTree()
 })
 
 // Clear file tree cache when files change
 const onFilesChanged = () => {
   fileTreeCache.value = []
+  fileTreeCacheScope.value = ''
+  fileTreeLoaded.value = false
+  globalFileTreeCache.value = []
+  globalFileTreeLoaded.value = false
 }
 
 onMounted(() => {
