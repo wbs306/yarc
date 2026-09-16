@@ -11,6 +11,15 @@ import { requestJson } from '@/lib/api-request'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
 import { normalizeWorkspaceFileReferencePath } from '@/lib/workspace-file-reference'
+import {
+  WORKSPACE_RECENT_FILES_KEY,
+  WORKSPACE_RECENT_FILES_LIMIT,
+  parseRecentWorkspaceFiles,
+  rememberWorkspaceFile,
+  removeRecentWorkspaceFiles,
+  workspaceFileKey,
+  type WorkspaceRecentFile,
+} from '@/lib/workspace-recent-files'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
 import { useProjectsStore } from '@/stores/projects'
@@ -250,11 +259,9 @@ const isOfficeFile = (node?: FileNode | null) => node?.type === 'file' && (!!nod
 const isLegacyOfficeFile = (node?: FileNode | null) => node?.type === 'file' && (!!node.legacyOffice || LEGACY_OFFICE_EXTENSIONS.has(node.extension || ''))
 const isWorkspaceFile = (node?: FileNode | null): node is FileNode => node?.type === 'file'
 
-const loadRecentWorkspaceFiles = (): FileNode[] => {
+const loadRecentWorkspaceFiles = (): WorkspaceRecentFile[] => {
   try {
-    const raw = localStorage.getItem('yarc_recent_workspace_files')
-    const parsed = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? parsed.filter(isWorkspaceFile).slice(0, 6) : []
+    return parseRecentWorkspaceFiles(localStorage.getItem(WORKSPACE_RECENT_FILES_KEY))
   } catch {
     return []
   }
@@ -265,7 +272,20 @@ let workspaceFilesRefreshTimer: number | null = null
 let workspaceFilesStale = false
 let workspaceLoadGeneration = 0
 const selectedWorkspaceFile = ref<FileNode | null>(null)
-const recentWorkspaceFiles = ref<FileNode[]>(loadRecentWorkspaceFiles())
+const recentWorkspaceFiles = ref<WorkspaceRecentFile[]>(loadRecentWorkspaceFiles())
+const currentWorkspaceProjectId = computed(() => projectWorkspaceId.value || null)
+const isCurrentWorkspaceFile = (file: WorkspaceRecentFile) => file.projectId === currentWorkspaceProjectId.value
+const currentScopeRecentFiles = computed(() => recentWorkspaceFiles.value.filter(isCurrentWorkspaceFile))
+const workspaceFileProjectName = (file: WorkspaceRecentFile) => {
+  if (!file.projectId) return '通用文件'
+  return (projectsStore.currentProject?.id === file.projectId ? projectsStore.currentProject.name : null)
+    || projectsStore.projects.find(project => project.id === file.projectId)?.name
+    || file.projectName || '科研项目'
+}
+const asWorkspaceRecentFile = (file: FileNode): WorkspaceRecentFile => {
+  const entry = { ...file, projectId: currentWorkspaceProjectId.value, projectName: null }
+  return { ...entry, projectName: entry.projectId ? workspaceFileProjectName(entry) : null }
+}
 const openWorkspaceTabs = ref<WorkspaceFileTab[]>([])
 const filesLoading = ref(false)
 const filesError = ref('')
@@ -814,14 +834,27 @@ watch(() => currentLiveClient.value?.modified.value, (modified) => {
   if (currentLiveClient.value && modified) workspaceModified.value = modified
 })
 const persistRecentWorkspaceFiles = () => {
-  const items = recentWorkspaceFiles.value.filter(isWorkspaceFile).map(({ children, ...node }) => node)
-  localStorage.setItem('yarc_recent_workspace_files', JSON.stringify(items.slice(0, 6)))
+  const items = recentWorkspaceFiles.value.map(({ children, ...node }) => ({
+    ...node,
+    projectName: node.projectId ? workspaceFileProjectName(node) : null,
+  }))
+  try {
+    localStorage.setItem(WORKSPACE_RECENT_FILES_KEY, JSON.stringify(items.slice(0, WORKSPACE_RECENT_FILES_LIMIT)))
+  } catch {
+    // Keep the in-memory switcher usable when browser storage is unavailable.
+  }
 }
+
+watch(() => projectsStore.currentProject, (project) => {
+  if (!project) return
+  recentWorkspaceFiles.value = recentWorkspaceFiles.value.map(file =>
+    file.projectId === project.id ? { ...file, projectName: project.name } : file)
+  persistRecentWorkspaceFiles()
+})
 
 const touchWorkspaceFile = (node: FileNode) => {
   if (!isWorkspaceFile(node)) return
-  const item = { ...node, children: undefined }
-  recentWorkspaceFiles.value = [item, ...recentWorkspaceFiles.value.filter((file) => file.path !== node.path)].slice(0, 6)
+  recentWorkspaceFiles.value = rememberWorkspaceFile(recentWorkspaceFiles.value, asWorkspaceRecentFile(node))
   persistRecentWorkspaceFiles()
 }
 
@@ -829,7 +862,7 @@ const removeRecentWorkspacePath = (path: string) => {
   for (const liveClient of Array.from(liveFiles.clients.values())) {
     if (liveClient.path === path || liveClient.path.startsWith(`${path}/`)) liveClient.close()
   }
-  recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter((file) => file.path !== path && !file.path.startsWith(`${path}/`))
+  recentWorkspaceFiles.value = removeRecentWorkspaceFiles(recentWorkspaceFiles.value, currentWorkspaceProjectId.value, path)
   openWorkspaceTabs.value = openWorkspaceTabs.value.filter((tab) => tab.file.path !== path && !tab.file.path.startsWith(`${path}/`))
   persistRecentWorkspaceFiles()
 }
@@ -870,15 +903,17 @@ const restoreWorkspaceTab = (tab: WorkspaceFileTab, node: FileNode) => {
 }
 
 const workspaceSwitcherItems = computed(() => {
-  const byPath = new Map<string, FileNode>()
-  if (isWorkspaceFile(selectedWorkspaceFile.value)) byPath.set(selectedWorkspaceFile.value.path, selectedWorkspaceFile.value)
+  const byKey = new Map<string, WorkspaceRecentFile>()
+  const add = (file: WorkspaceRecentFile) => {
+    const key = workspaceFileKey(file)
+    if (!byKey.has(key)) byKey.set(key, file)
+  }
+  if (isWorkspaceFile(selectedWorkspaceFile.value)) add(asWorkspaceRecentFile(selectedWorkspaceFile.value))
+  for (const file of recentWorkspaceFiles.value) add(file)
   for (const tab of [...openWorkspaceTabs.value].sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)) {
-    if (isWorkspaceFile(tab.file)) byPath.set(tab.file.path, tab.file)
+    if (isWorkspaceFile(tab.file)) add(asWorkspaceRecentFile(tab.file))
   }
-  for (const file of recentWorkspaceFiles.value) {
-    if (isWorkspaceFile(file)) byPath.set(file.path, file)
-  }
-  return Array.from(byPath.values()).slice(0, 8)
+  return Array.from(byKey.values()).slice(0, WORKSPACE_RECENT_FILES_LIMIT)
 })
 
 // File context menu
@@ -1060,6 +1095,7 @@ const findDeepestWorkspaceDirectory = (nodes: FileNode[], targetPath: string): F
 }
 
 const ensureWorkspaceNodeLoaded = async (path: string): Promise<FileNode | null> => {
+  const generation = workspaceLoadGeneration
   let node = findWorkspaceNode(workspaceFiles.value, path)
   let lastHydratedPath = ''
 
@@ -1068,6 +1104,7 @@ const ensureWorkspaceNodeLoaded = async (path: string): Promise<FileNode | null>
     if (!directory || directory.path === lastHydratedPath) break
 
     const response = await api.getFileTree(directory.path)
+    if (generation !== workspaceLoadGeneration) return null
     workspaceFiles.value = replaceWorkspaceDirectoryChildren(workspaceFiles.value, directory.path, response.files as FileNode[])
     workspaceFilesStale = false
     workspaceTreeFromCache.value = false
@@ -1129,7 +1166,7 @@ const resetWorkspaceScope = () => {
   workspaceTreeFromCache.value = false
   selectedWorkspaceFile.value = null
   openWorkspaceTabs.value = []
-  recentWorkspaceFiles.value = []
+  // Recent entries carry their own scope and remain available across projects.
   filesError.value = ''
   filesLoading.value = false
   workspaceContentLoading.value = false
@@ -1713,7 +1750,7 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
   const tab = openWorkspaceTabs.value.find((item) => item.file.path === path)
   const file = (isCurrent ? selectedWorkspaceFile.value : null)
     || tab?.file
-    || recentWorkspaceFiles.value.find((item) => item.path === path)
+    || currentScopeRecentFiles.value.find((item) => item.path === path)
   const live = liveFiles.get(path)
   const isDirty = live ? (live.dirty.value || live.saving.value || live.conflict.value) : (isCurrent ? workspaceDirty.value : !!tab && tab.content !== tab.savedContent)
 
@@ -1768,7 +1805,7 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
 
   await liveFiles.release(path)
 
-  recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter((item) => item.path !== path)
+  recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter((item) => !isCurrentWorkspaceFile(item) || item.path !== path)
   openWorkspaceTabs.value = openWorkspaceTabs.value.filter((item) => item.file.path !== path)
   persistRecentWorkspaceFiles()
 
@@ -2236,6 +2273,10 @@ const closeProjectHistoryCompare = () => {
 
 const workSwitcherLabel = computed(() => {
   if (hasPaper.value) return activePaper.value?.title || `${readerTabs.value.length} 篇已打开`
+  if (isProjectWorkspace.value) {
+    const name = projectsStore.currentProject?.id === projectWorkspaceId.value ? projectsStore.currentProject.name : '科研项目'
+    return selectedWorkspaceFile.value ? `${name} / ${selectedWorkspaceFile.value.name}` : name
+  }
   if (isProjectMode.value) return '项目工作区'
   if (sidebarMode.value === 'files' && selectedWorkspaceFile.value) return `${workspaceDirty.value ? '• ' : ''}${selectedWorkspaceFile.value.name}`
   if (readerTabs.value.length) return `${readerTabs.value.length} 篇已打开`
@@ -2248,13 +2289,58 @@ const workSwitcherTitle = computed(() => {
   return '切换工作项'
 })
 
-const switchWorkspaceTab = async (path: string) => {
+const switchingWorkspaceTab = ref(false)
+const isActiveWorkspaceEntry = (file: WorkspaceRecentFile) =>
+  !hasPaper.value && sidebarMode.value === 'files' && isCurrentWorkspaceFile(file) && file.path === selectedWorkspacePath.value
+
+const closeWorkspaceEntry = async (event: Event, file: WorkspaceRecentFile) => {
+  if (switchingWorkspaceTab.value) return
+  if (isCurrentWorkspaceFile(file)) return closeWorkspaceTab(event, file.path)
+  recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter(item => workspaceFileKey(item) !== workspaceFileKey(file))
+  persistRecentWorkspaceFiles()
+}
+
+const switchWorkspaceTab = async (file: WorkspaceRecentFile) => {
+  if (switchingWorkspaceTab.value) return
+  switchingWorkspaceTab.value = true
   tabsMenuOpen.value = false
-  if (!workspaceFiles.value.length) await loadWorkspaceFiles()
-  const node = findWorkspaceNode(workspaceFiles.value, path) || recentWorkspaceFiles.value.find((file) => file.path === path)
-  if (node && selectedWorkspacePath.value !== path) await selectWorkspaceFile(node)
-  if (!node) filesError.value = `文件不存在或已被移动：${path}`
-  setSidebarMode('files')
+  try {
+    const scopeChanged = !isCurrentWorkspaceFile(file)
+    if (selectedWorkspaceFile.value && !(await prepareWorkspaceSwitch())) return
+    if (scopeChanged) {
+      // Flush before the route watcher releases the old scope's live clients.
+      for (const client of liveFiles.clients.values()) {
+        await client.flush()
+        if (client.conflict.value || client.dirty.value) {
+          filesError.value = '请先保存或处理当前工作区的文件冲突，再切换工作区'
+          return
+        }
+      }
+    }
+    const target = file.projectId
+      ? { name: 'project-workspace', params: { id: file.projectId } }
+      : { path: '/files' }
+    const targetPath = router.resolve(target).path
+    if (route.path !== targetPath) await router.push(target)
+    await nextTick()
+    if (route.path !== targetPath) return
+    sidebarMode.value = 'files'
+    projectPanel.value = 'files'
+    if (scopeChanged || !workspaceFiles.value.length || workspaceFilesStale) await loadWorkspaceFiles()
+    if (route.path !== targetPath) return
+    if (filesError.value) return
+    const node = await ensureWorkspaceNodeLoaded(file.path)
+    if (route.path !== targetPath) return
+    if (node?.type === 'file') {
+      if (selectedWorkspacePath.value !== node.path) await selectWorkspaceFile(node)
+    } else {
+      filesError.value = `文件不存在或已被移动：${workspaceFileProjectName(file)} / ${file.path}`
+    }
+  } catch (err) {
+    filesError.value = (err as Error).message || '切换工作区文件失败'
+  } finally {
+    switchingWorkspaceTab.value = false
+  }
 }
 const uncategorizedCount = computed(() => paperStore.papers.filter((paper) => !paper.categoryId).length)
 const categoryNameById = computed(() => new Map(categories.value.map((cat) => [cat.id, cat.name])))
@@ -3726,19 +3812,21 @@ const showSearchPaperPopup = (paper: any) => {
                 <div class="tabs-menu-section" :class="{ separated: readerTabs.length }">文件</div>
                 <button
                   v-for="file in workspaceSwitcherItems"
-                  :key="file.path"
+                  :key="workspaceFileKey(file)"
                   type="button"
                   class="tabs-menu-item"
-                  :class="{ active: !hasPaper && sidebarMode === 'files' && file.path === selectedWorkspacePath }"
+                  :class="{ active: isActiveWorkspaceEntry(file) }"
+                  :disabled="switchingWorkspaceTab"
                   role="option"
-                  :aria-selected="!hasPaper && sidebarMode === 'files' && file.path === selectedWorkspacePath"
-                  @click="switchWorkspaceTab(file.path)"
+                  :aria-selected="isActiveWorkspaceEntry(file)"
+                  @click="switchWorkspaceTab(file)"
                 >
-                  <span v-if="!hasPaper && sidebarMode === 'files' && file.path === selectedWorkspacePath" class="tabs-menu-dot" />
-                  <span class="tabs-menu-file-icon">{{ file.type === 'directory' ? '📂' : '📄' }}</span>
-                  <span class="tabs-menu-item-title" :title="file.path">{{ file.name }}</span>
-                  <span v-if="file.path === selectedWorkspacePath && workspaceDirty" class="tabs-menu-dirty" title="有未保存修改" />
-                  <span class="tabs-menu-item-close" title="关闭文件" @click.stop="closeWorkspaceTab($event, file.path)">×</span>
+                  <span v-if="isActiveWorkspaceEntry(file)" class="tabs-menu-dot" />
+                  <span class="tabs-menu-file-icon">📄</span>
+                  <span class="tabs-menu-item-title" :title="`${workspaceFileProjectName(file)} / ${file.path}`">{{ file.name }}</span>
+                  <span class="tabs-menu-project-name" :title="workspaceFileProjectName(file)">{{ workspaceFileProjectName(file) }}</span>
+                  <span v-if="isActiveWorkspaceEntry(file) && workspaceDirty" class="tabs-menu-dirty" title="有未保存修改" />
+                  <span class="tabs-menu-item-close" title="关闭文件" @click.stop="closeWorkspaceEntry($event, file)">×</span>
                 </button>
               </template>
             </div>
@@ -5411,6 +5499,15 @@ const showSearchPaperPopup = (paper: any) => {
   flex-shrink: 0;
   font-size: 13px;
   line-height: 1;
+}
+.tabs-menu-project-name {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  font-size: 11px;
 }
 .tabs-menu-dirty {
   width: 7px;
