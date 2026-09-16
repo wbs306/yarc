@@ -199,6 +199,119 @@ export default function (pi) {
   }
 })
 
+test('Runtime Worker awaits /acm once before every context_compact call, including after reload', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'yarc-pi-runtime-auto-acm-'))
+  const agentDir = join(root, 'agent')
+  const sessionDir = join(agentDir, 'sessions')
+  const extensionsDir = join(agentDir, 'extensions')
+  await mkdir(sessionDir, { recursive: true })
+  await mkdir(extensionsDir, { recursive: true })
+  // In-memory provider: exercise the real tool hooks without a model API call.
+  await writeFile(join(extensionsDir, 'auto-acm.js'), `
+let enables = 0
+let compacts = 0
+let rejectEnable = false
+export default function (pi) {
+  pi.registerCommand('acm', {
+    handler: async (_args, ctx) => {
+      await new Promise(resolve => setTimeout(resolve, 10))
+      if (rejectEnable) throw new Error('mock-acm-enable-failed')
+      enables++
+      ctx.ui.notify('automatic-enable-notice', 'info')
+    },
+  })
+  pi.registerCommand('reject-acm', { handler: async () => { rejectEnable = true } })
+  pi.registerCommand('acm-counts', {
+    handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify({ enables, compacts }), 'info'),
+  })
+  for (const name of ['context_checkpoint', 'context_compact']) {
+    pi.registerTool({
+      name, label: name, description: name,
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        if (name === 'context_compact') {
+          compacts++
+          if (enables !== compacts) throw new Error('ACM was not enabled exactly once before compaction')
+        }
+        return { content: [{ type: 'text', text: name + ':' + enables }], details: {} }
+      },
+    })
+  }
+  pi.registerProvider('acm-mock', {
+    api: 'acm-mock-api', apiKey: 'test-only', baseUrl: 'http://127.0.0.1:1',
+    models: [{ id: 'mock', name: 'Mock', reasoning: false, input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 10000, maxTokens: 1000 }],
+    streamSimple: (model, context) => {
+      const start = context.messages.findLastIndex(message => message.role === 'user')
+      const turn = context.messages.slice(start + 1).filter(message => message.role === 'toolResult').length
+      const names = ['context_checkpoint', 'context_compact', 'context_compact']
+      const message = {
+        role: 'assistant', api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(),
+        content: turn < names.length
+          ? [{ type: 'toolCall', id: 'mock-' + start + '-' + turn, name: names[turn], arguments: {} }]
+          : [{ type: 'text', text: 'done' }],
+        stopReason: turn < names.length ? 'toolUse' : 'stop',
+        usage: { input: 1, output: 1, totalTokens: 2, cacheRead: 0, cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      }
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'start', partial: message }
+          yield { type: 'done', reason: message.stopReason, message }
+        },
+        result: async () => message,
+      }
+    },
+  })
+}
+`, 'utf8')
+
+  const worker = new Worker(new URL('../workers/pi-session.worker.ts', import.meta.url), {
+    execArgv: ['--import', createRequire(import.meta.url).resolve('tsx')],
+  })
+  const messages: any[] = []
+  worker.on('message', message => messages.push(message))
+  const prompt = async (runId: string, text: string) => {
+    const completed = waitForMessage(worker, message =>
+      (message.type === 'run_complete' || message.type === 'run_error') && message.runId === runId)
+    worker.postMessage({ type: 'prompt', payload: { runId, prompt: text, assistantMessageId: 'assistant-' + runId } })
+    assert.equal((await completed).type, 'run_complete')
+    return messages.filter(message => message.runId === runId && message.type === 'event').map(message => message.event)
+  }
+  try {
+    worker.postMessage({
+      type: 'init',
+      payload: { key: { conversationId: 'auto-acm', branchId: 'main' }, generation: 1,
+        cwd: root, agentDir, sessionDir, tools: [], model: 'acm-mock/mock', thinkingLevel: 'off' },
+    })
+    await waitForMessage(worker, message => message.type === 'ready')
+    for (const generation of [1, 2]) {
+      if (generation === 2) {
+        worker.postMessage({ type: 'reload', generation, reason: 'test' })
+        await waitForMessage(worker, message => message.type === 'ready' && message.generation === generation)
+      }
+      const events = await prompt('compact-' + generation, 'Exercise the context tools')
+      assert.deepEqual(events.filter(event => event.type === 'tool_result').map(event => event.result), [
+        'context_checkpoint:0', 'context_compact:1', 'context_compact:2',
+      ])
+      assert.ok(!events.some(event => event.type === 'error'))
+      assert.ok(!events.some(event => event.message === 'automatic-enable-notice'))
+      const counts = await prompt('counts-' + generation, '/acm-counts')
+      assert.ok(counts.some(event => event.message === JSON.stringify({ enables: 2, compacts: 2 })))
+    }
+    await prompt('reject-enable', '/reject-acm')
+    const failed = await prompt('failed-compact', 'Exercise the context tools again')
+    assert.deepEqual(failed.filter(event => event.type === 'tool_result').map(event => event.result), [
+      'context_checkpoint:2', 'mock-acm-enable-failed', 'mock-acm-enable-failed',
+    ])
+    const counts = await prompt('failed-counts', '/acm-counts')
+    assert.ok(counts.some(event => event.message === JSON.stringify({ enables: 2, compacts: 2 })))
+  } finally {
+    await worker.terminate()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('Runtime Worker does not persist per-conversation model selection as a global default', async () => {
   const root = await mkdtemp(join(tmpdir(), 'yarc-pi-runtime-settings-'))
   const agentDir = join(root, 'agent')

@@ -663,9 +663,9 @@ const restoreAcmContext = async () => {
   })
 
   try {
-    // Re-run only the idempotent ACM enable command after the host has rebuilt
-    // the extension runner. The quiet UI avoids a duplicate notification while
-    // keeping the newly-created CommandCtx bound to the current session.
+    // Run the idempotent /acm command with a fresh context before compaction or
+    // after rebuilding the extension runner. Suppress only its enable notice;
+    // later compaction notifications still use the live UI.
     await command.handler('', context)
   } finally {
     suppressNotification = false
@@ -1176,6 +1176,18 @@ const initialize = async (payload: RuntimeInitPayload) => {
       cwd,
       agentDir,
       resourceLoaderOptions: {
+        extensionFactories: [{
+          name: 'yarc-context-compact-acm',
+          hidden: true,
+          factory: (pi) => {
+            pi.on('tool_call', async (event) => {
+              if (event.toolName !== 'context_compact') return
+              // tool_call is awaited before execution. Enable for every call,
+              // without prompting the model or tracking an automatic ACM flag.
+              await restoreAcmContext()
+            })
+          },
+        }],
         agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => {
           const projectAgentsPath = resolve(cwd, 'AGENTS.md')
           const projectAgentsFile = base.agentsFiles.find(file => resolve(file.path) === projectAgentsPath)
