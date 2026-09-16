@@ -32,6 +32,7 @@ const currentModelLevels = computed(() => chatStore.models.find(m => m.id === ch
 const inputText = ref('')
 const editingMessageId = ref('')
 const container = ref<HTMLDivElement>()
+const messageList = ref<HTMLDivElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
 const modelSelectorRef = ref<{ openDropdown: () => void }>()
 const customEditorSurface = computed(() => Object.values(chatStore.tuiSurfaces).find(surface => surface.kind === 'editor' && !surface.overlay) || null)
@@ -510,29 +511,61 @@ const switchToBranch = (messageId: string, direction: number) => {
 // ── Scroll ─────────────────────────────────────────────────────────────────
 
 let scrollRaf = 0
+let lastScrollTop = 0
+let lastScrollHeight = 0
+let messageResizeObserver: ResizeObserver | undefined
+const isNearBottom = () => {
+  const el = container.value
+  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 24
+}
+const pauseAutoScroll = () => {
+  autoScroll.value = false
+  cancelAnimationFrame(scrollRaf)
+}
 const scheduleScroll = () => {
   cancelAnimationFrame(scrollRaf)
-  scrollRaf = requestAnimationFrame(() => nextTick(maybeScroll))
-}
-const isNearBottom = () => {
-  if (!container.value) return true
-  return container.value.scrollHeight - container.value.scrollTop - container.value.clientHeight < 8
-}
-const maybeScroll = () => {
-  if (autoScroll.value && container.value) {
-    requestAnimationFrame(() => { container.value!.scrollTop = container.value!.scrollHeight })
-  }
+  scrollRaf = requestAnimationFrame(() => {
+    // Recheck at execution time: the user may have scrolled up since scheduling.
+    const el = container.value
+    if (!el || !autoScroll.value) return
+    el.scrollTop = el.scrollHeight
+    lastScrollTop = el.scrollTop
+    lastScrollHeight = el.scrollHeight
+  })
 }
 const scrollBottom = () => {
   autoScroll.value = true
-  if (container.value) requestAnimationFrame(() => { container.value!.scrollTop = container.value!.scrollHeight })
+  scheduleScroll()
 }
-const onScroll = () => { autoScroll.value = isNearBottom() }
+const onScroll = () => {
+  const el = container.value
+  if (!el) return
+  if (isNearBottom()) autoScroll.value = true
+  else if (el.scrollTop < lastScrollTop - 1 && el.scrollHeight === lastScrollHeight) pauseAutoScroll()
+  // A resize/compaction is not a user scroll. Preserve the follow preference.
+  lastScrollTop = el.scrollTop
+  lastScrollHeight = el.scrollHeight
+}
+const onMessagesWheel = (event: WheelEvent) => {
+  if (event.deltaY < 0) pauseAutoScroll()
+}
+const onMessagesKeydown = (event: KeyboardEvent) => {
+  if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) pauseAutoScroll()
+}
+onMounted(() => {
+  messageResizeObserver = new ResizeObserver(() => scheduleScroll())
+  if (messageList.value) messageResizeObserver.observe(messageList.value)
+  if (container.value) messageResizeObserver.observe(container.value)
+})
+onBeforeUnmount(() => {
+  cancelAnimationFrame(scrollRaf)
+  messageResizeObserver?.disconnect()
+})
 const streamLayoutVersion = computed(() => (chatStore.messages || []).map((msg: any) => [
   msg.id,
   msg.content?.length || 0,
   Array.isArray(msg.metadata?.segments) ? msg.metadata.segments.length : 0,
-  (msg.toolCalls || []).map((tool: any) => `${tool.id}:${tool.result?.length || 0}`).join(','),
+  (msg.toolCalls || []).map((tool: any) => `${tool.id}:${tool.inputText?.length || 0}:${tool.result?.length || 0}`).join(','),
 ].join(':')).join('|'))
 
 watch(() => chatStore.messages?.length ?? 0, (newLen, oldLen) => {
@@ -1005,12 +1038,69 @@ const appendStepPrompt = async (runId: string) => {
   }
 }
 
-const formatToolName = (tc: any): string => {
+type ToolDisplayInput = { name?: string; input?: unknown; inputText?: string }
+
+const toolArguments = (tc?: ToolDisplayInput): Record<string, unknown> => {
+  const raw = tc?.inputText || tc?.input
+  try {
+    const value = typeof raw === 'string' ? JSON.parse(raw) : raw
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  } catch {
+    return {}
+  }
+}
+const toolArgumentText = (input: Record<string, unknown>, ...keys: string[]): string => {
+  for (const key of keys) {
+    const value = input[key]
+    if (typeof value === 'string' && value.trim()) return value
+    if (Array.isArray(value)) {
+      const items = value.filter((item): item is string => typeof item === 'string' && !!item.trim())
+      if (items.length) return items.join(' · ')
+    }
+  }
+  return ''
+}
+const toolArgumentSummary = (tc?: ToolDisplayInput): string => {
+  const input = toolArguments(tc)
+  const path = toolArgumentText(input, 'path', 'file_path', 'filePath')
+  switch (tc?.name) {
+    case 'bash': case 'shell': case 'exec':
+      return toolArgumentText(input, 'command', 'cmd')
+    case 'read': case 'write': case 'edit':
+      return path
+    case 'grep': case 'find':
+      return [toolArgumentText(input, 'pattern', 'query'), path].filter(Boolean).join(' · ')
+    case 'ls':
+      return path || '.'
+    case 'web_search': case 'yarc_search_papers':
+      return toolArgumentText(input, 'queries', 'query')
+    case 'fetch_content':
+      return toolArgumentText(input, 'urls', 'url')
+    case 'context_checkpoint':
+      return toolArgumentText(input, 'name')
+    case 'context_compact':
+      return toolArgumentText(input, 'target')
+    case 'subagent':
+      return toolArgumentText(input, 'agent', 'action')
+    default:
+      // Show only concise identifying arguments, not file contents or prompts.
+      return toolArgumentText(input, 'path', 'file_path', 'command', 'query', 'url', 'name', 'action')
+  }
+}
+const toolInputDisplay = (tc?: ToolDisplayInput): string => {
+  if (tc?.inputText) return tc.inputText
+  if (typeof tc?.input === 'string') {
+    try { return JSON.stringify(JSON.parse(tc.input), null, 2) } catch { return tc.input }
+  }
+  return JSON.stringify(tc?.input ?? {}, null, 2)
+}
+
+const formatToolName = (tc: ToolDisplayInput | undefined): string => {
   if (!tc) return ''
   const name: string = tc.name || ''
   // Detect skill reads: tool 'read' with path matching */skills/<name>/SKILL.md
   if (name === 'read') {
-    const raw = tc.input?.path || tc.input?.file_path || ''
+    const raw = toolArgumentText(toolArguments(tc), 'path', 'file_path')
     const m = String(raw).match(/skills\/([^/]+)\/SKILL\.md$/)
     if (m) return `📖 Skill: ${m[1]}`
   }
@@ -1141,7 +1231,8 @@ const contextUsageTitle = computed(() => {
         <span v-for="(line, i) in widget.lines" :key="i">{{ line }}</span>
       </div>
     </template>
-    <div ref="container" class="chat-messages" @scroll="onScroll">
+    <div ref="container" class="chat-messages" @scroll="onScroll" @wheel.passive="onMessagesWheel" @touchstart.passive="pauseAutoScroll" @keydown="onMessagesKeydown">
+    <div ref="messageList" class="chat-message-list">
       <div v-if="!chatStore.messages?.length" class="chat-empty">
         <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="empty-icon"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
         <p>开始新对话</p>
@@ -1187,12 +1278,21 @@ const contextUsageTitle = computed(() => {
 
         <template v-for="(seg, i) in messageSegments(msg)" :key="`${msg.id}-${i}`">
           <details v-if="seg.type === 'thinking'" class="msg-thinking">
-            <summary>💭 {{ chatStore.uiWorking.hiddenThinkingLabel || '思考记录' }}</summary>
+            <summary @click="pauseAutoScroll">💭 {{ chatStore.uiWorking.hiddenThinkingLabel || '思考记录' }}</summary>
             <div>{{ seg.text || '' }}</div>
           </details>
           <details v-else-if="seg.type === 'tool' && toolForSegment(msg, seg)" class="msg-tool" :class="{ subagent: isSubagentTool(toolForSegment(msg, seg)) }" :open="isSubagentTool(toolForSegment(msg, seg)) || chatStore.toolsExpanded">
-            <summary class="tool-summary">
-              <span>🔧 {{ formatToolName(toolForSegment(msg, seg)) }}<span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress"> · {{ formatToolInputTokens(toolForSegment(msg, seg)) }}</span></span>
+            <summary class="tool-summary" @click="pauseAutoScroll">
+              <svg class="tool-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+              <span class="tool-heading">
+                <span class="tool-name" :title="formatToolName(toolForSegment(msg, seg))">{{ formatToolName(toolForSegment(msg, seg)) }}</span>
+                <span
+                  class="tool-argument-preview"
+                  :class="{ pending: !toolArgumentSummary(toolForSegment(msg, seg)) }"
+                  :title="toolArgumentSummary(toolForSegment(msg, seg))"
+                >{{ toolArgumentSummary(toolForSegment(msg, seg)) || (toolForSegment(msg, seg)?.inputText ? '正在接收参数…' : '展开查看详情') }}</span>
+              </span>
+              <span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress" title="正在生成参数；token 数量为估算值">{{ formatToolInputTokens(toolForSegment(msg, seg)) }}</span>
               <button
                 v-if="toolSearchResults(toolForSegment(msg, seg))"
                 type="button"
@@ -1220,7 +1320,7 @@ const contextUsageTitle = computed(() => {
                     <small v-if="item.detail">{{ item.detail }}</small>
                   </li>
                 </ol>
-                <div v-if="toolForSegment(msg, seg)?.result" class="tool-result subagent-result" :class="{ collapsed: !subagentResultExpanded.has(toolForSegment(msg, seg)?.id) }" @click="toggleSubagentResult(toolForSegment(msg, seg)?.id)">
+                <div v-if="toolForSegment(msg, seg)?.result" class="tool-result subagent-result" :class="{ collapsed: !subagentResultExpanded.has(toolForSegment(msg, seg)?.id) }" @click="pauseAutoScroll(); toggleSubagentResult(toolForSegment(msg, seg)?.id)">
                   {{ toolForSegment(msg, seg)?.result }}
                 </div>
                 <div v-if="subagentRunId(toolForSegment(msg, seg))" class="subagent-controls">
@@ -1232,8 +1332,14 @@ const contextUsageTitle = computed(() => {
               </div>
             </template>
             <template v-else>
-              <div v-if="!toolForSegment(msg, seg)?.inputText" class="tool-input">{{ JSON.stringify(toolForSegment(msg, seg)?.input) }}</div>
-              <div v-if="toolForSegment(msg, seg)?.result" class="tool-result">{{ toolForSegment(msg, seg)?.result }}</div>
+              <div class="tool-detail-section">
+                <div class="tool-detail-label">{{ toolForSegment(msg, seg)?.inputText ? '参数 · 接收中' : '参数' }}</div>
+                <pre class="tool-input">{{ toolInputDisplay(toolForSegment(msg, seg)) }}</pre>
+              </div>
+              <div v-if="toolForSegment(msg, seg)?.result !== undefined" class="tool-detail-section">
+                <div class="tool-detail-label">输出</div>
+                <pre class="tool-result">{{ toolForSegment(msg, seg)?.result || '（无输出）' }}</pre>
+              </div>
             </template>
           </details>
           <MarkdownContent v-else-if="seg.type === 'error'" class="msg-body error" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
@@ -1264,7 +1370,7 @@ const contextUsageTitle = computed(() => {
           </span>
         </div>
         <!-- Assistant actions: copy (left) -->
-        <div v-else-if="msg.role === 'assistant' && (msg.content || msg.toolCalls?.length)" class="msg-actions">
+        <div v-else-if="msg.role === 'assistant' && msg.content?.trim()" class="msg-actions">
           <button class="msg-action-btn" @click="copyMessage(msg)" title="复制">
             <svg v-if="copiedMsgId !== msg.id" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
@@ -1279,8 +1385,9 @@ const contextUsageTitle = computed(() => {
       <div style="min-height: 32px" />
 
     </div>
+    </div>
     <Transition name="fade">
-      <button v-if="!autoScroll" class="scroll-bottom-btn" @click="scrollBottom" style="left: auto; right: 12px;">
+      <button v-if="!autoScroll" class="scroll-bottom-btn" title="回到底部并跟随新消息" aria-label="回到底部并跟随新消息" @click="scrollBottom" style="left: auto; right: 12px;">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
     </Transition>
@@ -1451,7 +1558,9 @@ const contextUsageTitle = computed(() => {
 .state-thinking { font-size: 10px; color: var(--color-primary); padding: 2px 6px; background: rgba(99,102,241,0.1); border-radius: 999px; }
 .state-context { font-size: 10px; color: var(--color-text-secondary); padding: 2px 6px; background: var(--color-bg-muted); border-radius: 999px; white-space: nowrap; }
 .chat-messages-wrap { position: relative; flex: 1; min-height: 0; }
-.chat-messages { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.chat-messages { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; padding: 16px; min-width: 0; }
+.chat-message-list { display: flex; flex-direction: column; gap: 12px; min-height: 100%; }
+.chat-message-list > * { flex-shrink: 0; }
 .scroll-bottom-btn { position: absolute; bottom: 8px; left: 12px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--color-border); background: var(--color-bg-card); color: var(--color-text-secondary); border-radius: 50%; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 5; transition: opacity 0.15s; }
 .scroll-bottom-btn:hover { color: var(--color-primary); border-color: var(--color-primary); }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.15s; }
@@ -1510,11 +1619,25 @@ const contextUsageTitle = computed(() => {
 .ctx-item-icon { flex: 0 0 auto; }
 .msg-thinking, .msg-tool, .msg-compaction { font-size: 12px; margin-bottom: 6px; }
 .msg-thinking summary, .msg-tool summary, .msg-compaction summary { cursor: pointer; color: var(--color-text-muted); font-size: 12px; }
-.msg-tool .tool-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.msg-tool { min-width: 0; max-width: 100%; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-card); overflow: hidden; }
+.msg-tool .tool-summary { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 8px 10px; list-style: none; transition: background var(--transition); }
+.msg-tool .tool-summary::-webkit-details-marker { display: none; }
+.msg-tool .tool-summary:hover { background: var(--color-bg-muted); }
+.msg-tool .tool-summary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+.tool-chevron { flex: 0 0 auto; color: var(--color-text-muted); transition: transform var(--transition); }
+.msg-tool[open] > .tool-summary .tool-chevron { transform: rotate(90deg); }
+.tool-heading { display: flex; align-items: baseline; gap: 8px; flex: 1; min-width: 0; }
+.tool-name { flex: 0 1 auto; max-width: 45%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-primary); font: 600 11px var(--font-mono, ui-monospace, monospace); }
+.tool-argument-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-secondary); font: 12px var(--font-mono, ui-monospace, monospace); }
+.tool-argument-preview.pending { color: var(--color-text-muted); font-family: inherit; }
+.msg-tool > .tool-detail-section { margin: 0; padding: 8px 10px; border-radius: 0; border-top: 1px solid var(--color-border); background: transparent; white-space: normal; }
+.tool-detail-label { margin-bottom: 5px; color: var(--color-text-muted); font-size: 10px; font-weight: 500; }
+.tool-detail-section pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 12px/1.65 var(--font-mono, ui-monospace, monospace); color: var(--color-text-secondary); }
+.msg-tool .tool-detail-section .tool-result { padding-left: 8px; }
 .tool-search-results-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-bg-card); color: var(--color-primary); font: inherit; font-size: 11px; line-height: 1.2; cursor: pointer; flex-shrink: 0; }
 .tool-search-results-btn:hover { border-color: var(--color-primary); background: var(--color-primary-soft); }
 .tool-search-results-btn svg { flex: 0 0 auto; }
-.msg-tool .tool-progress { color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+.msg-tool .tool-progress { flex: 0 0 auto; color: var(--color-text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .msg-thinking > div, .msg-tool > div, .msg-compaction > div { margin-top: 4px; padding: 8px 10px; background: var(--color-bg-muted); border-radius: var(--radius-sm); font-size: 12px; color: var(--color-text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .msg-tool .tool-result { border-left: 2px solid var(--color-primary); opacity: 0.9; }
 .msg-tool.subagent > div { border-left: 2px solid #8b5cf6; }
@@ -1535,8 +1658,8 @@ const contextUsageTitle = computed(() => {
 .subagent-tree li + li { margin-top: 6px; }
 .subagent-tree strong { display: block; color: var(--color-text); font-size: 12px; }
 .subagent-tree small { display: block; color: var(--color-text-secondary); line-height: 1.45; }
-.subagent-result { max-height: 360px; overflow: auto; cursor: pointer; }
-.subagent-result.collapsed { max-height: 120px; position: relative; }
+.subagent-result { cursor: pointer; }
+.subagent-result.collapsed { max-height: 120px; overflow: hidden; position: relative; }
 .subagent-result.collapsed::after { content: '▼ 展开'; position: absolute; bottom: 0; left: 0; right: 0; padding: 4px 8px; background: linear-gradient(transparent, var(--color-bg-muted)); font-size: 11px; color: var(--color-text-muted); text-align: center; }
 .subagent-controls { display: flex; gap: 6px; margin-top: 4px; }
 .subagent-ctrl-btn { padding: 4px 10px; border: 1px solid var(--color-border); background: var(--color-bg-card); color: var(--color-text-secondary); border-radius: var(--radius-sm); font-size: 11px; cursor: pointer; }
