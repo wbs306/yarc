@@ -40,21 +40,17 @@ const revisions = ref<FileRevision[]>([])
 const preview = ref<{ title: string; content: string | null } | null>(null)
 
 const apiRoot = computed(() => `/api/projects/${encodeURIComponent(props.projectId)}`)
-const gitGroups = computed(() => {
-  const groups = new Map<string, ProjectGitFileStatus[]>()
-  for (const file of gitStatus.value?.files || []) {
-    const ext = file.path.split('.').pop()?.toLowerCase() || ''
-    const group = ['tex', 'bib', 'sty', 'cls', 'bst'].includes(ext)
-      ? '文档'
-      : ['py', 'r', 'jl', 'm', 'c', 'h', 'cpp', 'hpp', 'ts', 'tsx', 'js', 'jsx', 'vue', 'sh', 'sql'].includes(ext)
-        ? '代码'
-        : '其他'
-    const items = groups.get(group) || []
-    items.push(file)
-    groups.set(group, items)
-  }
-  return [...groups.entries()]
-})
+const canSelectFile = (file: ProjectGitFileStatus) => file.indexStatus === ' ' || file.indexStatus === '?'
+const selectablePaths = computed(() => (gitStatus.value?.files || []).filter(canSelectFile).map(file => file.path))
+const allFilesSelected = computed(() => selectablePaths.value.length > 0
+  && selectablePaths.value.every(path => selectedPaths.value.includes(path)))
+const selectAllFiles = () => {
+  selectedPaths.value = [...selectablePaths.value]
+}
+const invertFileSelection = () => {
+  const selected = new Set(selectedPaths.value)
+  selectedPaths.value = selectablePaths.value.filter(path => !selected.has(path))
+}
 
 const changedFileCount = computed(() => gitStatus.value?.files.length || 0)
 const stagedFileCount = computed(() => (gitStatus.value?.files || []).filter(file => file.indexStatus !== ' ' && file.indexStatus !== '?').length)
@@ -82,7 +78,7 @@ const loadGit = async () => {
   commits.value = log.commits
   branches.value = branchData.branches
   remotes.value = remoteData.remotes
-  selectedPaths.value = selectedPaths.value.filter(path => status.status.files.some(file => file.path === path))
+  selectedPaths.value = selectedPaths.value.filter(path => selectablePaths.value.includes(path))
 }
 
 const loadHistory = async () => {
@@ -269,15 +265,22 @@ const restoreRevision = async (revision: FileRevision) => {
         <strong>工作区很干净</strong>
         <span>没有待提交的文件变更。</span>
       </div>
-      <section v-for="[group, files] in gitGroups" v-else :key="group" class="project-tools-group">
+      <section v-else class="project-tools-group">
         <div class="project-tools-group-heading">
-          <div><span class="group-kicker">变更文件</span><h2>{{ group }}</h2></div>
-          <span class="group-count">{{ files.length }}</span>
+          <h2>文件</h2>
+          <span class="group-count">{{ changedFileCount }}</span>
+        </div>
+        <div class="project-git-selection">
+          <span aria-live="polite">已选 {{ selectedPaths.length }} 项</span>
+          <div class="project-tools-actions">
+            <button class="project-tool-button" :disabled="!selectablePaths.length || allFilesSelected" title="选择所有可暂存文件" @click="selectAllFiles">全选</button>
+            <button class="project-tool-button" :disabled="!selectablePaths.length" title="反选可暂存文件" @click="invertFileSelection">反选</button>
+          </div>
         </div>
         <div class="project-git-list">
-          <div v-for="file in files" :key="file.path" class="project-git-row" :class="{ selected: selectedPaths.includes(file.path) }">
+          <div v-for="file in gitStatus?.files" :key="file.path" class="project-git-row" :class="{ selected: selectedPaths.includes(file.path) }">
             <label class="project-git-check" :title="selectedPaths.includes(file.path) ? '取消选择' : '选择暂存'">
-              <input v-model="selectedPaths" type="checkbox" :value="file.path" :disabled="file.indexStatus !== ' ' && file.indexStatus !== '?'" />
+              <input v-model="selectedPaths" type="checkbox" :value="file.path" :disabled="!canSelectFile(file)" />
               <span aria-hidden="true" />
             </label>
             <button class="project-path-button" :title="file.path" @click="emit('open-file', file.path)">
@@ -485,6 +488,7 @@ const restoreRevision = async (revision: FileRevision) => {
 .project-tools-group-heading,.project-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 10px 8px; }
 .project-tools-group-heading h2,.project-history-heading h2 { margin: 0; color: var(--color-text); font-size: 13px; font-weight: 650; }
 .group-kicker { margin-bottom: 2px; font-size: 9px; }.group-count,.details-count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--color-bg-muted); color: var(--color-text-muted); font-size: 11px; }
+.project-git-selection { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 0 10px 8px; color: var(--color-text-muted); font-size: 11px; }
 .project-git-list { border-top: 1px solid color-mix(in srgb, var(--color-border) 64%, transparent); }
 .project-git-row { display: flex; align-items: center; gap: 5px; min-width: 0; padding: 7px 8px; border-bottom: 1px solid color-mix(in srgb, var(--color-border) 54%, transparent); transition: background var(--transition); }
 .project-git-row:last-child { border-bottom: 0; }.project-git-row:hover,.project-git-row.selected { background: color-mix(in srgb, var(--color-primary) 7%, transparent); }
