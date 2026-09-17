@@ -167,6 +167,20 @@ const metadata = (): RuntimeMetadata => {
 
 const emitMetadata = () => post({ type: 'metadata', metadata: metadata() })
 
+const emitContextUsage = () => {
+  const usage = session?.getContextUsage?.()
+  if (!usage) return
+  emit({
+    type: 'context_usage',
+    tokens: usage.tokens,
+    contextWindow: usage.contextWindow,
+    percent: usage.percent,
+    model: session.model?.id,
+    conversationId: key?.conversationId,
+    branchId: key?.branchId,
+  })
+}
+
 const thinkingLevel = (value?: string, enabled?: boolean): any => {
   if (enabled === false || value === 'off') return 'off'
   return value || 'medium'
@@ -950,6 +964,9 @@ const handleSessionEvent = (event: any) => {
       } finally {
         pendingCommits = Math.max(0, pendingCommits - 1)
         emitMetadata()
+        // Pi persists message_end after notifying subscribers. Read usage here,
+        // once assistant usage / tool results are included in the session.
+        emitContextUsage()
       }
     })
     if (message?.role === 'assistant' && message.stopReason === 'aborted') {
@@ -1102,8 +1119,7 @@ const runPrompt = async (payload: Extract<RuntimeHostMessage, { type: 'prompt' }
     await new Promise<void>(resolve => setTimeout(resolve, 50))
     await waitForQuiescence()
     flushDeferredAssistantAborts()
-    const usage = session.getContextUsage?.()
-    if (usage) emit({ type: 'context_usage', tokens: usage.tokens, contextWindow: usage.contextWindow, percent: usage.percent, model: session.model?.id, conversationId: key?.conversationId, branchId: key?.branchId })
+    emitContextUsage()
     const state = metadata()
     durability.commit(state.sessionFile)
     resetWorkingUi()
@@ -1140,8 +1156,7 @@ const runCompact = async (payload: Extract<RuntimeHostMessage, { type: 'compact'
     await new Promise<void>(resolve => setTimeout(resolve, 50))
     await waitForQuiescence()
     emit({ type: 'compaction_complete', summary: result.summary, tokensBefore: result.tokensBefore, estimatedTokensAfter: result.estimatedTokensAfter, conversationId: key?.conversationId, branchId: key?.branchId })
-    const usage = session.getContextUsage?.()
-    if (usage) emit({ type: 'context_usage', tokens: usage.tokens, contextWindow: usage.contextWindow, percent: usage.percent, model: session.model?.id, conversationId: key?.conversationId, branchId: key?.branchId })
+    emitContextUsage()
     const state = metadata()
     durability.commit(state.sessionFile)
     resetWorkingUi()

@@ -296,6 +296,23 @@ export default function (pi) {
       ])
       assert.ok(!events.some(event => event.type === 'error'))
       assert.ok(!events.some(event => event.message === 'automatic-enable-notice'))
+      // Usage must reach the UI during the run, not just after session.prompt resolves.
+      for (const [index, event] of events.entries()) {
+        if (event.type !== 'tool_result') continue
+        const nextAssistant = events.findIndex((candidate, candidateIndex) =>
+          candidateIndex > index && candidate.type === 'assistant_message_start')
+        assert.ok(nextAssistant > index)
+        const before = events.slice(0, index).reverse().find(candidate => candidate.type === 'context_usage')
+        const after = events.slice(index + 1, nextAssistant).find(candidate => candidate.type === 'context_usage')
+        assert.ok(before, 'assistant usage should be emitted before the tool result')
+        assert.ok(after, 'tool result usage should be emitted before the next assistant response')
+        assert.ok(after.tokens > before.tokens, 'usage should include the newly appended tool result')
+        assert.equal(after.contextWindow, 10000)
+        assert.equal(after.percent, after.tokens / 10000 * 100)
+        assert.equal(after.model, 'mock')
+        assert.equal(after.conversationId, 'auto-acm')
+        assert.equal(after.branchId, 'main')
+      }
       const counts = await prompt('counts-' + generation, '/acm-counts')
       assert.ok(counts.some(event => event.message === JSON.stringify({ enables: 2, compacts: 2 })))
     }
