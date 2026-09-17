@@ -1,11 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '@/composables/useApi'
+import { normalizeEditorTheme, type EditorThemeId } from '@/lib/editor-theme-options'
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
 export type BackgroundRotationMode = 'sequential' | 'random'
 
 export interface EditorSettings {
+  theme: EditorThemeId
   fontSize: number
   markdownFontSize: number
   tabSize: number
@@ -32,6 +34,7 @@ export interface ThemeSettings {
 const STORAGE_KEY = 'yarc-theme'
 
 const DEFAULT_EDITOR: EditorSettings = {
+  theme: 'default',
   fontSize: 13,
   markdownFontSize: 14,
   tabSize: 2,
@@ -157,6 +160,7 @@ export const useThemeStore = defineStore('theme', () => {
     if (theme.editor && typeof theme.editor === 'object') {
       const e = theme.editor
       editor.value = {
+        theme: normalizeEditorTheme(e.theme),
         fontSize: typeof e.fontSize === 'number' ? clamp(e.fontSize, 10, 24) : DEFAULT_EDITOR.fontSize,
         markdownFontSize: typeof e.markdownFontSize === 'number' ? clamp(e.markdownFontSize, 10, 24) : DEFAULT_EDITOR.markdownFontSize,
         tabSize: typeof e.tabSize === 'number' ? clamp(e.tabSize, 2, 8) : DEFAULT_EDITOR.tabSize,

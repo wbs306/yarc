@@ -11,8 +11,9 @@ import {
   getSearchQuery, setSearchQuery, SearchQuery,
 } from '@codemirror/search'
 import type { Panel } from '@codemirror/view'
-import { bracketMatching, foldGutter, indentOnInput, indentUnit, HighlightStyle, syntaxHighlighting, LanguageDescription, StreamLanguage } from '@codemirror/language'
-import { tags as t } from '@lezer/highlight'
+import { bracketMatching, foldGutter, indentOnInput, indentUnit, LanguageDescription, StreamLanguage } from '@codemirror/language'
+import { editorThemeExtension } from '@/lib/editor-highlight'
+import { useThemeStore } from '@/stores/theme'
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { markdown } from '@codemirror/lang-markdown'
@@ -79,6 +80,8 @@ const minimapCanvas = ref<HTMLCanvasElement>()
 const view = shallowRef<EditorView>()
 const minimapViewportStyle = ref<Record<string, string>>({ top: '0px', height: '100%' })
 
+const themeStore = useThemeStore()
+const themeConf = new Compartment()
 const languageConf = new Compartment()
 const editableConf = new Compartment()
 const fontConf = new Compartment()
@@ -276,64 +279,15 @@ function languageExtension(lang: string) {
   }
 }
 
-// Colors resolve from CSS variables so highlighting tracks the active light/dark theme.
-const highlightStyle = HighlightStyle.define([
-  { tag: [t.keyword, t.modifier, t.operatorKeyword], color: 'var(--color-primary)' },
-  { tag: [t.controlKeyword, t.moduleKeyword], color: 'var(--color-primary)', fontWeight: '600' },
-  { tag: [t.string, t.special(t.string)], color: 'var(--color-success)' },
-  { tag: [t.number, t.bool, t.null, t.atom], color: 'var(--color-warning)' },
-  { tag: [t.comment, t.lineComment, t.blockComment], color: 'var(--color-text-muted)', fontStyle: 'italic' },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: 'var(--color-primary-hover)' },
-  { tag: [t.typeName, t.className, t.namespace], color: 'var(--color-primary-hover)' },
-  { tag: [t.propertyName, t.attributeName], color: 'var(--color-text)' },
-  { tag: [t.tagName], color: 'var(--color-error)' },
-  { tag: [t.heading], color: 'var(--color-primary)', fontWeight: '600' },
-  { tag: [t.link, t.url], color: 'var(--color-primary)', textDecoration: 'underline' },
-  { tag: [t.emphasis], fontStyle: 'italic' },
-  { tag: [t.strong], fontWeight: '700' },
-  { tag: [t.meta, t.processingInstruction], color: 'var(--color-text-secondary)' },
-  { tag: [t.variableName], color: 'var(--color-primary-hover)' },
-  { tag: [t.operator, t.punctuation], color: 'var(--color-text-secondary)' },
-  { tag: [t.bracket, t.squareBracket, t.paren, t.brace], color: 'var(--color-warning)' },
-  { tag: [t.invalid], color: 'var(--color-error)' },
-])
-
-// Transparent surface so the panel's background image / frosted scrim shows through.
+// Layout is independent of the selected color theme.
 const baseTheme = EditorView.theme({
-  '&': {
-    height: '100%',
-    color: 'var(--color-text)',
-    backgroundColor: 'transparent',
-  },
+  '&': { height: '100%' },
   '.cm-scroller': {
     fontFamily: "'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     lineHeight: '1.65',
   },
-  '.cm-content': {
-    padding: '14px 0 var(--editor-scroll-bottom-gap, min(42vh, 360px))',
-    caretColor: 'var(--color-primary)',
-  },
-  '.cm-gutters': {
-    backgroundColor: 'transparent',
-    color: 'var(--color-text-muted)',
-    border: 'none',
-  },
-  '.cm-activeLine': { backgroundColor: 'rgba(var(--color-primary-rgb), 0.06)' },
-  '.cm-activeLineGutter': { backgroundColor: 'rgba(var(--color-primary-rgb), 0.06)' },
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--color-primary)' },
-  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection': {
-    backgroundColor: 'rgba(var(--color-primary-rgb), 0.22)',
-  },
-  '.cm-matchingBracket': {
-    backgroundColor: 'rgba(var(--color-primary-rgb), 0.18)',
-    outline: '1px solid rgba(var(--color-primary-rgb), 0.4)',
-  },
-  '.cm-foldPlaceholder': {
-    backgroundColor: 'var(--color-bg-muted)',
-    border: 'none',
-    color: 'var(--color-text-muted)',
-  },
-}, { dark: false })
+  '.cm-content': { padding: '14px 0 var(--editor-scroll-bottom-gap, min(42vh, 360px))' },
+})
 
 function isDark() {
   return document.documentElement.getAttribute('data-theme') === 'dark'
@@ -769,7 +723,7 @@ function buildExtensions() {
     indentOnInput(),
     bracketMatching(),
     highlightActiveLine(),
-    syntaxHighlighting(highlightStyle),
+    themeConf.of(editorThemeExtension(themeStore.editor.theme, isDark())),
     EditorView.domEventHandlers({ keydown: handleEditorKeydown }),
     search({ top: true, createPanel: createFindPanel }),
     keymap.of([
@@ -1000,25 +954,14 @@ onMounted(() => {
   scheduleMinimapDraw()
   updateCursorStats(view.value.state)
   // CodeMirror's dark flag only affects a few built-in defaults; keep it in sync.
-  themeObserver = new MutationObserver(syncDark)
+  themeObserver = new MutationObserver(syncEditorTheme)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
-  syncDark()
 })
 
 let themeObserver: MutationObserver | undefined
-let lastDark: boolean | undefined
-function syncDark() {
-  const dark = isDark()
-  if (dark === lastDark || !view.value) return
-  lastDark = dark
-  // Re-dispatch nothing structural; the CSS-var colors already track. Reconfigure base
-  // theme dark flag for selection/caret default behavior.
-  view.value.dispatch({
-    effects: editableConf.reconfigure([
-      EditorView.editable.of(!props.readonly),
-      EditorState.readOnly.of(props.readonly),
-      EditorView.theme({}, { dark }),
-    ]),
+function syncEditorTheme() {
+  view.value?.dispatch({
+    effects: themeConf.reconfigure(editorThemeExtension(themeStore.editor.theme, isDark())),
   })
   scheduleMinimapDraw()
 }
@@ -1056,6 +999,8 @@ watch(() => props.readonly, (ro) => {
     ]),
   })
 })
+
+watch(() => themeStore.editor.theme, syncEditorTheme)
 
 watch(() => props.fontSize, (size) => {
   view.value?.dispatch({ effects: fontConf.reconfigure(fontTheme(size)) })

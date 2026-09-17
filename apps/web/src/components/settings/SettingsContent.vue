@@ -8,6 +8,7 @@ import Select from '@/components/ui/Select.vue'
 import WechatSettings from './WechatSettings.vue'
 import ExtensionsSettings from './ExtensionsSettings.vue'
 import WebDavSettings from './WebDavSettings.vue'
+import EditorThemeSettings from './EditorThemeSettings.vue'
 
 const theme = useThemeStore()
 const prefs = usePrefsStore()
@@ -2349,6 +2350,8 @@ onBeforeUnmount(() => {
          外观
          ================================================================ -->
     <section v-if="activeTab === 'appearance'">
+
+      <EditorThemeSettings />
 
       <div class="settings-card">
         <div class="card-header">

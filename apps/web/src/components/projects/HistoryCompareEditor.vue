@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { EditorState, RangeSetBuilder, type Extension } from '@codemirror/state'
+import { Compartment, EditorState, RangeSetBuilder, type Extension } from '@codemirror/state'
 import { EditorView, Decoration, lineNumbers } from '@codemirror/view'
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
-import { tags as t } from '@lezer/highlight'
+import { editorThemeExtension } from '@/lib/editor-highlight'
+import { useThemeStore } from '@/stores/theme'
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { markdown } from '@codemirror/lang-markdown'
@@ -29,6 +29,10 @@ const props = withDefaults(defineProps<{
 
 type ChangedLines = { removed: Set<number>; added: Set<number> }
 
+const themeStore = useThemeStore()
+const themeConf = new Compartment()
+const selectedTheme = () => editorThemeExtension(themeStore.editor.theme, document.documentElement.getAttribute('data-theme') === 'dark')
+let themeObserver: MutationObserver | undefined
 const beforeHost = ref<HTMLDivElement>()
 const afterHost = ref<HTMLDivElement>()
 let beforeView: EditorView | null = null
@@ -90,20 +94,9 @@ const languageExtension = (language: string): Extension => {
   }
 }
 
-const highlightStyle = HighlightStyle.define([
-  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword], color: 'var(--color-primary)' },
-  { tag: [t.string, t.special(t.string)], color: 'var(--color-success)' },
-  { tag: [t.number, t.bool, t.atom], color: 'var(--color-warning)' },
-  { tag: [t.comment, t.lineComment, t.blockComment], color: 'var(--color-text-muted)', fontStyle: 'italic' },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: 'var(--color-primary-hover)' },
-  { tag: [t.typeName, t.className, t.propertyName, t.attributeName], color: 'var(--color-text)' },
-])
-
 const editorTheme = EditorView.theme({
   '&': {
     height: '100%',
-    color: 'var(--color-text)',
-    backgroundColor: 'transparent',
   },
   '.cm-scroller': {
     overflow: 'auto',
@@ -111,7 +104,6 @@ const editorTheme = EditorView.theme({
     lineHeight: '1.55',
   },
   '.cm-content': { padding: '8px 0 24px' },
-  '.cm-gutters': { backgroundColor: 'transparent', color: 'var(--color-text-muted)', border: 'none' },
   '.cm-line.yarc-diff-removed': { backgroundColor: 'rgba(239, 68, 68, .13)' },
   '.cm-line.yarc-diff-added': { backgroundColor: 'rgba(34, 197, 94, .13)' },
   '.cm-line.yarc-diff-removed::before, .cm-line.yarc-diff-added::before': {
@@ -123,7 +115,7 @@ const editorTheme = EditorView.theme({
   },
   '.cm-line.yarc-diff-removed::before': { backgroundColor: 'var(--color-error)' },
   '.cm-line.yarc-diff-added::before': { backgroundColor: 'var(--color-success)' },
-}, { dark: false })
+})
 
 const decorationsFor = (doc: EditorState['doc'], lines: Set<number>, className: string) => {
   const builder = new RangeSetBuilder<Decoration>()
@@ -143,7 +135,7 @@ const createEditor = (parent: HTMLElement, content: string, changedLines: Set<nu
       EditorState.readOnly.of(true),
       EditorView.editable.of(false),
       editorTheme,
-      syntaxHighlighting(highlightStyle),
+      themeConf.of(selectedTheme()),
       languageExtension(props.language),
       EditorView.decorations.of(decorationsFor(EditorState.create({ doc: content }).doc, changedLines, className)),
     ],
@@ -163,9 +155,21 @@ const render = () => {
   afterView = createEditor(afterHost.value, props.after, changed.added, 'yarc-diff-added')
 }
 
-onMounted(render)
+const syncEditorTheme = () => {
+  for (const view of [beforeView, afterView]) {
+    view?.dispatch({ effects: themeConf.reconfigure(selectedTheme()) })
+  }
+}
+watch(() => themeStore.editor.theme, syncEditorTheme)
+
+onMounted(() => {
+  render()
+  themeObserver = new MutationObserver(syncEditorTheme)
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+})
 watch(() => [props.before, props.after, props.language] as const, render)
 onBeforeUnmount(() => {
+  themeObserver?.disconnect()
   beforeView?.destroy()
   afterView?.destroy()
 })
