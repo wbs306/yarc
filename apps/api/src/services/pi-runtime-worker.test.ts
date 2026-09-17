@@ -496,3 +496,112 @@ export default function (pi) {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('Runtime Worker keeps multi-tool compact continuations in one run beyond 30 seconds', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'yarc-pi-runtime-continuation-'))
+  const agentDir = join(root, 'agent')
+  const sessionDir = join(agentDir, 'sessions')
+  const extensionsDir = join(agentDir, 'extensions')
+  await mkdir(sessionDir, { recursive: true })
+  await mkdir(extensionsDir, { recursive: true })
+  // Reproduce pi-context's turn_end abort -> deferred waitForIdle -> tree
+  // navigation -> triggerTurn flow, without a network call or user data.
+  await writeFile(join(extensionsDir, 'continuation.js'), `
+let commandCtx
+let compactPending = false
+let turn = 0
+export default function (pi) {
+  pi.registerCommand('acm', { handler: async (_args, ctx) => { commandCtx = ctx } })
+  for (const name of ['before', 'context_compact', 'after']) {
+    pi.registerTool({
+      name, label: name, description: name, executionMode: 'parallel',
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        await new Promise(resolve => setTimeout(resolve, name === 'context_compact' ? 5 : 30))
+        if (name === 'context_compact') compactPending = true
+        return { content: [{ type: 'text', text: name + '-done' }], details: {} }
+      },
+    })
+  }
+  pi.on('turn_end', (_event, ctx) => { if (compactPending) ctx.abort() })
+  pi.on('agent_end', (_event, ctx) => {
+    if (!compactPending) return
+    compactPending = false
+    setTimeout(async () => {
+      try {
+        await commandCtx.waitForIdle()
+        const sm = ctx.sessionManager
+        const target = sm.getBranch()[0].id
+        const summary = sm.branchWithSummary(target, 'Continue the test')
+        sm.branch(target)
+        await commandCtx.navigateTree(summary, { summarize: false })
+        pi.sendMessage({ customType: 'test-compact', content: 'Continue', display: false },
+          { triggerTurn: true, deliverAs: 'followUp' })
+      } catch (error) { ctx.ui.notify('continuation-failed: ' + error.message, 'error') }
+    }, 0)
+  })
+  pi.registerProvider('continuation-mock', {
+    api: 'continuation-mock-api', apiKey: 'test-only', baseUrl: 'http://127.0.0.1:1',
+    models: [{ id: 'mock', name: 'Mock', reasoning: false, input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 10000, maxTokens: 1000 }],
+    streamSimple: (model, _context, options) => {
+      const cancelled = options?.signal?.aborted
+      const index = cancelled ? -1 : turn++
+      const tools = !cancelled && index < 2
+      const message = {
+        role: 'assistant', api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(),
+        content: tools
+          ? ['before', 'context_compact', 'after'].map(name => ({ type: 'toolCall', id: name + index, name, arguments: {} }))
+          : [{ type: 'text', text: cancelled ? '' : 'continuation-finished' }],
+        stopReason: cancelled ? 'aborted' : tools ? 'toolUse' : 'stop',
+        usage: { input: 1, output: 1, totalTokens: 2, cacheRead: 0, cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      }
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'start', partial: message }
+          if (index === 2) await new Promise(resolve => setTimeout(resolve, 31_000))
+          yield { type: 'done', reason: message.stopReason, message }
+        },
+        result: async () => message,
+      }
+    },
+  })
+}
+`, 'utf8')
+  const worker = new Worker(new URL('../workers/pi-session.worker.ts', import.meta.url), {
+    execArgv: ['--import', createRequire(import.meta.url).resolve('tsx')],
+  })
+  const messages: any[] = []
+  worker.on('message', message => {
+    messages.push(message)
+    if (message.type === 'control_request' && message.operation === 'navigate_tree') {
+      worker.postMessage({ type: 'control_result', requestId: message.requestId, ok: true, result: {} })
+    }
+  })
+  try {
+    worker.postMessage({ type: 'init', payload: {
+      key: { conversationId: 'continuation-test', branchId: 'main' }, generation: 1,
+      cwd: root, agentDir, sessionDir, tools: [], model: 'continuation-mock/mock', thinkingLevel: 'off',
+    } })
+    await waitForMessage(worker, message => message.type === 'ready')
+    const completed = waitForMessage(worker, message =>
+      ['run_complete', 'run_error'].includes(message.type) && message.runId === 'compact-run', 45_000)
+    worker.postMessage({ type: 'prompt', payload: {
+      runId: 'compact-run', assistantMessageId: 'compact-assistant', prompt: 'Run two compact continuations',
+    } })
+    assert.equal((await completed).type, 'run_complete')
+    const events = messages.filter(message => message.type === 'event').map(message => message.event)
+    assert.equal(events.filter(event => event.type === 'tool_result').length, 6,
+      JSON.stringify(events.filter(event => ['tool_call', 'tool_result', 'error'].includes(event.type))))
+    assert.equal(messages.filter(message => message.type === 'control_request' && message.operation === 'navigate_tree').length, 2)
+    assert.ok(!events.some(event => event.type === 'error' || /continuation-failed/.test(event.message || '')))
+    assert.ok(!messages.some(message => message.type === 'extension_run_start'))
+    const next = waitForMessage(worker, message => ['run_complete', 'run_error'].includes(message.type) && message.runId === 'next')
+    worker.postMessage({ type: 'prompt', payload: { runId: 'next', assistantMessageId: 'next-assistant', prompt: 'Next message' } })
+    assert.equal((await next).type, 'run_complete')
+  } finally {
+    await worker.terminate()
+    await rm(root, { recursive: true, force: true })
+  }
+})

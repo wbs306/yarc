@@ -22,6 +22,7 @@ import type {
 } from '../lib/pi-runtime/protocol.js'
 import { SessionDurabilityCoordinator } from '../lib/pi-runtime/session-durability.js'
 import { AssistantAbortCoalescer } from '../lib/pi-runtime/assistant-abort-coalescer.js'
+import { isQuiescent, waitForRuntimeQuiescence } from '../lib/pi-runtime/quiescence.js'
 import { WebTuiSurface } from '../lib/pi-extension-ui/web-terminal.js'
 import { DEFAULT_CHAT_SYSTEM_PROMPT } from '../lib/prompts.js'
 import { persistFailedPromptIfMissing } from '../services/pi-failed-turn.js'
@@ -75,6 +76,7 @@ let assistantCount = 0
 let autoExtensionRun = false
 let autoExtensionCompletionScheduled = false
 let runIdleBarrier: { runId: string; promise: Promise<void>; resolve: () => void; signalled: boolean } | null = null
+let runtimeFailed = false
 let activeToolCount = 0
 let pendingCommits = 0
 let activityEpoch = 0
@@ -822,7 +824,7 @@ const signalRunIdleBoundary = (runId: string) => {
 }
 
 const beginAutoExtensionRun = () => {
-  if (activeRunId || !key) return
+  if (runtimeFailed || activeRunId || !key) return
   const runId = `extension-run-${randomUUID()}`
   const assistantMessageId = `extension-assistant-${randomUUID()}`
   activeRunId = runId
@@ -979,7 +981,7 @@ const handleSessionEvent = (event: any) => {
           post({ type: 'run_complete', runId, metadata: state })
         } catch (err) {
           resetWorkingUi()
-          post({ type: 'run_error', runId, error: (err as Error).message || 'Extension run failed', metadata: metadata() })
+          post({ type: 'run_error', runId, error: (err as Error).message || 'Extension run failed', metadata: metadata(), runtimeFailed: markFailedIfBusy() })
         } finally {
           if (activeRunId === runId) finishRun()
         }
@@ -1000,23 +1002,24 @@ const handleSessionEvent = (event: any) => {
   }
 }
 
-const waitForQuiescence = async () => {
-  let stable = 0
-  let previousEpoch = activityEpoch
-  const deadline = Date.now() + 30_000
-  while (Date.now() < deadline) {
-    await new Promise<void>(resolve => setTimeout(resolve, 0))
-    const idle = !!session?.isIdle && !session?.isStreaming && !session?.isCompacting
-      && (session?.pendingMessageCount || 0) === 0
-      && activeToolCount === 0
-      && pendingCommits === 0
-      && pending.size === 0
-    if (idle && previousEpoch === activityEpoch) stable += 1
-    else stable = 0
-    if (stable >= 2) return
-    previousEpoch = activityEpoch
-  }
-  throw new Error('Runtime did not reach a stable idle state')
+const quiescenceSnapshot = () => ({
+  idle: !!session?.isIdle,
+  streaming: !!session?.isStreaming,
+  compacting: !!session?.isCompacting,
+  pendingMessages: session?.pendingMessageCount || 0,
+  activeTools: activeToolCount,
+  pendingCommits,
+  pendingRequests: pending.size,
+  epoch: activityEpoch,
+})
+
+const waitForQuiescence = () => waitForRuntimeQuiescence(
+  quiescenceSnapshot, () => session.waitForIdle(),
+)
+
+const markFailedIfBusy = () => {
+  if (!isQuiescent(quiescenceSnapshot())) runtimeFailed = true
+  return runtimeFailed
 }
 
 const waitForCommandIdle = async () => {
@@ -1039,6 +1042,7 @@ const configureSession = async (payload: { model?: string; thinkingLevel?: strin
 }
 
 const beginRun = (runId: string, assistantMessageId: string, userMessageId?: string) => {
+  if (runtimeFailed) throw new Error('Runtime is recovering from an incomplete run')
   if (activeRunId) throw new Error('Runtime already has an active run')
   deferredAssistantAborts.clear()
   activeRunId = runId
@@ -1065,7 +1069,7 @@ const finishRun = () => {
   autoExtensionRun = false
   autoExtensionCompletionScheduled = false
   deferredAssistantAborts.clear()
-  post({ type: 'state', key: key!, generation, state: 'idle' })
+  post({ type: 'state', key: key!, generation, state: runtimeFailed ? 'failed' : 'idle' })
 }
 
 const flushDeferredAssistantAborts = () => {
@@ -1107,7 +1111,7 @@ const runPrompt = async (payload: Extract<RuntimeHostMessage, { type: 'prompt' }
   } catch (err) {
     signalRunIdleBoundary(payload.runId)
     await new Promise<void>(resolve => setTimeout(resolve, 50))
-    await waitForQuiescence().catch(() => {})
+    markFailedIfBusy()
     flushDeferredAssistantAborts()
     const message = (err as Error).message || 'Pi runtime failed'
     try {
@@ -1119,7 +1123,7 @@ const runPrompt = async (payload: Extract<RuntimeHostMessage, { type: 'prompt' }
     }
     emit({ type: 'error', message, conversationId: key?.conversationId, branchId: key?.branchId })
     resetWorkingUi()
-    post({ type: 'run_error', runId: payload.runId, error: message, metadata: metadata() })
+    post({ type: 'run_error', runId: payload.runId, error: message, metadata: metadata(), runtimeFailed: markFailedIfBusy() })
   } finally {
     finishRun()
   }
@@ -1147,7 +1151,7 @@ const runCompact = async (payload: Extract<RuntimeHostMessage, { type: 'compact'
     const message = (err as Error).message || 'Compaction failed'
     emit({ type: 'error', message, conversationId: key?.conversationId, branchId: key?.branchId })
     resetWorkingUi()
-    post({ type: 'run_error', runId: payload.runId, error: message, metadata: metadata() })
+    post({ type: 'run_error', runId: payload.runId, error: message, metadata: metadata(), runtimeFailed: markFailedIfBusy() })
   } finally {
     finishRun()
   }
@@ -1284,7 +1288,10 @@ parentPort.on('message', (message: RuntimeHostMessage) => {
     if (message.type === 'dispose') {
       resetWorkingUi()
       closeAllSurfaces('disposed')
-      if (activeRunId && !session.isIdle) await session.abort().catch(() => {})
+      // Failed runs have already cleared activeRunId, but the SDK may still
+      // be busy. Cancel by SDK state rather than the host's run bookkeeping.
+      session.abortCompaction?.()
+      if (!session.isIdle) await session.abort().catch(() => {})
       await waitForQuiescence().catch(() => {})
       emitMetadata()
       durability.commit(session.sessionFile)

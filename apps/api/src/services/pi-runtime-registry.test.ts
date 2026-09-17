@@ -110,3 +110,55 @@ describe('PiRuntimeRegistry startup reload handling', () => {
     await registry.disposeAll('test')
   })
 })
+
+describe('PiRuntimeRegistry failed-run recovery', () => {
+  it('does not turn an unhealthy run_error back into idle', async () => {
+    const registry = new PiRuntimeRegistry({ createToolHost: async () => ({ manifests: [], execute: async () => ({}) }) })
+    const record: any = {
+      state: 'running', extensionRuns: new Map(),
+      activeRun: { runId: 'failed-run', completed: false, queue: { push() {}, end() {} } },
+    }
+    ;(registry as any).saveMetadata = async () => {}
+    try {
+      await (registry as any).handleWorkerMessage(record, {
+        type: 'run_error', runId: 'failed-run', error: 'idle timeout', runtimeFailed: true,
+      })
+      assert.equal(record.state, 'failed')
+      assert.equal(record.activeRun, undefined)
+    } finally { await registry.disposeAll('test') }
+  })
+
+  it('serializes replacement and waits for disposal before reusing the session', async () => {
+    const registry = new PiRuntimeRegistry({ createToolHost: async () => ({ manifests: [], execute: async () => ({}) }) })
+    const internals = registry as any
+    const key = { conversationId: 'failed-conversation', branchId: 'main' }
+    const record = { key, state: 'failed', ready: Promise.resolve(), lastUsedAt: 0 }
+    const replacement = { key, state: 'idle' }
+    internals.records.set('failed-conversation:main', record)
+    let release!: () => void
+    const disposed = new Promise<void>(resolve => { release = resolve })
+    let creations = 0
+    let disposals = 0
+    internals.disposeRecord = async () => {
+      disposals++
+      record.state = 'disposing'
+      internals.records.delete('failed-conversation:main')
+      await disposed
+    }
+    internals.createRuntime = async () => { creations++; return replacement }
+    try {
+      const first = internals.ensure(key)
+      const second = internals.ensure(key)
+      await afterTimers()
+      const third = internals.ensure(key)
+      assert.equal(disposals, 1)
+      assert.equal(creations, 0)
+      release()
+      assert.deepEqual(await Promise.all([first, second, third]), [replacement, replacement, replacement])
+      assert.equal(creations, 1)
+    } finally {
+      release()
+      await registry.disposeAll('test')
+    }
+  })
+})

@@ -304,15 +304,30 @@ export class PiRuntimeRegistry {
   private async ensure(key: PiRuntimeKey, model?: string, thinkingLevel?: string): Promise<RuntimeRecord> {
     if (this.disposingConversations.has(key.conversationId)) throw new Error('Conversation is being disposed')
     const id = runtimeKey(key)
+    const inFlight = this.starting.get(id)
+    if (inFlight) return inFlight
     const existing = this.records.get(id)
     if (existing) {
       existing.lastUsedAt = Date.now()
       await existing.ready
-      if (existing.state === 'failed') throw new Error('Pi Runtime is unavailable')
+      // Another caller may have started recovery while we awaited ready and
+      // changed the old record from failed to disposing.
+      const recovery = this.starting.get(id)
+      if (recovery) return recovery
+      if (existing.state === 'failed') {
+        // Keep callers behind the same barrier until the old Worker is gone:
+        // two Workers must never write to the same session during recovery.
+        const replacement = (async () => {
+          await this.disposeRecord(existing, 'failed_run')
+          return this.createRuntime(key, model, thinkingLevel)
+        })()
+        this.starting.set(id, replacement)
+        try { return await replacement } finally {
+          if (this.starting.get(id) === replacement) this.starting.delete(id)
+        }
+      }
       return existing
     }
-    const inFlight = this.starting.get(id)
-    if (inFlight) return inFlight
     const creation = this.createRuntime(key, model, thinkingLevel)
     this.starting.set(id, creation)
     try { return await creation } finally { if (this.starting.get(id) === creation) this.starting.delete(id) }
@@ -496,6 +511,7 @@ export class PiRuntimeRegistry {
     if (message.type === 'metadata') { await this.saveMetadata(record, message.metadata); return }
 
     if (message.type === 'run_complete' || message.type === 'run_error') {
+      if (message.type === 'run_error' && message.runtimeFailed && record.state !== 'disposing') record.state = 'failed'
       await this.saveMetadata(record, message.metadata)
       const extensionRun = record.extensionRuns.get(message.runId)
       if (extensionRun) {
@@ -511,7 +527,7 @@ export class PiRuntimeRegistry {
           record.activeRun = undefined
         }
       }
-      if (record.state !== 'disposing') record.state = 'idle'
+      if (record.state !== 'disposing' && record.state !== 'failed') record.state = 'idle'
       if (record.state !== 'disposing' && record.pendingReload && record.extensionRuns.size === 0) {
         const pendingReload = record.pendingReload
         record.pendingReload = undefined

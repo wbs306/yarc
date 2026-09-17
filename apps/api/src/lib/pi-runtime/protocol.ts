@@ -82,7 +82,7 @@ export type RuntimeWorkerMessage =
   | { type: 'event'; runId?: string; event: ChatEvent }
   | { type: 'extension_run_start'; runId: string; key: PiRuntimeKey; assistantMessageId: string }
   | { type: 'run_complete'; runId: string; metadata: RuntimeMetadata }
-  | { type: 'run_error'; runId: string; error: string; metadata?: RuntimeMetadata }
+  | { type: 'run_error'; runId: string; error: string; metadata?: RuntimeMetadata; runtimeFailed?: boolean }
   | { type: 'metadata'; metadata: RuntimeMetadata }
   | { type: 'tool_request'; requestId: string; runId?: string; toolCallId: string; toolName: string; params: unknown }
   | { type: 'tool_abort'; requestId: string }
