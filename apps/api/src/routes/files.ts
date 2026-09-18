@@ -37,6 +37,11 @@ files.get('/', async (c) => {
   return c.json({ files: visible })
 })
 
+files.get('/resolve-reference', async (c) => {
+  const raw = c.req.query('path') || ''
+  return c.json({ file: await fileService.resolveFileReference(raw) })
+})
+
 files.get('/content', async (c) => {
   const raw = c.req.query('path')
   if (!raw) throw new AppError('MISSING_PATH', 'Path is required', 400)

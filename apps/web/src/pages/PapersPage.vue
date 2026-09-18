@@ -10,7 +10,7 @@ import { useApi, useTemporaryPdfUrl } from '@/composables/useApi'
 import { requestJson } from '@/lib/api-request'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
-import { normalizeWorkspaceFileReferencePath } from '@/lib/workspace-file-reference'
+import { normalizeFileReferencePath } from '@/lib/workspace-file-reference'
 import {
   WORKSPACE_RECENT_FILES_KEY,
   WORKSPACE_RECENT_FILES_LIMIT,
@@ -1395,11 +1395,37 @@ const openIeeeJournal = (id: string) => {
   setSidebarMode('ieee')
 }
 
+const projectIdFromRoute = () => conversationProjectIdForRoute(
+  route.name,
+  typeof route.params.id === 'string' ? route.params.id : undefined,
+)
+
+const projectIdFromCurrentConversation = () => {
+  const conversationId = chatStore.currentConvId
+  return conversationId
+    ? chatStore.conversations.find(conversation => conversation.id === conversationId)?.projectId || null
+    : null
+}
+
+const navigateToWorkspace = async (projectId: string | null) => {
+  const target = projectId
+    ? router.resolve({ name: 'project-workspace', params: { id: projectId } }).fullPath
+    : router.resolve({ name: 'files' }).fullPath
+  if (route.fullPath !== target) {
+    await router.push(target)
+    await nextTick()
+  }
+  sidebarMode.value = 'files'
+  projectPanel.value = 'files'
+  localStorage.setItem('yarc_sidebar_mode', 'files')
+}
+
 const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee' | 'projects') => {
   sidebarMode.value = mode
   localStorage.setItem('yarc_sidebar_mode', mode)
   // Like the existing library category, the active IEEE workspace and
   // journal are restored from localStorage rather than encoded in the URL.
+  const projectId = projectIdFromRoute()
   const target = mode === 'settings'
     ? { path: '/settings', query: { section: settingsSection.value } }
     : mode === 'projects'
@@ -1408,7 +1434,9 @@ const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee' | 'proje
         : route.name === 'project-settings' && typeof route.params.id === 'string'
           ? { path: `/projects/${route.params.id}/settings` }
           : { path: '/projects' })
-      : { path: mode === 'files' ? '/files' : '/' }
+      : mode === 'files' && projectId
+        ? { name: 'project-workspace', params: { id: projectId } }
+        : { path: mode === 'files' ? '/files' : '/' }
   if (route.fullPath !== router.resolve(target).fullPath) {
     router.replace(target).catch(() => {})
   }
@@ -1519,9 +1547,18 @@ const selectWorkspaceFile = async (node: FileNode) => {
   }
 }
 
+const resolveWorkspaceFileReference = async (rawPath: string): Promise<string | null> => {
+  try {
+    const result = await api.resolveFileReference(rawPath, projectIdFromCurrentConversation() || projectIdFromRoute())
+    if (!result.file) return null
+    return result.file.scope === 'global' ? `../../${result.file.path}` : result.file.path
+  } catch {
+    return null
+  }
+}
+
 const openWorkspaceFileReference = async (rawPath: string) => {
-  const path = normalizeWorkspaceFileReferencePath(rawPath)
-  const filesWorkspaceActive = sidebarMode.value === 'files' && (route.name === 'files' || route.name === 'project-workspace')
+  let referencePath = normalizeFileReferencePath(rawPath)
   if (isMobile.value) {
     mobileChat.value = false
     mobileSidebar.value = false
@@ -1529,23 +1566,41 @@ const openWorkspaceFileReference = async (rawPath: string) => {
     sidebarOpen.value = true
   }
 
-  if (!path) {
-    if (!filesWorkspaceActive) setSidebarMode('files')
+  if (!referencePath) {
     filesError.value = '文件引用路径无效'
     return
   }
 
-  if (selectedWorkspacePath.value === path) {
-    if (!filesWorkspaceActive) setSidebarMode('files')
-    filesError.value = ''
-    return
+  const isAbsoluteReference = referencePath.startsWith('/')
+    || /^[A-Za-z]:\//.test(referencePath)
+    || referencePath.startsWith('//')
+  if (isAbsoluteReference) {
+    const resolvedPath = await resolveWorkspaceFileReference(referencePath)
+    referencePath = resolvedPath ? normalizeFileReferencePath(resolvedPath) : null
+    if (!referencePath) {
+      filesError.value = `文件不存在或不可访问：${rawPath}`
+      return
+    }
   }
 
-  const needsInitialTreeLoad = !workspaceFiles.value.length || workspaceFilesStale
-  if (needsInitialTreeLoad) filesLoading.value = true
-  if (!filesWorkspaceActive) setSidebarMode('files')
+  const sharedReference = referencePath.startsWith('../../')
+  const path = sharedReference ? referencePath.slice('../../'.length) : referencePath
+  const projectId = sharedReference ? null : (projectIdFromCurrentConversation() || projectIdFromRoute())
   filesError.value = ''
+
   try {
+    // The API and live-file client derive their scope from the current URL.
+    // Finish navigation before loading the tree so a project reference cannot
+    // accidentally be requested from the global /files endpoint (or vice versa).
+    await navigateToWorkspace(projectId)
+
+    const currentScopeMatches = projectId
+      ? isProjectWorkspace.value && projectWorkspaceId.value === projectId
+      : !isProjectWorkspace.value
+    if (selectedWorkspacePath.value === path && currentScopeMatches) return
+
+    const needsInitialTreeLoad = !workspaceFiles.value.length || workspaceFilesStale
+    if (needsInitialTreeLoad) filesLoading.value = true
     if (needsInitialTreeLoad) await loadWorkspaceFiles(true)
     let node = await ensureWorkspaceNodeLoaded(path)
     if (!node && !needsInitialTreeLoad) {
@@ -5024,6 +5079,7 @@ const showSearchPaperPopup = (paper: any) => {
         <ChatPanel
           :current-resource="currentChatResource"
           :current-resource-notice="currentChatResourceNotice"
+          :resolve-file-reference="resolveWorkspaceFileReference"
           :show-current-resource-notice="!isProjectMode"
           :create-conversation="isProjectMode && route.params.id ? () => chatStore.createConversation(undefined, String(route.params.id)) : undefined"
           @close="isMobile ? (mobileChat = false) : (chatOpen = false)"

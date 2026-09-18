@@ -1,5 +1,5 @@
 import { readdir, stat, readFile, mkdir, rename, rm } from 'node:fs/promises'
-import { dirname, extname, relative, resolve, sep, basename } from 'node:path'
+import { dirname, extname, isAbsolute, relative, resolve, sep, basename } from 'node:path'
 import { atomicWriteFile, atomicWriteTextFile } from '../lib/atomic-file.js'
 import { config } from '../lib/config.js'
 import { assertGlobalFilesPathSafe, isProjectStoragePath } from '../lib/global-files-path.js'
@@ -305,6 +305,32 @@ export class FileService {
     }
 
     return this.sortNodes(nodes)
+  }
+
+  async resolveFileReference(filePath: string): Promise<string | null> {
+    const rawPath = filePath.trim()
+    if (!rawPath) return null
+
+    try {
+      const isAbsoluteReference = isAbsolute(rawPath)
+        || /^[A-Za-z]:[\\/]/.test(rawPath)
+        || rawPath.startsWith('\\\\')
+        || rawPath.startsWith('//')
+      let fullPath: string
+      if (isAbsoluteReference) {
+        const target = resolve(rawPath)
+        const root = resolve(this.rootDir)
+        if (target !== root && !target.startsWith(`${root}${sep}`)) return null
+        fullPath = await this.resolvePath(relative(this.rootDir, target).replace(/\\/g, '/'))
+      } else {
+        fullPath = await this.resolvePath(rawPath)
+      }
+
+      const info = await stat(fullPath)
+      return info.isFile() ? this.toRelativePath(fullPath) : null
+    } catch {
+      return null
+    }
   }
 
   async getFileContent(filePath: string): Promise<{

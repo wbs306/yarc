@@ -13,6 +13,28 @@ const encodePath = (path: string) => encodeURIComponent(path)
 
 const escapeMarkdownLabel = (text: string) => text.replace(/[\\`*_{}\[\]<>]/g, '\\$&')
 
+const isAbsoluteFilePath = (value: string) => /^(?:\/|[A-Za-z]:[\\/]|\\\\|\/\/)/.test(value)
+
+const normalizeAbsoluteFileReferencePath = (input?: string | null): string | null => {
+  if (!input) return null
+  const value = input.trim().replace(/\\/g, '/')
+  if (!value || /[\u0000-\u001f\u007f]/.test(value) || !isAbsoluteFilePath(value)) return null
+
+  let prefix = '/'
+  let remainder = value.slice(1)
+  if (value.startsWith('//')) {
+    prefix = '//'
+    remainder = value.slice(2)
+  } else if (/^[A-Za-z]:\//.test(value)) {
+    prefix = value.slice(0, 3)
+    remainder = value.slice(3)
+  }
+
+  const segments = remainder.split('/')
+  if (!segments.length || segments.some(segment => !segment || segment === '.' || segment === '..')) return null
+  return `${prefix}${segments.join('/')}`
+}
+
 export const normalizeWorkspaceFileReferencePath = (input?: string | null): string | null => {
   if (!input) return null
   const value = input.trim().replace(/\\/g, '/').replace(/^\/+/, '')
@@ -27,13 +49,54 @@ export const normalizeWorkspaceFileReferencePath = (input?: string | null): stri
   return segments.length ? segments.join('/') : null
 }
 
+// Project agents may reference a public file in the shared data workspace by
+// walking from the project root to data/ with exactly two parent segments.
+// Keep this separate from normal project paths so arbitrary traversal is never
+// accepted by the UI link handler.
+export const normalizeProjectSharedFileReferencePath = (input?: string | null): string | null => {
+  if (!input) return null
+  const value = input.trim().replace(/\\/g, '/')
+  if (!value || /[\u0000-\u001f\u007f]/.test(value) || !value.startsWith('../../')) return null
+
+  const segments = value.slice('../../'.length).split('/')
+  if (!segments.length || segments.some(segment => !segment || segment === '.' || segment === '..')) return null
+  if (new Set(['papers', 'projects', '.pi', '.project-history']).has(segments[0])) return null
+  if (segments.some(segment => segment.startsWith('.') && segment !== '.env.example')) return null
+  return `../../${segments.join('/')}`
+}
+
+export const normalizeFileReferencePath = (input?: string | null): string | null =>
+  normalizeAbsoluteFileReferencePath(input)
+  || normalizeWorkspaceFileReferencePath(input)
+  || normalizeProjectSharedFileReferencePath(input)
+
 export const parseWorkspaceFileReferenceHref = (href?: string | null): string | null => {
   if (!href?.startsWith(WORKSPACE_FILE_REFERENCE_PREFIX)) return null
   try {
-    return normalizeWorkspaceFileReferencePath(decodeURIComponent(href.slice(WORKSPACE_FILE_REFERENCE_PREFIX.length)))
+    return normalizeFileReferencePath(decodeURIComponent(href.slice(WORKSPACE_FILE_REFERENCE_PREFIX.length)))
   } catch {
     return null
   }
+}
+
+export const parseMarkdownFileReferenceHref = (href?: string | null): string | null => {
+  if (!href) return null
+  let value = href.trim()
+  if (!value || value.startsWith('#')) return null
+
+  try {
+    value = decodeURIComponent(value)
+  } catch {
+    return null
+  }
+  if (value.startsWith('<') && value.endsWith('>')) value = value.slice(1, -1).trim()
+  if (/^file:\/\//i.test(value)) value = value.slice('file://'.length)
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/i.test(value) && !/^[A-Za-z]:[\\/]/.test(value)) return null
+  if (value.startsWith('//')) return null
+
+  const suffixStart = value.search(/[?#]/)
+  if (suffixStart >= 0) value = value.slice(0, suffixStart)
+  return normalizeFileReferencePath(value)
 }
 
 const linkifyLine = (line: string) => {
@@ -88,7 +151,7 @@ const linkifyLine = (line: string) => {
       continue
     }
 
-    const path = normalizeWorkspaceFileReferencePath(rawPath)
+    const path = normalizeFileReferencePath(rawPath)
     if (!path) {
       output += rawReference
       cursor = referenceEnd

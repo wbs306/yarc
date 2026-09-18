@@ -14,6 +14,7 @@ import type {
   PaperReferenceResolution,
   ReparseAction,
   ReparsePaperInfo,
+  ResolvedWorkspaceFileReference,
   WebDavSyncConfig,
   WebDavSyncResult,
   WebDavSyncStatus,
@@ -482,6 +483,14 @@ export function useApi() {
     // Project workspace; the URL is scoped from the current /projects/:id route.
     getFileTree: (path?: string) =>
       request<{ files: FileNode[] }>(filesEndpoint(), { params: path ? { path } : {} }),
+
+    resolveFileReference: (path: string, projectId?: string | null) =>
+      request<{ file: ResolvedWorkspaceFileReference | null }>(
+        projectId
+          ? `/projects/${encodeURIComponent(projectId)}/files/resolve-reference`
+          : filesEndpoint('/resolve-reference'),
+        { params: { path } },
+      ),
 
     getGlobalFileTree: () =>
       request<{ files: FileNode[] }>('/files'),

@@ -18,6 +18,7 @@ const props = defineProps<{
   currentResourceNotice?: string
   showCurrentResourceNotice?: boolean
   createConversation?: () => Promise<unknown>
+  resolveFileReference?: (path: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
   close: []
@@ -1235,7 +1236,7 @@ const contextUsageTitle = computed(() => {
           <div v-else-if="item.error" class="btw-error">❌ {{ item.error }}</div>
           <div v-else-if="item.cancelled" class="btw-cancelled">已取消</div>
           <details v-if="item.thinking" class="btw-thinking"><summary>{{ chatStore.uiWorking.hiddenThinkingLabel || '思考记录' }}</summary><pre>{{ item.thinking }}</pre></details>
-          <MarkdownContent v-if="item.answer" class="btw-answer" :content="item.answer" file-references @open-file="emit('openFile', $event)" />
+          <MarkdownContent v-if="item.answer" class="btw-answer" :content="item.answer" file-references :resolve-file-reference="props.resolveFileReference" @open-file="emit('openFile', $event)" />
           <div v-if="!item.loading && item.answer && !item.error" class="btw-actions">
             <button class="btw-action-btn" @click="chatStore.insertBtwAnswer(item.runId || item.id)" title="插入输入框">📋 插入</button>
             <button class="btw-action-btn" @click="chatStore.sendBtwAsMainMessage(item.runId || item.id)" title="作为主消息发送">💬 发送</button>
@@ -1420,10 +1421,10 @@ const contextUsageTitle = computed(() => {
               </div>
             </template>
           </details>
-          <MarkdownContent v-else-if="seg.type === 'error'" class="msg-body error" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
-          <MarkdownContent v-else-if="seg.type === 'compaction'" class="msg-body compaction" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
-          <MarkdownContent v-else-if="seg.type === 'branch_summary'" class="msg-body compaction" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
-          <MarkdownContent v-else class="msg-body" :class="{ placeholder: isPlaceholderSegment(seg) }" :content="seg.text || ''" file-references @open-file="emit('openFile', $event)" />
+          <MarkdownContent v-else-if="seg.type === 'error'" class="msg-body error" :content="seg.text || ''" file-references :resolve-file-reference="props.resolveFileReference" @open-file="emit('openFile', $event)" />
+          <MarkdownContent v-else-if="seg.type === 'compaction'" class="msg-body compaction" :content="seg.text || ''" file-references :resolve-file-reference="props.resolveFileReference" @open-file="emit('openFile', $event)" />
+          <MarkdownContent v-else-if="seg.type === 'branch_summary'" class="msg-body compaction" :content="seg.text || ''" file-references :resolve-file-reference="props.resolveFileReference" @open-file="emit('openFile', $event)" />
+          <MarkdownContent v-else class="msg-body" :class="{ placeholder: isPlaceholderSegment(seg) }" :content="seg.text || ''" file-references :resolve-file-reference="props.resolveFileReference" @open-file="emit('openFile', $event)" />
         </template>
 
         <div v-if="msg.metadata?.citations?.length" class="msg-cites">

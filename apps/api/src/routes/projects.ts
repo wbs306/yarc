@@ -30,6 +30,7 @@ projects.post('/:id/unarchive', async (c) => c.json({ project: await projectServ
 projects.delete('/:id', async (c) => c.json(await projectService.delete(id(c))))
 
 projects.get('/:id/files', async (c) => c.json({ files: await projectFileService.getFileTree(id(c), c.req.query('path') || '') }))
+projects.get('/:id/files/resolve-reference', async (c) => c.json({ file: await projectFileService.resolveFileReference(id(c), c.req.query('path') || '') }))
 projects.get('/:id/files/content', async (c) => {
   const path = c.req.query('path') || ''
   if (!path) throw new AppError('MISSING_PATH', 'Path is required', 400)

@@ -1,14 +1,17 @@
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { config } from '../lib/config.js'
+import { assertGlobalFilesPathSafe } from '../lib/global-files-path.js'
 import { projectChangePath } from '../lib/project-change-path.js'
 import { sseHub } from '../lib/sse.js'
 import { AppError } from '../lib/errors.js'
-import { normalizeProjectRelativePath, resolveProjectPath } from '../lib/project-path.js'
+import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
+import { normalizePublicSharedFilePath, resolvePublicSharedFileReference } from './global-shared-file.service.js'
 import { getDataChangeWatcher, type DataChangeKind } from './data-change-watcher.js'
 import { projectHistoryService } from './project-history.service.js'
 import { projectLiveFileManager } from './project-live-file.service.js'
-import type { FileNode } from '@yarc/shared'
+import type { FileNode, ResolvedWorkspaceFileReference } from '@yarc/shared'
 
 export type ProjectFileNode = FileNode & {
   modifiedAt?: string
@@ -56,6 +59,12 @@ const assertProjectExposedPath = (path = '') => {
 const isEditableText = (path: string, size: number) =>
   (TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || TEXT_FILE_NAMES.has(basename(path))) && size <= 2 * 1024 * 1024
 
+const isInside = (root: string, target: string) => target === root || target.startsWith(`${root}${sep}`)
+const isAbsoluteReference = (value: string) => isAbsolute(value)
+  || /^[A-Za-z]:[\\/]/.test(value)
+  || value.startsWith('\\\\')
+  || value.startsWith('//')
+
 export class ProjectFileService {
   private emit(projectId: string, action: string, path?: string, live = false) {
     sseHub.emit({ type: 'project-files-changed', projectId, action, path, live, at: new Date().toISOString() })
@@ -66,6 +75,61 @@ export class ProjectFileService {
     await getDataChangeWatcher(change.root).publish({ path: change.path, kind, source: 'file-service' }).catch(error => {
       console.warn('[ProjectFile] failed to publish data change:', (error as Error).message)
     })
+  }
+
+  async resolveFileReference(projectId: string, filePath: string): Promise<ResolvedWorkspaceFileReference | null> {
+    const rawPath = filePath.trim()
+    if (!rawPath) return null
+
+    const { root } = await resolveProjectRoot(projectId)
+    const globalRoot = resolve(config.filesDir)
+    const normalizedPath = rawPath.replace(/\\/g, '/')
+
+    if (isAbsoluteReference(rawPath)) {
+      const target = resolve(rawPath)
+      if (isInside(root, target)) {
+        try {
+          const resolved = await resolveProjectPath(projectId, relative(root, target).replace(/\\/g, '/'))
+          const info = await lstat(resolved.fullPath)
+          return info.isFile() ? { scope: 'project', path: resolved.relativePath } : null
+        } catch {
+          return null
+        }
+      }
+      if (isInside(globalRoot, target)) {
+        try {
+          await assertGlobalFilesPathSafe(globalRoot, target)
+          const sharedPath = normalizePublicSharedFilePath(relative(globalRoot, target).replace(/\\/g, '/'))
+          if (!sharedPath) return null
+          const info = await lstat(target)
+          return info.isFile() ? { scope: 'global', path: sharedPath } : null
+        } catch {
+          return null
+        }
+      }
+      return null
+    }
+
+    if (normalizedPath.startsWith('../../')) {
+      try {
+        const sharedPath = resolvePublicSharedFileReference(normalizedPath)
+        if (!sharedPath) return null
+        const target = resolve(globalRoot, ...sharedPath.split('/'))
+        await assertGlobalFilesPathSafe(globalRoot, target)
+        const info = await lstat(target)
+        return info.isFile() ? { scope: 'global', path: sharedPath } : null
+      } catch {
+        return null
+      }
+    }
+
+    try {
+      const resolved = await resolveProjectPath(projectId, rawPath)
+      const info = await lstat(resolved.fullPath)
+      return info.isFile() ? { scope: 'project', path: resolved.relativePath } : null
+    } catch {
+      return null
+    }
   }
 
   async getFileTree(projectId: string, path = ''): Promise<ProjectFileNode[]> {

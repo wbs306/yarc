@@ -62,6 +62,11 @@ export interface ProjectSummary extends Project {
   git?: Pick<ProjectGitStatus, 'branch' | 'detached' | 'head' | 'dirty'>
 }
 
+export interface ResolvedWorkspaceFileReference {
+  scope: 'global' | 'project'
+  path: string
+}
+
 export interface ProjectGitFileStatus {
   path: string
   originalPath?: string
