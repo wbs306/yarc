@@ -13,7 +13,7 @@ import { DEFAULT_PROJECT_HISTORY_SETTINGS } from '../lib/project-history-setting
 
 const compress = promisify(brotliCompress)
 const decompress = promisify(brotliDecompress)
-const DEFAULT_EXTENSIONS = new Set(['.tex', '.bib', '.sty', '.cls', '.bst'])
+const DEFAULT_EXTENSIONS = new Set(['.md', '.tex', '.bib', '.sty', '.cls', '.bst'])
 const DELETED_HASH = createHash('sha256').update('').digest('hex')
 const GC_OBJECT_GRACE_MS = 5 * 60_000
 

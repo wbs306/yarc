@@ -82,8 +82,8 @@ onMounted(load)
       <button class="ghost" @click="router.push(`/projects/${projectId}`)">← {{ projectName }}</button>
       <div>
         <p class="eyebrow">Project Settings</p>
-        <h1>Writing History</h1>
-        <p>编辑器或文件 API 成功保存后会立即生成留痕；Idle debounce / Max interval 主要用于聚合外部文件变化。Git 仍只由用户显式提交，这里的设置不会自动创建 Git commit。</p>
+        <h1>版本历史</h1>
+        <p>编辑器或文件 API 成功保存后会自动生成版本；Idle debounce / Max interval 主要用于聚合外部文件变化。Git 仍只由用户显式提交，这里的设置不会自动创建 Git commit。</p>
       </div>
     </header>
 
@@ -91,7 +91,7 @@ onMounted(load)
     <div v-if="loading" class="empty">加载中…</div>
 
     <form v-else class="card" @submit.prevent="save">
-      <label class="check"><input v-model="settings.enabled" type="checkbox" /> 启用 Writing History</label>
+      <label class="check"><input v-model="settings.enabled" type="checkbox" /> 启用版本历史</label>
 
       <div class="grid two">
         <label>Idle debounce（秒）<input v-model.number="settings.idleDebounceSeconds" type="number" min="1" max="3600" /></label>
@@ -101,12 +101,12 @@ onMounted(load)
       </div>
 
       <div class="grid two">
-        <label>Include patterns<textarea v-model="includeText" rows="7" spellcheck="false" /><small>每行一个 glob。默认跟踪 tex / bib / sty / cls / bst。</small></label>
-        <label>Exclude patterns<textarea v-model="excludeText" rows="7" spellcheck="false" /><small>每行一个 glob；匹配项不会进入 Writing History。</small></label>
+        <label>Include patterns<textarea v-model="includeText" rows="7" spellcheck="false" /><small>每行一个 glob。默认跟踪 Markdown / tex / bib / sty / cls / bst。</small></label>
+        <label>Exclude patterns<textarea v-model="excludeText" rows="7" spellcheck="false" /><small>每行一个 glob；匹配项不会进入版本历史。</small></label>
       </div>
 
       <div class="actions">
-        <button class="primary" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存 Writing History 设置' }}</button>
+        <button class="primary" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存版本历史设置' }}</button>
         <span v-if="saved" class="saved">已保存</span>
       </div>
     </form>

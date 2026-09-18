@@ -2298,7 +2298,7 @@ const openProjectHistoryCompare = async (request: ProjectHistoryCompareRequest) 
         revisionId: revision.id,
         sourceLabel: request.kind === 'checkpoint'
           ? (request.checkpoint.label || request.checkpoint.kind)
-          : (revision.checkpoint?.label || revision.checkpoint?.kind || '版本留痕'),
+          : (revision.checkpoint?.label || revision.checkpoint?.kind || '版本历史'),
         sourceContent: historical.content,
         currentContent,
       }
@@ -2309,7 +2309,7 @@ const openProjectHistoryCompare = async (request: ProjectHistoryCompareRequest) 
       kind: request.kind,
       title: request.kind === 'checkpoint'
         ? `写作检查点 · ${request.checkpoint.label || request.checkpoint.kind}`
-        : `版本留痕 · ${request.revision.path}`,
+        : `版本历史 · ${request.revision.path}`,
       files,
     }
   } catch (error) {
@@ -4988,7 +4988,7 @@ const showSearchPaperPopup = (paper: any) => {
               <section class="project-history-compare-dialog" role="dialog" aria-modal="true" aria-label="历史版本对比">
                 <header class="project-history-compare-header">
                   <div>
-                    <span class="project-history-compare-kicker">Writing History</span>
+                    <span class="project-history-compare-kicker">版本历史</span>
                     <h2>{{ projectHistoryCompare?.title || '加载历史差异' }}</h2>
                     <p v-if="projectHistoryCompare">历史版本 → 当前版本 · {{ projectHistoryCompare.files.length }} 个文件</p>
                   </div>

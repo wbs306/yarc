@@ -183,7 +183,7 @@ const pinCheckpoint = (checkpoint: ProjectHistoryCheckpoint) => runMutation(asyn
   await loadHistory()
 })
 const restoreCheckpoint = async (checkpoint: ProjectHistoryCheckpoint) => {
-  if (!window.confirm(`恢复写作检查点“${checkpoint.label || checkpoint.kind}”？当前状态会先自动留痕。`)) return
+  if (!window.confirm(`恢复写作检查点“${checkpoint.label || checkpoint.kind}”？当前状态会先自动保存一个版本。`)) return
   await runMutation(async () => {
     await requestJson(`${apiRoot.value}/history/checkpoints/${checkpoint.id}/restore`, { method: 'POST' })
     await loadHistory()
@@ -217,8 +217,8 @@ const restoreRevision = async (revision: FileRevision) => {
         </span>
         <div>
           <p class="project-tools-kicker">项目工作区</p>
-          <h1>{{ mode === 'git' ? 'Git' : 'Writing History' }}</h1>
-          <p class="project-tools-subtitle">{{ mode === 'git' ? '整理变更并创建可追踪的版本' : '查看写作留痕，安全回到任意版本' }}</p>
+          <h1>{{ mode === 'git' ? 'Git' : '版本历史' }}</h1>
+          <p class="project-tools-subtitle">{{ mode === 'git' ? '整理变更并创建可追踪的版本' : '查看版本历史，安全回到任意版本' }}</p>
         </div>
       </div>
       <button class="project-tools-refresh" :class="{ refreshing: loading }" :disabled="loading" :title="mode === 'history' ? '刷新历史；必要时同步待处理记录' : '刷新'" @click="manualReload">
@@ -314,7 +314,7 @@ const restoreRevision = async (revision: FileRevision) => {
       <div v-if="selectedPath" class="project-selected-history">
         <span class="history-file-icon">⌁</span>
         <div><span>当前文件</span><code :title="selectedPath">{{ selectedPath }}</code></div>
-        <strong>{{ revisionCount }} 次留痕</strong>
+        <strong>{{ revisionCount }} 个版本</strong>
       </div>
       <div v-if="selectedPath && !revisions.length" class="project-tools-empty project-tools-empty-card">
         <span class="empty-state-icon">⌁</span>
@@ -323,12 +323,12 @@ const restoreRevision = async (revision: FileRevision) => {
       </div>
 
       <section v-if="revisions.length" class="project-history-section">
-        <div class="project-history-heading"><div><span class="group-kicker">当前文件</span><h2>版本留痕</h2></div><span class="group-count">{{ revisionCount }}</span></div>
+        <div class="project-history-heading"><div><span class="group-kicker">当前文件</span><h2>版本历史</h2></div><span class="group-count">{{ revisionCount }}</span></div>
         <div class="project-history-timeline">
           <article v-for="revision in revisions" :key="revision.id" class="project-history-row">
             <span class="history-marker" aria-hidden="true" />
             <div class="history-row-content">
-              <div class="history-row-top"><strong>{{ revision.checkpoint?.label || revision.checkpoint?.kind || '自动留痕' }}</strong><span class="history-kind">{{ revision.deleted ? '已删除' : '自动保存' }}</span></div>
+              <div class="history-row-top"><strong>{{ revision.checkpoint?.label || revision.checkpoint?.kind || '自动保存' }}</strong><span class="history-kind">{{ revision.deleted ? '已删除' : '自动保存' }}</span></div>
               <small>{{ new Date(revision.createdAt).toLocaleString() }} · {{ revision.deleted ? '文件已删除' : `${revision.size} B` }}</small>
               <div class="project-row-actions"><button @click="previewRevision(revision)">预览</button><button @click="emit('compare-history', { kind: 'revision', revision })">对比当前</button><button @click="restoreRevision(revision)">恢复</button></div>
             </div>

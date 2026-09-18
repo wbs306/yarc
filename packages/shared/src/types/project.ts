@@ -30,7 +30,7 @@ export interface ProjectHistorySettings {
 
 export const DEFAULT_PROJECT_HISTORY_SETTINGS: ProjectHistorySettings = {
   enabled: true,
-  include: ['**/*.tex', '**/*.bib', '**/*.sty', '**/*.cls', '**/*.bst'],
+  include: ['**/*.md', '**/*.tex', '**/*.bib', '**/*.sty', '**/*.cls', '**/*.bst'],
   exclude: [],
   idleDebounceSeconds: 30,
   maxIntervalSeconds: 120,
