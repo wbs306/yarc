@@ -1092,14 +1092,18 @@ export class SearchService {
     return response
   }
 
+  async downloadPdfOrThrow(url: string): Promise<Buffer> {
+    const response = await this.fetchPdfStream(url)
+    const buffer = Buffer.from(await response.arrayBuffer())
+    if (buffer.subarray(0, 5).toString('utf-8') !== '%PDF-') {
+      throw new Error('URL did not return a PDF file')
+    }
+    return buffer
+  }
+
   async downloadPdf(url: string): Promise<Buffer | null> {
     try {
-      const response = await this.fetchPdfStream(url)
-      const buffer = Buffer.from(await response.arrayBuffer())
-      if (buffer.subarray(0, 5).toString('utf-8') !== '%PDF-') {
-        throw new Error('URL did not return a PDF file')
-      }
-      return buffer
+      return await this.downloadPdfOrThrow(url)
     } catch (err) {
       console.error('PDF download failed:', err)
       return null

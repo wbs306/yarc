@@ -1,11 +1,17 @@
-import { createHash } from 'node:crypto'
-import { mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { config } from '../lib/config.js'
 import { mineruService } from './mineru.service.js'
 import { searchService } from './search.service.js'
 
 export type TemporaryPdfStatus = 'parsing' | 'ready' | 'failed'
+
+export interface TemporaryPdfPage {
+  page: number
+  text: string
+  images?: string[]
+}
 
 export interface TemporaryPdfDocument {
   id: string
@@ -20,6 +26,7 @@ export interface TemporaryPdfDocument {
 
 type TemporaryPdfEntry = TemporaryPdfDocument & {
   absoluteDir: string
+  pages?: TemporaryPdfPage[]
   lastAccessedAt: number
   parsePromise?: Promise<void>
   cleanupTimer?: ReturnType<typeof setTimeout>
@@ -37,9 +44,14 @@ const MAX_IDLE_MS = 2 * 60 * 60 * 1000
 const STALE_DISK_MS = 24 * 60 * 60 * 1000
 const DEFAULT_WAIT_TIMEOUT_MS = 180_000
 
+type TemporaryPdfParseResult = {
+  text: string
+  pages?: TemporaryPdfPage[]
+}
+
 type TemporaryPdfDependencies = {
   downloadPdf?: (url: string) => Promise<Buffer | null>
-  parsePdfToDirectory?: (pdfPath: string, outputDir: string) => Promise<{ text: string }>
+  parsePdfToDirectory?: (pdfPath: string, outputDir: string) => Promise<TemporaryPdfParseResult>
   dataDir?: string
   maxFileSize?: number
 }
@@ -49,12 +61,12 @@ export class TemporaryPdfService {
   private initialized = false
   private initializePromise: Promise<void> | null = null
   private readonly downloadPdf: (url: string) => Promise<Buffer | null>
-  private readonly parsePdfToDirectory: (pdfPath: string, outputDir: string) => Promise<{ text: string }>
+  private readonly parsePdfToDirectory: (pdfPath: string, outputDir: string) => Promise<TemporaryPdfParseResult>
   private readonly dataDir: string
   private readonly maxFileSize: number
 
   constructor(dependencies: TemporaryPdfDependencies = {}) {
-    this.downloadPdf = dependencies.downloadPdf || ((url) => searchService.downloadPdf(url))
+    this.downloadPdf = dependencies.downloadPdf || ((url) => searchService.downloadPdfOrThrow(url))
     this.parsePdfToDirectory = dependencies.parsePdfToDirectory || ((pdfPath, outputDir) => mineruService.parsePdfToDirectory(pdfPath, outputDir))
     this.dataDir = resolve(dependencies.dataDir || config.dataDir)
     this.maxFileSize = dependencies.maxFileSize || config.maxFileSize
@@ -169,6 +181,58 @@ export class TemporaryPdfService {
     return this.toDocument(entry)
   }
 
+  async readContent(id: string): Promise<string> {
+    const entry = await this.readyEntry(id)
+    return readFile(join(entry.absoluteDir, 'content.md'), 'utf-8')
+  }
+
+  async getPages(id: string): Promise<TemporaryPdfPage[]> {
+    const entry = await this.readyEntry(id)
+    if (entry.pages) return entry.pages
+
+    try {
+      const parsed = JSON.parse(await readFile(join(entry.absoluteDir, 'pages.json'), 'utf-8'))
+      if (!Array.isArray(parsed)) return []
+      entry.pages = parsed.flatMap((page: any) => {
+        const pageNumber = Number(page?.page)
+        const text = typeof page?.text === 'string' ? page.text : ''
+        if (!Number.isFinite(pageNumber) || !text.trim()) return []
+        return [{
+          page: pageNumber,
+          text,
+          images: Array.isArray(page?.images) ? page.images.map(String) : [],
+        }]
+      })
+      return entry.pages
+    } catch {
+      return []
+    }
+  }
+
+  async createView(id: string, content: string, cacheKey: unknown): Promise<string> {
+    const entry = await this.readyEntry(id)
+    const digest = createHash('sha256')
+      .update(JSON.stringify(cacheKey ?? null))
+      .update('\0')
+      .update(content)
+      .digest('hex')
+      .slice(0, 24)
+    const viewDir = join(entry.absoluteDir, 'views')
+    await mkdir(viewDir, { recursive: true })
+    const viewPath = join(viewDir, `${digest}.md`)
+    const existing = await stat(viewPath).catch(() => null)
+    if (existing?.isFile()) return relative(this.dataDir, viewPath).replace(/\\/g, '/')
+
+    const temporaryPath = join(viewDir, `.view-${randomUUID()}.tmp`)
+    try {
+      await writeFile(temporaryPath, content, 'utf-8')
+      await rename(temporaryPath, viewPath)
+    } finally {
+      await rm(temporaryPath, { force: true }).catch(() => {})
+    }
+    return relative(this.dataDir, viewPath).replace(/\\/g, '/')
+  }
+
   scheduleCleanup(id: string): boolean {
     const entry = this.entries.get(id)
     if (!entry) return false
@@ -236,6 +300,10 @@ export class TemporaryPdfService {
       await writeFile(pdfPath, pdf)
       const result = await this.parsePdfToDirectory(pdfPath, join(entry.absoluteDir, 'mineru'))
       if (!result.text.trim()) throw new Error('MinerU 未返回可读取的正文')
+      if (Array.isArray(result.pages) && result.pages.length > 0) {
+        entry.pages = result.pages
+        await writeFile(join(entry.absoluteDir, 'pages.json'), JSON.stringify(result.pages), 'utf-8')
+      }
 
       // Never expose a partially written content.md. The ready state is set
       // only after the complete temporary file has been renamed into place.
@@ -253,6 +321,14 @@ export class TemporaryPdfService {
     }
 
     if (entry.cleanupRequested) await this.removeEntry(entry.id)
+  }
+
+  private async readyEntry(id: string): Promise<TemporaryPdfEntry> {
+    await this.initialize()
+    const entry = this.entries.get(id)
+    if (!entry || entry.status !== 'ready' || !entry.path) throw new Error('临时 PDF 尚未准备好或已过期')
+    this.touch(entry)
+    return entry
   }
 
   private async cleanupIdleEntries() {

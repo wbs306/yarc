@@ -19,6 +19,7 @@ afterEach(async () => {
 
 const createService = async (options: {
   parseText?: string
+  parsePages?: Array<{ page: number; text: string }>
   parseDelayMs?: number
   downloadDelayMs?: number
 } = {}) => {
@@ -36,7 +37,10 @@ const createService = async (options: {
     parsePdfToDirectory: async (_pdfPath, _outputDir) => {
       parses++
       if (options.parseDelayMs) await new Promise(resolve => setTimeout(resolve, options.parseDelayMs))
-      return { text: options.parseText ?? '# Parsed paper\n' }
+      return {
+        text: options.parseText ?? '# Parsed paper\n',
+        ...(options.parsePages ? { pages: options.parsePages } : {}),
+      }
     },
     maxFileSize: 1024 * 1024,
   })
@@ -73,6 +77,25 @@ describe('TemporaryPdfService agent preview lifecycle', () => {
     assert.ok(ready.path)
     assert.equal(counters.downloads, 1)
     assert.equal(counters.parses, 1)
+  })
+
+  it('persists parsed pages and caches temporary readable views', async () => {
+    const { service, dataDir } = await createService({
+      parsePages: [
+        { page: 1, text: 'first page' },
+        { page: 2, text: 'second page' },
+      ],
+    })
+
+    const document = await service.ensureReady('https://example.com/pages.pdf', 'Pages paper', { timeoutMs: 1000 })
+    assert.deepEqual(await service.getPages(document.id), [
+      { page: 1, text: 'first page' },
+      { page: 2, text: 'second page' },
+    ])
+
+    const viewPath = await service.createView(document.id, '[page 2]\nsecond page', { mode: 'pages', startPage: 2, endPage: 2 })
+    assert.equal(await readFile(join(dataDir, viewPath), 'utf8'), '[page 2]\nsecond page')
+    assert.equal(await service.createView(document.id, '[page 2]\nsecond page', { mode: 'pages', startPage: 2, endPage: 2 }), viewPath)
   })
 
   it('records a failed parse without returning a path', async () => {
