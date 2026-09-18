@@ -15,6 +15,7 @@ import { rankingService } from './ranking.service.js'
 import { chatStreamControl } from '../lib/chat-stream-control.js'
 import { sseHub } from '../lib/sse.js'
 import { config } from '../lib/config.js'
+import { formatPathRelativeToWorkspace } from '../lib/agent-file-path.js'
 import { assertGlobalFilesPathSafe } from '../lib/global-files-path.js'
 import { applyAgentWorkspaceEnv, ensureAgentWorkspace, readAgentSettings } from '../lib/agent-workspace.js'
 import { getPiSessionMetadata, savePiSessionMetadata } from '../lib/pi-metadata.js'
@@ -309,13 +310,14 @@ export class PiService {
     await this.initPi()
     if (!this.piModule) return { manifests: [], execute: async () => ({ content: [{ type: 'text', text: 'Pi SDK unavailable' }], isError: true }) }
 
+    const agentWorkspace = await ensureAgentWorkspace()
     const dynamicInteractionContext = {
       get conversationId() { return context.getKey().conversationId },
       get branchId() { return context.getKey().branchId },
       get streamMessageId() { return context.getRunId() },
+      cwd: context.cwd || agentWorkspace.cwd,
       emit: context.emit,
     }
-    const agentWorkspace = await ensureAgentWorkspace()
     const yarcTools = this.filterChatTools(await this.createYarcTools(dynamicInteractionContext))
     const definitions = [...this.createWorkspaceToolOverrides(context.cwd || agentWorkspace.cwd), ...yarcTools]
     const byName = new Map(definitions.map((definition: any) => [definition.name, definition]))
@@ -635,12 +637,15 @@ export class PiService {
     conversationId?: string
     branchId?: string
     streamMessageId?: string
+    cwd?: string
     emit?: (event: ChatEvent) => void
   }) {
     if (!this.piModule) return []
 
     const { defineTool } = this.piModule
     const { Type } = await import('typebox')
+    const workspaceCwd = resolve(interactionContext?.cwd || config.dataDir)
+    const toAgentWorkspacePath = (path: string) => formatPathRelativeToWorkspace(path, workspaceCwd, config.dataDir)
 
     const askQuestionOptionSchema = Type.Object({
       label: Type.String(),
@@ -1085,7 +1090,7 @@ export class PiService {
       defineTool({
         name: 'yarc_search_papers',
         label: 'Search and Process Papers',
-        description: 'Search papers and process external results. action=search searches papers and defaults to IEEE for external searches; action=abstract gets a complete external abstract; action=preview temporarily downloads and MinerU-parses one or more PDFs, returning readable Markdown paths only when status=ready; while parsing or timed out, retry with the same temporaryId (for batch previews, put each temporaryId in its corresponding papers item) and do not read a path; action=import queues a formal library import. Use import only when the user explicitly asks to save/import a paper.',
+        description: 'Search papers and process external results. action=search searches papers and defaults to IEEE for external searches; action=abstract gets a complete external abstract; action=preview temporarily downloads and MinerU-parses one or more PDFs, returning Markdown paths relative to the active agent workspace only when status=ready. Use the exact returned Path with the built-in read tool; project chats use a ../../temporary-pdfs/... path for shared temporary previews. While parsing or timed out, retry with the same temporaryId (for batch previews, put each temporaryId in its corresponding papers item) and do not read a path; action=import queues a formal library import. Use import only when the user explicitly asks to save/import a paper.',
         parameters: Type.Object({
           action: Type.Optional(Type.Union([
             Type.Literal('search'),
@@ -1233,7 +1238,7 @@ export class PiService {
                   const temporaryId = typeof previewPaper.temporaryId === 'string'
                     ? previewPaper.temporaryId
                     : undefined
-                  const base = { index, title, source: itemSource, ...(temporaryId ? { temporaryId } : {}) }
+                  const base = { index, title, source: itemSource, readPath: undefined as string | undefined, ...(temporaryId ? { temporaryId } : {}) }
 
                   if (!['local', 'ieee', 'semantic_scholar'].includes(itemSource)) {
                     return { ...base, status: 'unavailable' as const, retryable: false, error: `Unsupported paper source: ${itemSource}` }
@@ -1305,6 +1310,7 @@ export class PiService {
                       status: 'ready' as const,
                       temporaryId: document.id,
                       path: document.path,
+                      readPath: toAgentWorkspacePath(document.path),
                       expiresAt: document.expiresAt,
                     }
                   } catch (err) {
@@ -1324,7 +1330,7 @@ export class PiService {
                 let text = `PDF preview batch: ${readyCount} ready, ${parsingCount} parsing, ${failedCount} failed out of ${previews.length}.`
                 for (const preview of previews) {
                   text += `\n\n${preview.index + 1}. ${preview.title} [${preview.status}]`
-                  if (preview.path) text += `\nPath: ${preview.path}`
+                  if (preview.path) text += `\nPath (relative to current agent workspace): ${preview.readPath || toAgentWorkspacePath(preview.path)}`
                   if (preview.temporaryId) text += `\nTemporary ID: ${preview.temporaryId}`
                   if (preview.expiresAt) text += `\nExpires: ${preview.expiresAt}`
                   if (preview.error) text += `\nError: ${preview.error}`
@@ -1389,8 +1395,9 @@ export class PiService {
               if (document.status === 'failed' || !document.path) {
                 return { content: [{ type: 'text' as const, text: `PDF preview failed: ${document.error || 'MinerU parsing failed'}` }], isError: true, details: { action, status: 'failed', temporaryId: document.id, retryable: true, error: document.error } }
               }
-              const text = `PDF preview is ready. Read the parsed Markdown with the built-in read tool.\nPath: ${document.path}\nTemporary ID: ${document.id}\nExpires: ${document.expiresAt || 'unknown'}\nMode: ${params.mode || 'full_text'}`
-              return { content: [{ type: 'text' as const, text }], details: { action, status: 'ready', temporaryId: document.id, path: document.path, title: document.title, source, expiresAt: document.expiresAt, mode: params.mode || 'full_text', startPage: params.startPage, endPage: params.endPage, maxChars: params.maxChars } }
+              const readPath = toAgentWorkspacePath(document.path)
+              const text = `PDF preview is ready. Read the parsed Markdown with the built-in read tool.\nPath (relative to current agent workspace): ${readPath}\nTemporary ID: ${document.id}\nExpires: ${document.expiresAt || 'unknown'}\nMode: ${params.mode || 'full_text'}`
+              return { content: [{ type: 'text' as const, text }], details: { action, status: 'ready', temporaryId: document.id, path: document.path, readPath, title: document.title, source, expiresAt: document.expiresAt, mode: params.mode || 'full_text', startPage: params.startPage, endPage: params.endPage, maxChars: params.maxChars } }
             }
 
             if (action === 'import') {
@@ -2707,15 +2714,16 @@ export class PiService {
     await this.refreshPiState()
 
     const { createAgentSession, DefaultResourceLoader } = this.piModule
+    const agentWorkspace = await ensureAgentWorkspace()
     let emitInteractionEvent: ((event: ChatEvent) => void) | null = null
     const yarcTools = await this.createYarcTools({
       conversationId: options.conversationId,
       branchId: options.branchId,
       streamMessageId: options.assistantMessageId,
+      cwd: agentWorkspace.cwd,
       emit: (event) => emitInteractionEvent?.(event),
     })
     const enabledTools = this.filterChatTools(yarcTools)
-    const agentWorkspace = await ensureAgentWorkspace()
 
     // Resolve model: use requested model or fall back to first available
     let model: any = undefined
