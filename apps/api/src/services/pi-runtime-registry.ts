@@ -541,7 +541,8 @@ export class PiRuntimeRegistry {
       record.toolAbortControllers.set(message.requestId, controller)
       try {
         const result = await record.toolHost.execute(message.toolName, message.toolCallId, message.params, controller.signal,
-          update => this.post(record, { type: 'tool_update', requestId: message.requestId, update }))
+          update => this.post(record, { type: 'tool_update', requestId: message.requestId, update }),
+          { skillFiles: message.skillFiles })
         this.post(record, { type: 'tool_result', requestId: message.requestId, ok: true, result })
       } catch (err) {
         this.post(record, { type: 'tool_result', requestId: message.requestId, ok: false, error: (err as Error).message })

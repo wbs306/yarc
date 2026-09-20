@@ -84,7 +84,7 @@ export type RuntimeWorkerMessage =
   | { type: 'run_complete'; runId: string; metadata: RuntimeMetadata }
   | { type: 'run_error'; runId: string; error: string; metadata?: RuntimeMetadata; runtimeFailed?: boolean }
   | { type: 'metadata'; metadata: RuntimeMetadata }
-  | { type: 'tool_request'; requestId: string; runId?: string; toolCallId: string; toolName: string; params: unknown }
+  | { type: 'tool_request'; requestId: string; runId?: string; toolCallId: string; toolName: string; params: unknown; skillFiles?: string[] }
   | { type: 'tool_abort'; requestId: string }
   | { type: 'control_request'; requestId: string; operation: string; payload?: unknown }
   | { type: 'ui_request'; requestId: string; runId?: string; kind: 'select' | 'confirm' | 'input' | 'editor'; payload: Record<string, unknown>; timeoutMs?: number }
@@ -109,5 +109,6 @@ export interface RuntimeToolHost {
     params: unknown,
     signal: AbortSignal,
     onUpdate: (update: unknown) => void,
+    resources?: { skillFiles?: string[] },
   ) => Promise<unknown>
 }

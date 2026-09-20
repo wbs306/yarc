@@ -218,6 +218,11 @@ const createProxyTools = (manifests: RuntimeToolManifest[]) => manifests.map(man
         toolCallId,
         toolName: manifest.name,
         params,
+        // Trusted loader metadata, separate from model-supplied tool arguments.
+        ...(manifest.name === 'read' ? {
+          skillFiles: (session?.resourceLoader?.getSkills?.().skills || [])
+            .map((skill: { filePath: string }) => skill.filePath),
+        } : {}),
       })
     })
     const abort = () => post({ type: 'tool_abort', requestId })

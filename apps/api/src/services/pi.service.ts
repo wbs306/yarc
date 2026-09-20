@@ -1,5 +1,6 @@
 import { prisma } from '@yarc/db'
 import { randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { access, mkdir } from 'node:fs/promises'
 import { extname, join, relative, resolve } from 'node:path'
 import { searchService } from './search.service.js'
@@ -27,6 +28,7 @@ import { persistFailedPromptIfMissing } from './pi-failed-turn.js'
 import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/mineru-content-v2.js'
 import { PiRuntimeRegistry } from './pi-runtime-registry.js'
 import { runJournalStore } from '../lib/pi-runtime/run-journal.js'
+import { resolveLoadedSkillReadPath } from '../lib/pi-runtime/skill-read-path.js'
 import type { RuntimeToolExecutionContext, RuntimeToolHost } from '../lib/pi-runtime/protocol.js'
 import type { AgentInteractionResponse, ChatEvent, PiComposerMirror, PiRuntimeKey } from '@yarc/shared'
 
@@ -355,7 +357,8 @@ export class PiService {
       emit: context.emit,
     }
     const yarcTools = this.filterChatTools(await this.createYarcTools(dynamicInteractionContext))
-    const definitions = [...this.createWorkspaceToolOverrides(context.cwd || agentWorkspace.cwd), ...yarcTools]
+    const skillReadContext = new AsyncLocalStorage<readonly string[]>()
+    const definitions = [...this.createWorkspaceToolOverrides(context.cwd || agentWorkspace.cwd, () => skillReadContext.getStore() || []), ...yarcTools]
     const byName = new Map(definitions.map((definition: any) => [definition.name, definition]))
     const manifests = definitions.map((definition: any) => ({
       name: String(definition.name),
@@ -370,7 +373,7 @@ export class PiService {
 
     return {
       manifests,
-      execute: async (toolName, toolCallId, params, signal, onUpdate) => {
+      execute: async (toolName, toolCallId, params, signal, onUpdate, resources) => {
         const definition: any = byName.get(toolName)
         if (!definition) throw new Error(`Unknown Runtime tool: ${toolName}`)
         this.emitAgentToolEvent('started', toolName, params)
@@ -379,7 +382,8 @@ export class PiService {
           // is no ExtensionContext/sessionManager to pass to the tool definition.
           // Passing `{}` makes Pi's bash tool try `ctx.sessionManager.getSessionId()`
           // and fail before it can spawn the command.
-          const result = await definition.execute(toolCallId, params, signal, onUpdate)
+          const result = await skillReadContext.run(resources?.skillFiles || [],
+            () => definition.execute(toolCallId, params, signal, onUpdate))
           this.emitAgentToolEvent(result?.isError ? 'failed' : 'completed', toolName, params, result, !!result?.isError)
           return result
         } catch (err) {
@@ -2920,7 +2924,8 @@ export class PiService {
         sessionManager,
         modelRuntime: this.modelRuntime,
         ...(model ? { model: this.modelForSession(model) } : {}),
-        customTools: [...this.createWorkspaceToolOverrides(agentWorkspace.cwd), ...enabledTools],
+        customTools: [...this.createWorkspaceToolOverrides(agentWorkspace.cwd,
+          () => (resourceLoader.getSkills?.().skills || []).map((skill: { filePath: string }) => skill.filePath)), ...enabledTools],
         resourceLoader,
       })
       session = result.session
@@ -3245,7 +3250,7 @@ export class PiService {
     }
   }
 
-  private createWorkspaceToolOverrides(cwd: string): any[] {
+  private createWorkspaceToolOverrides(cwd: string, getSkillFiles: () => readonly string[] = () => []): any[] {
     if (!this.piModule) return []
     const {
       createBashToolDefinition,
@@ -3268,15 +3273,17 @@ export class PiService {
       await assertGlobalFilesPathSafe(config.filesDir, sharedTarget)
       return sharedTarget
     }
+    const resolveReadPath = async (absolutePath: string) =>
+      await resolveLoadedSkillReadPath(absolutePath, getSkillFiles()) ?? await resolveToolPath(absolutePath)
     const readFile = async (absolutePath: string) => {
-      const mappedPath = await resolveToolPath(absolutePath)
+      const mappedPath = await resolveReadPath(absolutePath)
       const buffer = await liveFileService.readAgentFile(mappedPath)
       agentReadBases.set(absolutePath, buffer.toString('utf-8'))
       return buffer
     }
     const readOperations = {
       readFile,
-      access: async (absolutePath: string) => liveFileService.accessAgentFile(await resolveToolPath(absolutePath)),
+      access: async (absolutePath: string) => liveFileService.accessAgentFile(await resolveReadPath(absolutePath)),
       detectImageMimeType: async (absolutePath: string) => {
         const mimeTypes: Record<string, string> = {
           '.jpg': 'image/jpeg',
@@ -3291,6 +3298,15 @@ export class PiService {
     }
     const editOperations = {
       ...readOperations,
+      // Editing must not inherit the read-only skill exception, even for its
+      // preliminary access/read operations.
+      access: async (absolutePath: string) => liveFileService.accessAgentFile(await resolveToolPath(absolutePath)),
+      readFile: async (absolutePath: string) => {
+        const mappedPath = await resolveToolPath(absolutePath)
+        const buffer = await liveFileService.readAgentFile(mappedPath)
+        agentReadBases.set(absolutePath, buffer.toString('utf-8'))
+        return buffer
+      },
       writeFile: async (absolutePath: string, content: string) => {
         const mappedPath = await resolveToolPath(absolutePath)
         const baseContent = agentReadBases.get(absolutePath)
