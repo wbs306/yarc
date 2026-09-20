@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { installLastPageRestoration } from '@/lib/last-page'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -61,6 +62,11 @@ async function hasValidSession(): Promise<boolean> {
   localStorage.removeItem('yarc_auth')
   return false
 }
+
+installLastPageRestoration(router, {
+  getItem: key => localStorage.getItem(key),
+  setItem: (key, value) => localStorage.setItem(key, value),
+})
 
 router.beforeEach(async (to) => {
   const loggedIn = await hasValidSession()
