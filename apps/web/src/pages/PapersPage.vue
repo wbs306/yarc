@@ -145,6 +145,9 @@ const projectResource = ref<CurrentChatResource | null>(null)
 const projectPanel = ref<'files' | 'git' | 'history'>('files')
 const isProjectWorkspace = computed(() => route.name === 'project-workspace' && typeof route.params.id === 'string')
 const projectWorkspaceId = computed(() => isProjectWorkspace.value ? String(route.params.id) : '')
+const workspaceFileStorageKey = computed(() => projectWorkspaceId.value
+  ? `yarc_workspace_file:project:${projectWorkspaceId.value}`
+  : 'yarc_workspace_file')
 const conversationProjectIdForRoute = (name: unknown, id?: string) =>
   (name === 'project-workspace' || name === 'project-settings') && id ? id : null
 const projectDirectoryLabel = computed(() => projectsStore.currentProject?.directoryName || 'project')
@@ -1131,7 +1134,7 @@ const removeWorkspacePathLocally = (path: string) => {
 
   if (selectedWorkspacePath.value === normalizedPath || selectedWorkspacePath.value.startsWith(`${normalizedPath}/`)) {
     selectedWorkspaceFile.value = null
-    localStorage.removeItem('yarc_workspace_file')
+    localStorage.removeItem(workspaceFileStorageKey.value)
     clearWorkspaceEditor()
   }
   removeRecentWorkspacePath(normalizedPath)
@@ -1180,7 +1183,7 @@ const resetWorkspaceScope = () => {
   projectHistoryCompareError.value = ''
   projectHistoryCompareLoading.value = false
   clearWorkspaceEditor()
-  localStorage.removeItem('yarc_workspace_file')
+  // Reset only in-memory state; keep each workspace's active file for reload.
 }
 
 const workspaceParentPath = (path: string) => {
@@ -1505,7 +1508,7 @@ const selectWorkspaceFile = async (node: FileNode) => {
   latexBuildVisible.value = keepLatexBuild
   if (!keepLatexBuild) latexEntryPath.value = ''
   touchWorkspaceFile(node)
-  localStorage.setItem('yarc_workspace_file', node.path)
+  localStorage.setItem(workspaceFileStorageKey.value, node.path)
   filesError.value = ''
 
   const existingTab = openWorkspaceTabs.value.find((tab) => tab.file.path === node.path && isWorkspaceFile(tab.file))
@@ -1871,7 +1874,7 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
   // will run the normal switch preparation and snapshot the just-closed file back
   // into openWorkspaceTabs.
   selectedWorkspaceFile.value = null
-  localStorage.removeItem('yarc_workspace_file')
+  localStorage.removeItem(workspaceFileStorageKey.value)
   clearWorkspaceEditor()
 
   const nextTab = [...openWorkspaceTabs.value].filter((tab) => isWorkspaceFile(tab.file)).sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)[0]
@@ -1998,7 +2001,7 @@ const moveWorkspaceNode = async (node: FileNode, targetDirPath: string) => {
         : joinWorkspacePath(res.file.path, selectedBeforeMove.slice(node.path.length + 1))
       const movedSelectedNode = findWorkspaceNode(workspaceFiles.value, nextSelectedPath)
       selectedWorkspaceFile.value = null
-      localStorage.removeItem('yarc_workspace_file')
+      localStorage.removeItem(workspaceFileStorageKey.value)
       clearWorkspaceEditor()
       if (movedSelectedNode) await selectWorkspaceFile(movedSelectedNode)
       else filesError.value = `文件已移动，但未能重新打开：${nextSelectedPath}`
@@ -2780,13 +2783,25 @@ onMounted(async () => {
 
   if (route.name === 'home') await restorePersistedLibraryView()
 
-  // Restore workspace file if in files mode
+  // Restore only within the scope that requested the tree, and never replace
+  // a file the user opened while initialization was still pending.
   if (sidebarMode.value === 'files') {
+    const storageKey = workspaceFileStorageKey.value
+    const generation = workspaceLoadGeneration + 1
+    const canRestore = () => generation === workspaceLoadGeneration
+      && storageKey === workspaceFileStorageKey.value
+      && sidebarMode.value === 'files'
+      && !selectedWorkspaceFile.value
     await loadWorkspaceFiles()
-    const savedPath = localStorage.getItem('yarc_workspace_file')
+    if (!canRestore()) return
+    const savedPath = localStorage.getItem(storageKey)
     if (savedPath && workspaceFiles.value.length) {
-      const node = findWorkspaceNode(workspaceFiles.value, savedPath)
-      if (node) await selectWorkspaceFile(node)
+      try {
+        const node = await ensureWorkspaceNodeLoaded(savedPath)
+        if (canRestore() && node?.type === 'file') await selectWorkspaceFile(node)
+      } catch (err) {
+        if (canRestore()) filesError.value = (err as Error).message || '恢复文件失败'
+      }
     }
   }
 })
