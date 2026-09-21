@@ -25,6 +25,7 @@ import { yaml } from '@codemirror/lang-yaml'
 import { sql } from '@codemirror/lang-sql'
 import { vue } from '@codemirror/lang-vue'
 import { pairedStrongRule } from '@/lib/markdown-strong'
+import { latexKeymap } from '@/lib/latex-keymap'
 import {
   LATEX_COMMANDS,
   LATEX_ENVIRONMENTS,
@@ -175,6 +176,7 @@ const LATEX_ARGUMENT_COMMANDS = new Set([
 
 const latexLanguage = StreamLanguage.define<LatexParserState>({
   name: 'latex',
+  languageData: { commentTokens: { line: '%' } },
   startState: () => ({ pending: null, groups: [], math: false }),
   token(stream, state) {
     if (stream.eatSpace()) return null
@@ -267,7 +269,7 @@ function languageExtension(lang: string) {
       codeLanguages: mdCodeLanguages,
       extensions: pairedStrongEditorExtension,
     })
-    case 'latex': return latexLanguage
+    case 'latex': return [latexLanguage, latexKeymap]
     case 'python': return python()
     case 'css':
     case 'scss': return css()
