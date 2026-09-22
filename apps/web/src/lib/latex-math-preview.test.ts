@@ -128,3 +128,24 @@ test('switching LaTeX and Markdown rescans unchanged text and clears stale block
   state = state.update({ effects: compartment.reconfigure([]) }).state
   assert.equal(tooltipCount(state), 0)
 })
+
+for (const [language, extension] of [['latex', latexMathPreview], ['markdown', markdownMathPreview]] as const) {
+  test(`${language}: clicks within one formula reuse the tooltip renderer and update its anchor`, () => {
+    let state = EditorState.create({ doc: '$x+1$ and $y$', selection: { anchor: 1 }, extensions: [extension] })
+      .update({ effects: focusLatexMathPreview.of(true) }).state
+    const first = state.facet(showTooltip).find(Boolean)!
+    for (const anchor of [2, 4, 4, 1]) {
+      state = state.update({ selection: { anchor } }).state
+      const tooltip = state.facet(showTooltip).find(Boolean)!
+      assert.equal(tooltip.create, first.create)
+      assert.equal(tooltip.pos, anchor)
+    }
+    state = state.update({ selection: { anchor: 11 } }).state
+    assert.notEqual(state.facet(showTooltip).find(Boolean)!.create, first.create)
+    state = state.update({ selection: { anchor: 2 } }).state
+    assert.equal(state.facet(showTooltip).find(Boolean)!.create, first.create)
+    state = state.update({ changes: { from: 2, insert: '^2' } }).state
+    assert.notEqual(state.facet(showTooltip).find(Boolean)!.create, first.create)
+    assert.equal(state.field(latexMathPreviewState).ranges[0].source, 'x^2+1')
+  })
+}

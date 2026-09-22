@@ -42,8 +42,15 @@ export const latexMathPreviewState = StateField.define<PreviewState>({
   },
 })
 
+// CodeMirror reuses a tooltip view by its `create` function identity. Keep
+// that identity for a scanned formula while allowing the anchor to follow
+// the caret. Weak keys release old entries after edits or editor disposal.
+const formulaTooltips = new WeakMap<LatexMathRange, Tooltip>()
+
 function previewTooltip(range: LatexMathRange, position: number): Tooltip {
-  return {
+  const cached = formulaTooltips.get(range)
+  if (cached) return { ...cached, pos: position }
+  const tooltip: Tooltip = {
     pos: position,
     above: true,
     arrow: true,
@@ -89,6 +96,8 @@ function previewTooltip(range: LatexMathRange, position: number): Tooltip {
       return { dom, destroy: () => window.clearTimeout(timer) }
     },
   }
+  formulaTooltips.set(range, tooltip)
+  return tooltip
 }
 
 export function hideLatexMathPreview(view: EditorView) {
