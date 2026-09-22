@@ -21,9 +21,13 @@ function environmentSource(source: string, environment?: string) {
 // Lightweight lexical scan, not a full TeX parser. Keep ranges cached between
 // cursor moves, skip comments/verbatim, and bound unfinished math so a missing
 // delimiter cannot turn the rest of a document into a preview.
-export function scanLatexMath(text: string): LatexMathRange[] {
+export function scanLatexMath(text: string, dialect: 'latex' | 'markdown' = 'latex'): LatexMathRange[] {
   const ranges: LatexMathRange[] = []
-  const tokens = /%[^\n]*|\\(?:begin|end)\{([A-Za-z*]+)\}|\\verb\*?(?![A-Za-z])|\\[()[\]]|\\.|\${1,2}/g
+  // Markdown callers mask code regions first; percent signs and TeX commands
+  // outside dollar math are ordinary prose, not comments or math openers.
+  const tokens = dialect === 'markdown'
+    ? /\\.|\${1,2}/g
+    : /%[^\n]*|\\(?:begin|end)\{([A-Za-z*]+)\}|\\verb\*?(?![A-Za-z])|\\[()[\]]|\\.|\${1,2}/g
   let active: { from: number; close: string; display: boolean; environment?: string; limit: number } | undefined
   let match: RegExpExecArray | null
 
@@ -77,10 +81,10 @@ export function scanLatexMath(text: string): LatexMathRange[] {
     if (token === '$' || token === '$$') {
       close = token
       display = token === '$$'
-    } else if (token === '\\(') {
+    } else if (dialect === 'latex' && token === '\\(') {
       close = '\\)'
       display = false
-    } else if (token === '\\[') {
+    } else if (dialect === 'latex' && token === '\\[') {
       close = '\\]'
     } else if (environment && token.startsWith('\\begin') && mathEnvironments.has(environment)) {
       close = `\\end{${environment}}`

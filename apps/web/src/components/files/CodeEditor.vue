@@ -26,6 +26,7 @@ import { sql } from '@codemirror/lang-sql'
 import { vue } from '@codemirror/lang-vue'
 import { pairedStrongRule } from '@/lib/markdown-strong'
 import { latexKeymap } from '@/lib/latex-keymap'
+import { deleteEditorPair, insertEditorPair } from '@/lib/editor-pairs'
 import { blockLatexMathPreview, focusLatexMathPreview, hideLatexMathPreview, latexMathPreview } from '@/lib/latex-math-preview'
 import {
   LATEX_COMMANDS,
@@ -95,19 +96,6 @@ const collabConf = new Compartment()
 const fontTheme = (size: number) => EditorView.theme({ '&': { fontSize: `${size}px` } })
 const tabExtension = (n: number) => [EditorState.tabSize.of(n), indentUnit.of(' '.repeat(n))]
 const gutterExtension = (on: boolean) => (on ? [lineNumbers(), highlightActiveLineGutter(), foldGutter()] : [])
-const surroundPairs: Record<string, readonly [string, string]> = {
-  "'": ["'", "'"],
-  '"': ['"', '"'],
-  '`': ['`', '`'],
-  '(': ['(', ')'],
-  ')': ['(', ')'],
-  '[': ['[', ']'],
-  ']': ['[', ']'],
-  '{': ['{', '}'],
-  '}': ['{', '}'],
-  '<': ['<', '>'],
-  '>': ['<', '>'],
-}
 
 // Reuse the already-installed language packs to highlight fenced code blocks in markdown.
 const mdCodeLanguages = [
@@ -294,33 +282,6 @@ const baseTheme = EditorView.theme({
 
 function isDark() {
   return document.documentElement.getAttribute('data-theme') === 'dark'
-}
-
-function surroundSelectedText(view: EditorView, open: string, close: string) {
-  if (props.readonly || view.state.selection.ranges.every((range) => range.empty)) return false
-
-  view.dispatch({
-    ...view.state.changeByRange((range) => {
-      if (range.empty) return { range }
-      const selectedText = view.state.sliceDoc(range.from, range.to)
-      return {
-        changes: { from: range.from, to: range.to, insert: `${open}${selectedText}${close}` },
-        range: EditorSelection.range(range.from + open.length, range.to + open.length),
-      }
-    }),
-    scrollIntoView: true,
-    userEvent: 'input.type',
-  })
-  return true
-}
-
-function handleSurroundSelectionKeydown(event: KeyboardEvent, view: EditorView) {
-  if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1) return false
-  const pair = surroundPairs[event.key]
-  if (!pair || !surroundSelectedText(view, pair[0], pair[1])) return false
-
-  event.preventDefault()
-  return true
 }
 
 function collabExtension() {
@@ -527,7 +488,15 @@ const handleEditorKeydown = (event: KeyboardEvent, editor: EditorView) => {
     event.preventDefault()
     return true
   }
-  return handleSurroundSelectionKeydown(event, editor)
+  if (!props.readonly
+    && !event.isComposing && !editor.composing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    const command = event.key === 'Backspace' ? deleteEditorPair(props.language) : insertEditorPair(event.key, props.language)
+    if (command(editor)) {
+      event.preventDefault()
+      return true
+    }
+  }
+  return false
 }
 
 // ── Custom find/replace panel ──
