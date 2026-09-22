@@ -26,6 +26,7 @@ import { sql } from '@codemirror/lang-sql'
 import { vue } from '@codemirror/lang-vue'
 import { pairedStrongRule } from '@/lib/markdown-strong'
 import { latexKeymap } from '@/lib/latex-keymap'
+import { blockLatexMathPreview, focusLatexMathPreview, hideLatexMathPreview, latexMathPreview } from '@/lib/latex-math-preview'
 import {
   LATEX_COMMANDS,
   LATEX_ENVIRONMENTS,
@@ -269,7 +270,7 @@ function languageExtension(lang: string) {
       codeLanguages: mdCodeLanguages,
       extensions: pairedStrongEditorExtension,
     })
-    case 'latex': return [latexLanguage, latexKeymap]
+    case 'latex': return [latexLanguage, latexKeymap, latexMathPreview]
     case 'python': return python()
     case 'css':
     case 'scss': return css()
@@ -522,6 +523,10 @@ const handleLatexCompletionKeydown = (event: KeyboardEvent, editor: EditorView) 
 
 const handleEditorKeydown = (event: KeyboardEvent, editor: EditorView) => {
   if (handleLatexCompletionKeydown(event, editor)) return true
+  if (event.key === 'Escape' && hideLatexMathPreview(editor)) {
+    event.preventDefault()
+    return true
+  }
   return handleSurroundSelectionKeydown(event, editor)
 }
 
@@ -987,9 +992,17 @@ watch(() => props.collabYText, (ytext) => {
   scheduleMinimapDraw()
 })
 
+// Give command completion priority: resume the formula preview once its menu
+// closes, rather than placing two floating panels on top of each other.
+watch(latexCompletionVisible, (visible) => {
+  view.value?.dispatch({ effects: blockLatexMathPreview.of(visible) })
+})
+
 watch(() => props.language, (lang) => {
-  view.value?.dispatch({ effects: languageConf.reconfigure(languageExtension(lang)) })
+  const editor = view.value
+  editor?.dispatch({ effects: languageConf.reconfigure(languageExtension(lang)) })
   if (lang !== 'latex') hideLatexCompletion()
+  else if (editor) editor.dispatch({ effects: focusLatexMathPreview.of(editor.hasFocus) })
 })
 
 watch(() => props.readonly, (ro) => {
