@@ -1,6 +1,6 @@
 import { EditorSelection, type EditorState, type StateCommand } from '@codemirror/state'
-import { markdownLanguage } from '@codemirror/lang-markdown'
-import { mathAtPosition, scanLatexMath } from './latex-math'
+import { mathAtPosition } from './latex-math'
+import { scanEditorMath } from './editor-math'
 
 const openingPairs: Record<string, string> = { '(': ')', '[': ']', '{': '}', '$': '$' }
 const closingPairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' }
@@ -18,38 +18,13 @@ function isEscaped(state: EditorState, position: number) {
   return backslashes % 2 === 1
 }
 
-function mathContext(state: EditorState, language: string) {
-  const text = state.doc.toString()
-  const code: { from: number; to: number; includeEnd: boolean }[] = []
-  if (language === 'markdown') {
-    // Parse beyond the viewport too. Mask code while preserving offsets and
-    // blank lines; dollars in code must not affect surrounding prose math.
-    markdownLanguage.parser.parse(text).iterate({
-      enter(node) {
-        if (!['InlineCode', 'FencedCode', 'CodeBlock'].includes(node.name)) return
-        code.push({ from: node.from, to: node.to, includeEnd: node.name === 'CodeBlock'
-          || (node.name === 'FencedCode' && node.node.lastChild?.name !== 'CodeMark') })
-        return false
-      },
-    })
-  }
-  let from = 0
-  const parts: string[] = []
-  for (const range of code) {
-    parts.push(text.slice(from, range.from), text.slice(range.from, range.to).replace(/[^\n]/g, ' '))
-    from = range.to
-  }
-  parts.push(text.slice(from))
-  return { ranges: scanLatexMath(parts.join(''), language === 'markdown' ? 'markdown' : 'latex'), code }
-}
-
 export function insertEditorPair(key: string, language: string): StateCommand {
   return ({ state, dispatch }) => {
     const dollars = language === 'latex' || language === 'markdown'
     const selectionOnly = Object.hasOwn(selectionPairs, key)
     if (state.readOnly || (key === '$' && !dollars)
       || !(Object.hasOwn(openingPairs, key) || Object.hasOwn(closingPairs, key) || selectionOnly)) return false
-    const math = key === '$' ? mathContext(state, language) : undefined
+    const math = key === '$' ? scanEditorMath(state.doc.toString(), language) : undefined
     let handled = false
     const transaction = state.changeByRange(range => {
       const { from, to } = range
@@ -102,7 +77,7 @@ export function deleteEditorPair(language: string): StateCommand {
     if (state.readOnly) return false
     const dollars = language === 'latex' || language === 'markdown'
     const code = language === 'markdown' && state.selection.ranges.some(range => range.from > 0 && state.sliceDoc(range.from - 1, range.from) === '$')
-      ? mathContext(state, language).code : []
+      ? scanEditorMath(state.doc.toString(), language).code : []
     const pairs = state.selection.ranges.map(range => {
       if (!range.empty || range.from === 0 || (language === 'latex' && isEscaped(state, range.from - 1))) return null
       const { from } = range

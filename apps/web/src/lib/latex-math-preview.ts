@@ -1,11 +1,15 @@
 import katex from 'katex'
-import { StateEffect, StateField, type Extension } from '@codemirror/state'
+import { Facet, StateEffect, StateField, type Extension } from '@codemirror/state'
 import { EditorView, showTooltip, type Tooltip } from '@codemirror/view'
-import { mathAtPosition, scanLatexMath, type LatexMathRange } from './latex-math'
+import { mathAtPosition, type LatexMathRange } from './latex-math'
+import { scanEditorMath } from './editor-math'
 
 export const blockLatexMathPreview = StateEffect.define<boolean>()
 export const focusLatexMathPreview = StateEffect.define<boolean>()
 const dismissPreview = StateEffect.define<null>()
+const previewDialect = Facet.define<'latex' | 'markdown', 'latex' | 'markdown'>({
+  combine: values => values[0] ?? 'latex',
+})
 
 interface PreviewState {
   ranges: LatexMathRange[]
@@ -15,13 +19,17 @@ interface PreviewState {
 }
 
 export const latexMathPreviewState = StateField.define<PreviewState>({
-  create: state => ({ ranges: scanLatexMath(state.doc.toString()), focused: false, blocked: false, dismissed: false }),
+  create: state => ({ ranges: scanEditorMath(state.doc.toString(), state.facet(previewDialect)).ranges, focused: false, blocked: false, dismissed: false }),
   update(value, transaction) {
     let next = value
-    if (transaction.docChanged || transaction.selection) {
+    const dialect = transaction.state.facet(previewDialect)
+    const dialectChanged = dialect !== transaction.startState.facet(previewDialect)
+    if (transaction.docChanged || transaction.selection || dialectChanged) {
       next = {
         ...value,
-        ranges: transaction.docChanged ? scanLatexMath(transaction.newDoc.toString()) : value.ranges,
+        ranges: transaction.docChanged || dialectChanged
+          ? scanEditorMath(transaction.newDoc.toString(), dialect).ranges : value.ranges,
+        blocked: dialectChanged ? false : value.blocked,
         dismissed: false,
       }
     }
@@ -54,7 +62,8 @@ function previewTooltip(range: LatexMathRange, position: number): Tooltip {
       body.textContent = '正在预览…'
       const note = document.createElement('div')
       note.className = 'latex-math-preview-note'
-      note.textContent = 'KaTeX 预览，最终效果以编译结果为准'
+      note.textContent = view.state.facet(previewDialect) === 'markdown'
+        ? 'KaTeX 公式预览' : 'KaTeX 预览，最终效果以编译结果为准'
       dom.append(heading, body, note)
       // No document compilation, network requests, or persisted macro state.
       const timer = window.setTimeout(() => {
@@ -132,3 +141,5 @@ export const latexMathPreview: Extension = [
     '.latex-math-preview-body .katex-display': { margin: '0' },
   }),
 ]
+
+export const markdownMathPreview: Extension = [previewDialect.of('markdown'), latexMathPreview]

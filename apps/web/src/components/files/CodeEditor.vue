@@ -27,7 +27,7 @@ import { vue } from '@codemirror/lang-vue'
 import { pairedStrongRule } from '@/lib/markdown-strong'
 import { latexKeymap } from '@/lib/latex-keymap'
 import { deleteEditorPair, insertEditorPair } from '@/lib/editor-pairs'
-import { blockLatexMathPreview, focusLatexMathPreview, hideLatexMathPreview, latexMathPreview } from '@/lib/latex-math-preview'
+import { blockLatexMathPreview, focusLatexMathPreview, hideLatexMathPreview, latexMathPreview, markdownMathPreview } from '@/lib/latex-math-preview'
 import {
   LATEX_COMMANDS,
   LATEX_ENVIRONMENTS,
@@ -254,10 +254,10 @@ function languageExtension(lang: string) {
     case 'javascript': return javascript({ jsx: true })
     case 'vue': return vue()
     case 'json': return json()
-    case 'markdown': return markdown({
+    case 'markdown': return [markdown({
       codeLanguages: mdCodeLanguages,
       extensions: pairedStrongEditorExtension,
-    })
+    }), markdownMathPreview]
     case 'latex': return [latexLanguage, latexKeymap, latexMathPreview]
     case 'python': return python()
     case 'css':
@@ -971,7 +971,9 @@ watch(() => props.language, (lang) => {
   const editor = view.value
   editor?.dispatch({ effects: languageConf.reconfigure(languageExtension(lang)) })
   if (lang !== 'latex') hideLatexCompletion()
-  else if (editor) editor.dispatch({ effects: focusLatexMathPreview.of(editor.hasFocus) })
+  if (editor && (lang === 'latex' || lang === 'markdown')) {
+    editor.dispatch({ effects: focusLatexMathPreview.of(editor.hasFocus) })
+  }
 })
 
 watch(() => props.readonly, (ro) => {
