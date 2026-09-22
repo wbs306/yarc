@@ -37,6 +37,11 @@ const selectedPaths = ref<string[]>([])
 const commitMessage = ref('')
 const checkpoints = ref<ProjectHistoryCheckpoint[]>([])
 const revisions = ref<FileRevision[]>([])
+const historyPageSize = 10
+const checkpointVisibleCount = ref(historyPageSize)
+const revisionVisibleCount = ref(historyPageSize)
+const visibleCheckpoints = computed(() => checkpoints.value.slice(0, checkpointVisibleCount.value))
+const visibleRevisions = computed(() => revisions.value.slice(0, revisionVisibleCount.value))
 const preview = ref<{ title: string; content: string | null } | null>(null)
 
 const apiRoot = computed(() => `/api/projects/${encodeURIComponent(props.projectId)}`)
@@ -127,7 +132,12 @@ onBeforeUnmount(() => {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer)
 })
 
+watch(() => [props.projectId, props.mode] as const, () => {
+  checkpointVisibleCount.value = historyPageSize
+})
+
 watch(() => [props.projectId, props.mode, props.selectedPath] as const, () => {
+  revisionVisibleCount.value = historyPageSize
   // A project/panel switch must not show the previous project's data while loading.
   // Background refreshes keep contentReady=true so the current view stays stable.
   contentReady.value = false
@@ -325,7 +335,7 @@ const restoreRevision = async (revision: FileRevision) => {
       <section v-if="revisions.length" class="project-history-section">
         <div class="project-history-heading"><div><span class="group-kicker">当前文件</span><h2>版本历史</h2></div><span class="group-count">{{ revisionCount }}</span></div>
         <div class="project-history-timeline">
-          <article v-for="revision in revisions" :key="revision.id" class="project-history-row">
+          <article v-for="revision in visibleRevisions" :key="revision.id" class="project-history-row">
             <span class="history-marker" aria-hidden="true" />
             <div class="history-row-content">
               <div class="history-row-top"><strong>{{ revision.checkpoint?.label || revision.checkpoint?.kind || '自动保存' }}</strong><span class="history-kind">{{ revision.deleted ? '已删除' : '自动保存' }}</span></div>
@@ -334,13 +344,14 @@ const restoreRevision = async (revision: FileRevision) => {
             </div>
           </article>
         </div>
+        <button v-if="revisionVisibleCount < revisions.length" type="button" class="project-tool-button history-load-more" @click="revisionVisibleCount += historyPageSize">加载更多</button>
       </section>
 
       <section class="project-history-section">
         <div class="project-history-heading"><div><span class="group-kicker">项目时间线</span><h2>写作检查点</h2></div><span class="group-count">{{ checkpointCount }}</span></div>
         <div v-if="!checkpoints.length" class="project-tools-empty project-tools-empty-card compact"><span>暂时还没有写作检查点。</span></div>
         <div v-else class="project-history-timeline">
-          <article v-for="checkpoint in checkpoints" :key="checkpoint.id" class="project-history-row" :class="{ pinned: checkpoint.pinned }">
+          <article v-for="checkpoint in visibleCheckpoints" :key="checkpoint.id" class="project-history-row" :class="{ pinned: checkpoint.pinned }">
             <span class="history-marker" :class="{ pinned: checkpoint.pinned }" aria-hidden="true">{{ checkpoint.pinned ? '★' : '' }}</span>
             <div class="history-row-content">
               <div class="history-row-top"><strong>{{ checkpoint.label || checkpoint.kind }}</strong><span v-if="checkpoint.pinned" class="history-kind pinned-label">已固定</span></div>
@@ -349,6 +360,7 @@ const restoreRevision = async (revision: FileRevision) => {
             </div>
           </article>
         </div>
+        <button v-if="checkpointVisibleCount < checkpoints.length" type="button" class="project-tool-button history-load-more" @click="checkpointVisibleCount += historyPageSize">加载更多</button>
       </section>
     </template>
 
@@ -466,6 +478,7 @@ const restoreRevision = async (revision: FileRevision) => {
 .project-tool-button:hover:not(:disabled),.git-row-action:hover,.project-row-actions button:hover { border-color: var(--color-primary); background: var(--color-primary-soft); color: var(--color-primary); }
 .project-tool-button:active:not(:disabled),.git-row-action:active,.project-row-actions button:active { transform: scale(.97); }
 .project-tool-button:disabled { cursor: not-allowed; opacity: .45; }
+.history-load-more { width: 100%; margin-top: 8px; }
 .button-symbol { margin-right: 3px; color: var(--color-primary); }
 .project-git-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-bottom: 12px; }
 .project-stat-card {
