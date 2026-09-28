@@ -835,21 +835,21 @@ export class PiService {
       const answers = questions.map((question, questionIndex) => {
         const raw = rawAnswers.find((item: any) => item?.questionIndex === questionIndex) || rawAnswers[questionIndex]
         if (response.action === 'cancel') {
-          return { questionIndex, question: question.question, kind: 'custom' as const, answer: null, notes: value?.reason || 'cancelled' }
+          return { questionIndex, question: question.question, kind: 'custom' as const, answer: null }
         }
         if (response.action === 'chat') {
-          return { questionIndex, question: question.question, kind: 'chat' as const, answer: null, notes: raw?.notes || 'User chose Chat about this' }
+          return { questionIndex, question: question.question, kind: 'chat' as const, answer: null }
         }
         if (raw?.kind === 'multi' || Array.isArray(raw?.selected)) {
           const selected = Array.isArray(raw?.selected) ? raw.selected.map(String) : []
-          return { questionIndex, question: question.question, kind: 'multi' as const, answer: selected.join(', ') || null, selected, notes: raw?.notes }
+          return { questionIndex, question: question.question, kind: 'multi' as const, answer: selected.join(', ') || null, selected }
         }
         if (raw?.kind === 'custom') {
-          return { questionIndex, question: question.question, kind: 'custom' as const, answer: raw?.answer ? String(raw.answer) : null, notes: raw?.notes }
+          return { questionIndex, question: question.question, kind: 'custom' as const, answer: raw?.answer ? String(raw.answer) : null }
         }
         const answer = raw?.answer !== undefined && raw?.answer !== null ? String(raw.answer) : null
         const option = answer ? question.options.find((item: any) => item.label === answer) : undefined
-        return { questionIndex, question: question.question, kind: 'option' as const, answer, preview: option?.preview, notes: raw?.notes }
+        return { questionIndex, question: question.question, kind: 'option' as const, answer, preview: option?.preview }
       })
 
       return {

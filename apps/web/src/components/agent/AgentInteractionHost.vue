@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref } from 'vue'
 import { useChatStore, type AgentInteractionRequest, type AgentInteractionResponse } from '@/stores/chat'
 import QuestionnaireDialog from './QuestionnaireDialog.vue'
 import GenericInteractionDialog from './GenericInteractionDialog.vue'
@@ -13,37 +13,6 @@ const active = computed(() => chatStore.activeInteraction)
 const notifications = computed(() => chatStore.notificationInteractions)
 const overlaySurfaces = computed(() => Object.values(chatStore.tuiSurfaces)
   .filter(surface => surface.overlay || surface.kind === 'custom'))
-
-// E1: Timeout countdown
-const now = ref(Date.now())
-let countdownTimer: ReturnType<typeof setInterval> | null = null
-
-onMounted(() => { countdownTimer = setInterval(() => { now.value = Date.now() }, 1000) })
-onBeforeUnmount(() => { if (countdownTimer) clearInterval(countdownTimer) })
-
-const remainingMs = computed(() => {
-  const req = active.value
-  if (!req?.timeoutMs || !req.createdAt) return null
-  const elapsed = now.value - new Date(req.createdAt).getTime()
-  return Math.max(0, req.timeoutMs - elapsed)
-})
-
-const remainingLabel = computed(() => {
-  const ms = remainingMs.value
-  if (ms === null) return ''
-  const totalSec = Math.ceil(ms / 1000)
-  const min = Math.floor(totalSec / 60)
-  const sec = totalSec % 60
-  return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-})
-
-const countdownClass = computed(() => {
-  const ms = remainingMs.value
-  if (ms === null) return ''
-  if (ms <= 10_000) return 'critical'
-  if (ms <= 30_000) return 'warning'
-  return ''
-})
 
 const respond = async (response: AgentInteractionResponse) => {
   error.value = ''
@@ -105,9 +74,6 @@ const notificationType = (request: AgentInteractionRequest) => {
   </div>
 
   <div v-if="active" class="agent-interaction-host">
-    <div v-if="remainingLabel" class="interaction-countdown" :class="countdownClass">
-      剩余 {{ remainingLabel }}
-    </div>
     <QuestionnaireDialog
       v-if="active.kind === 'questionnaire'"
       :request="active"
@@ -167,33 +133,4 @@ const notificationType = (request: AgentInteractionRequest) => {
 .agent-notification.warning { border-color: rgba(245, 158, 11, 0.45); }
 .agent-notification.error { border-color: rgba(239, 68, 68, 0.45); }
 
-.interaction-countdown {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 50;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  background: var(--color-bg-muted);
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-}
-.interaction-countdown.warning {
-  background: rgba(245, 158, 11, 0.12);
-  color: #b45309;
-  border-color: rgba(245, 158, 11, 0.35);
-}
-.interaction-countdown.critical {
-  background: rgba(239, 68, 68, 0.12);
-  color: #ef4444;
-  border-color: rgba(239, 68, 68, 0.35);
-  animation: pulse-countdown 1s ease-in-out infinite;
-}
-@keyframes pulse-countdown {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
 </style>

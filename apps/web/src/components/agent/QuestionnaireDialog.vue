@@ -26,7 +26,6 @@ interface AnswerState {
   selected?: string
   selectedMany: string[]
   customText: string
-  notes: string
   mode?: AnswerMode
 }
 
@@ -53,7 +52,7 @@ const questions = computed(() => {
 })
 
 const ensureAnswerState = () => {
-  answers.splice(0, answers.length, ...questions.value.map(() => ({ selectedMany: [], customText: '', notes: '' })))
+  answers.splice(0, answers.length, ...questions.value.map(() => ({ selectedMany: [], customText: '' })))
   activeIndex.value = 0
   validationError.value = ''
   for (const key of Object.keys(focusedLabels)) delete focusedLabels[Number(key)]
@@ -165,7 +164,6 @@ const buildAnswers = (forceKind?: 'chat') => questions.value.map((question, ques
       question: question.question,
       kind: 'chat',
       answer: null,
-      notes: 'User clicked Chat about this',
     }
   }
 
@@ -175,7 +173,6 @@ const buildAnswers = (forceKind?: 'chat') => questions.value.map((question, ques
       question: question.question,
       kind: 'custom',
       answer: answer.customText.trim(),
-      notes: answer.notes?.trim() || undefined,
     }
   }
 
@@ -186,7 +183,6 @@ const buildAnswers = (forceKind?: 'chat') => questions.value.map((question, ques
       kind: 'multi',
       answer: answer?.selectedMany.join(', ') || null,
       selected: [...(answer?.selectedMany || [])],
-      notes: answer?.notes?.trim() || undefined,
     }
   }
 
@@ -198,7 +194,6 @@ const buildAnswers = (forceKind?: 'chat') => questions.value.map((question, ques
     kind: 'option',
     answer: selected,
     preview: option?.preview,
-    notes: answer?.notes?.trim() || undefined,
   }
 })
 
@@ -292,14 +287,6 @@ const chatAboutThis = () => {
           />
         </label>
 
-        <label class="notes-field">
-          <span>补充说明（可选）</span>
-          <textarea
-            v-model="activeAnswer.notes"
-            rows="2"
-            placeholder="补充上下文或说明…"
-          />
-        </label>
       </div>
 
       <aside v-if="hasPreview" class="preview-pane">
@@ -425,19 +412,6 @@ const chatAboutThis = () => {
   font-size: 13px;
 }
 .custom-answer textarea:focus { outline: none; border-color: var(--color-primary); }
-.notes-field { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; color: var(--color-text-muted); font-size: 12px; }
-.notes-field textarea {
-  resize: vertical;
-  min-height: 48px;
-  padding: 8px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg);
-  color: var(--color-text);
-  font-family: inherit;
-  font-size: 13px;
-}
-.notes-field textarea:focus { outline: none; border-color: var(--color-primary); }
 .preview-pane {
   min-width: 0;
   border: 1px solid var(--color-border);
