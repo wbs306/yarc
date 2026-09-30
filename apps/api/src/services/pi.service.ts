@@ -711,8 +711,8 @@ export class PiService {
       doi: Type.Optional(Type.String()),
       arxivId: Type.Optional(Type.String()),
       url: Type.Optional(Type.String()),
-      pdfUrl: Type.Optional(Type.String({ description: 'PDF source URL. Can be HTTP(S), file://, or a local path inside the agent data workspace when importPdf=true.' })),
-      pdfPath: Type.Optional(Type.String({ description: 'Local PDF path inside the agent data workspace when importPdf=true.' })),
+      pdfUrl: Type.Optional(Type.String({ description: 'PDF source when importing: HTTP(S) URL, file:// URL, or local path. External local paths are supported; relative paths resolve from the current workspace.' })),
+      pdfPath: Type.Optional(Type.String({ description: 'Local PDF path or file:// URL when importing. Absolute paths may be outside the workspace; relative paths resolve from the current workspace.' })),
       pdfBase64: Type.Optional(Type.String({ description: 'Base64-encoded PDF content when importPdf=true.' })),
       file: Type.Optional(Type.String({ description: 'Deprecated alias for pdfBase64.' })),
       fileName: Type.Optional(Type.String({ description: 'Original PDF file name for base64/local imports.' })),
@@ -1575,6 +1575,7 @@ export class PiService {
               })
               const job = importJobService.create({
                 papers: normalizedPapers,
+                workspaceCwd,
                 categoryId,
                 requirePdf: params.requirePdf !== false,
                 extractMetadata: params.extractMetadata === true,
@@ -1969,6 +1970,7 @@ export class PiService {
                 if (importPdf) {
                   const job = importJobService.create({
                     papers: params.papers,
+                    workspaceCwd,
                     categoryId,
                     requirePdf,
                     extractMetadata,

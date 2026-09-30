@@ -1,8 +1,8 @@
 import { readFile, stat } from 'node:fs/promises'
-import { basename, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { sseHub } from '../lib/sse.js'
-import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
+import { agentWorkspacePaths } from '../lib/agent-workspace.js'
 import { paperService } from './paper.service.js'
 import { searchService } from './search.service.js'
 import { ieeeXploreService } from './ieee-xplore.service.js'
@@ -32,7 +32,7 @@ export interface ImportJob {
   updatedAt: string
 }
 
-class ImportJobService {
+export class ImportJobService {
   private jobs = new Map<string, ImportJob>()
   private maxPdfBytes = 50 * 1024 * 1024
 
@@ -41,6 +41,7 @@ class ImportJobService {
     categoryId?: string
     requirePdf?: boolean
     extractMetadata?: boolean
+    workspaceCwd?: string
     removeFromSearchCategory?: {
       categoryId: string
       paperIds: string[]
@@ -67,8 +68,11 @@ class ImportJobService {
     this.jobs.set(job.id, job)
     this.emit(job, 'import-job-queued')
 
+    // Capture the caller's workspace before scheduling; relative PDF paths must
+    // not depend on whichever conversation is active when the job runs.
+    const workspaceCwd = resolve(params.workspaceCwd || agentWorkspacePaths().cwd)
     setTimeout(() => {
-      this.run(job.id, params.papers).catch((err) => {
+      this.run(job.id, params.papers, workspaceCwd).catch((err) => {
         const current = this.jobs.get(job.id)
         if (!current) return
         current.status = 'failed'
@@ -85,7 +89,7 @@ class ImportJobService {
     return this.jobs.get(id) || null
   }
 
-  private async run(jobId: string, papers: any[]) {
+  private async run(jobId: string, papers: any[], workspaceCwd: string) {
     const job = this.jobs.get(jobId)
     if (!job) return
     job.status = 'running'
@@ -101,7 +105,7 @@ class ImportJobService {
 
       try {
         this.emit(job, 'import-job-item-started', { paper: this.paperSummary(importPaper) })
-        const pdfBuffer = await this.resolvePdfBuffer(importPaper)
+        const pdfBuffer = await this.resolvePdfBuffer(importPaper, workspaceCwd)
         if (!pdfBuffer) throw new Error('PDF download failed')
         const imported = await paperService.importFromSearchResult(
           importPaper,
@@ -253,7 +257,7 @@ class ImportJobService {
     return null
   }
 
-  private async resolvePdfBuffer(paper: any): Promise<Buffer | null> {
+  private async resolvePdfBuffer(paper: any, workspaceCwd: string): Promise<Buffer | null> {
     const base64 = typeof paper?.pdfBase64 === 'string' && paper.pdfBase64.trim()
       ? paper.pdfBase64
       : (typeof paper?.file === 'string' && paper.file.trim() ? paper.file : '')
@@ -268,13 +272,16 @@ class ImportJobService {
     )
     if (!source || typeof source !== 'string') throw new Error('No PDF source available')
 
-    const localBuffer = await this.tryReadLocalPdfSource(source)
+    const localBuffer = await this.tryReadLocalPdfSource(source, workspaceCwd)
     if (localBuffer) return localBuffer
-    return searchService.downloadPdf(source)
+    const buffer = await searchService.downloadPdf(source.trim())
+    if (buffer && buffer.length > this.maxPdfBytes) throw new Error('File exceeds 50MB limit')
+    return buffer
   }
 
-  private async tryReadLocalPdfSource(source: string): Promise<Buffer | null> {
+  private async tryReadLocalPdfSource(source: string, workspaceCwd: string): Promise<Buffer | null> {
     const raw = source.trim()
+    if (!raw) throw new Error('No PDF source available')
     let parsed: URL | null = null
     try { parsed = new URL(raw) } catch { parsed = null }
 
@@ -283,22 +290,21 @@ class ImportJobService {
       inputPath = raw
     } else if (parsed.protocol === 'file:') {
       inputPath = fileURLToPath(parsed)
-    } else {
+    } else if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
       return null
+    } else {
+      throw new Error(`Unsupported PDF source protocol: ${parsed.protocol}`)
     }
 
-    const agentWorkspace = await ensureAgentWorkspace()
-    const root = resolve(agentWorkspace.cwd)
-    const resolvedPath = resolve(isAbsolute(inputPath) ? inputPath : join(root, inputPath))
-    const rel = relative(root, resolvedPath)
-    if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
-      throw new Error(`Local PDF paths must be inside the agent data workspace: ${root}`)
-    }
-
+    // Local import is allowed to read external files. The workspace is only
+    // the base for relative paths, not an allowlist for absolute/file:// paths.
+    const resolvedPath = resolve(workspaceCwd, inputPath)
     const info = await stat(resolvedPath)
     if (!info.isFile()) throw new Error('Local PDF path is not a file')
     if (info.size > this.maxPdfBytes) throw new Error('File exceeds 50MB limit')
-    return readFile(resolvedPath)
+    const buffer = await readFile(resolvedPath)
+    if (buffer.length > this.maxPdfBytes) throw new Error('File exceeds 50MB limit')
+    return buffer
   }
 
   private removeImportedSearchPaper(job: ImportJob, paperId: unknown) {

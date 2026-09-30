@@ -172,6 +172,8 @@ GET    /api/papers
 GET    /api/papers/search
 POST   /api/papers
 POST   /api/papers/upload
+POST   /api/papers/import-from-search
+GET    /api/papers/import-jobs/:id
 GET    /api/papers/:id
 PUT    /api/papers/:id
 DELETE /api/papers/:id
@@ -183,6 +185,8 @@ POST   /api/papers/:id/reparse
 ```
 
 PDF 文件接口保留 `HEAD`、Range、ETag 和缓存语义。
+
+后台 PDF 导入支持 `pdfBase64`（旧别名 `file`），以及 `pdfUrl` / `openAccessPdf.url` / `pdfPath` 中的 HTTP(S) URL、`file://` URL 或本地路径。本地绝对路径可位于项目和 `DATA_DIR` 之外，但必须是服务进程可读取的普通文件；相对路径以发起导入的 Agent 当前工作区为基准（项目对话为项目根，普通 HTTP 导入为 `DATA_DIR`）。本地路径指服务器文件，不是浏览器所在设备的路径。导入保留 50MB 限制和 `%PDF-` 文件头校验；其他 URL 协议明确报错。此导入能力不改变通用/项目文件接口的路径隔离规则，也不提供完整文件系统沙箱。
 
 ### 分类与搜索分类
 
