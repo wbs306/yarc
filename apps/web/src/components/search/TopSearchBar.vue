@@ -2,10 +2,12 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import type { IeeeJournalConfig, PaperSource, SearchPaper } from '@yarc/shared'
 import Checkbox from '../ui/Checkbox.vue'
+import { usePaperStore } from '@/stores/paper'
 import { usePrefsStore } from '@/stores/prefs'
 import { useApi } from '@/composables/useApi'
 
 const prefs = usePrefsStore()
+const paperStore = usePaperStore()
 const api = useApi()
 
 const props = defineProps<{ autofocus?: boolean }>()
@@ -120,6 +122,7 @@ const sortOptions = [
 const canSearch = computed(() => !!query.value.trim())
 
 const expand = (focusInput = true) => {
+  showTaskFailures.value = false
   isExpanded.value = true
   updateDropdownStyle()
   if (!focusInput) return
@@ -272,12 +275,28 @@ const sortedResults = computed(() => {
   return sorted
 })
 
+interface ImportFailure {
+  id?: string
+  title?: string
+  message: string
+}
+
+interface TaskFailure {
+  key: string
+  title: string
+  stage: string
+  message: string
+}
+
+type FailureScope = 'import' | 'processing' | 'summary'
+
 interface ImportJobStatus {
   jobId: string
   status: string
   total: number
   completed: number
   failed: number
+  errors: ImportFailure[]
   at?: string
 }
 
@@ -287,6 +306,8 @@ interface ImportedPaperProcessing {
   title?: string
   parseStatus: string
   embeddingStatus: string
+  parseError?: string
+  embeddingError?: string
   failed: boolean
   at?: string
 }
@@ -294,6 +315,7 @@ interface ImportedPaperProcessing {
 interface PaperTaskStatus {
   paperId: string
   status: string
+  error?: string
   failed: boolean
   at?: string
 }
@@ -334,6 +356,7 @@ const summaryFailedCount = computed(() => Object.values(summaryTasks.value)
 const activeTaskSummary = computed(() => {
   if (activeImportJobs.value.length) {
     return {
+      scope: 'import' as const,
       label: '导入',
       title: 'PDF 正在导入，后续会继续排队解析和生成向量',
       completed: activeImportJobs.value.reduce((sum, job) => sum + job.completed, 0),
@@ -343,6 +366,7 @@ const activeTaskSummary = computed(() => {
   }
   if (activeImportedPaperProcessing.value.length) {
     return {
+      scope: 'processing' as const,
       label: '队列',
       title: 'PDF 已入库，正在排队/执行 MinerU 解析和向量生成',
       completed: processingDoneCount.value,
@@ -352,6 +376,7 @@ const activeTaskSummary = computed(() => {
   }
   if (activeSummaryTasks.value.length) {
     return {
+      scope: 'summary' as const,
       label: '总结',
       title: '论文总结任务正在后台队列中执行；LLM 总结已限制为单任务并发',
       completed: summaryDoneCount.value,
@@ -384,8 +409,159 @@ const latestFinishedSummary = computed(() => {
   }
 })
 
+const showTaskFailures = ref(false)
+const taskStatusRef = ref<HTMLDivElement>()
+const taskFailuresRef = ref<HTMLDivElement>()
+const taskFailuresStyle = ref<Record<string, string>>({})
+
+const updateTaskFailuresStyle = () => {
+  if (!taskStatusRef.value) return
+  const rect = taskStatusRef.value.getBoundingClientRect()
+  const width = Math.min(420, window.innerWidth - 24)
+  const top = rect.bottom + 8
+  taskFailuresStyle.value = {
+    top: `${top}px`,
+    left: `${Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12))}px`,
+    width: `${width}px`,
+    maxHeight: `${Math.max(0, Math.min(420, window.innerHeight - top - 12))}px`,
+  }
+}
+
+const handleTaskFailuresOutside = (event: MouseEvent) => {
+  const target = event.target as Node
+  if (!taskStatusRef.value?.contains(target) && !taskFailuresRef.value?.contains(target)) {
+    showTaskFailures.value = false
+  }
+}
+
+const handleTaskFailuresKeydown = (event: KeyboardEvent) => {
+  if (event.key !== 'Escape') return
+  event.preventDefault()
+  event.stopPropagation()
+  showTaskFailures.value = false
+  taskStatusRef.value?.querySelector('button')?.focus()
+}
+
+const failureScope = ref<FailureScope>('import')
+const failureJobIds = ref<string[]>([])
+const loadingTaskFailures = ref(false)
+const taskFailuresLoadError = ref('')
+let taskFailuresRequestId = 0
+const unknownFailureReason = '未收到具体失败原因，请查看任务队列记录或服务日志。'
+
+const paperTitle = (paperId: string) =>
+  paperStore.papers.find((paper) => paper.id === paperId)?.title
+  || (paperStore.currentPaper?.id === paperId ? paperStore.currentPaper.title : '')
+  || `论文 ${paperId}`
+
+const mergeImportFailures = (existing: ImportFailure[], incoming: unknown): ImportFailure[] => {
+  if (!Array.isArray(incoming)) return existing
+  const merged = new Map(existing.map((error) => [JSON.stringify([error.id, error.title, error.message]), error]))
+  for (const error of incoming) {
+    if (!error || typeof error.message !== 'string') continue
+    const failure: ImportFailure = {
+      id: typeof error.id === 'string' ? error.id : undefined,
+      title: typeof error.title === 'string' ? error.title : undefined,
+      message: error.message,
+    }
+    merged.set(JSON.stringify([failure.id, failure.title, failure.message]), failure)
+  }
+  return [...merged.values()]
+}
+
+const taskFailures = computed<TaskFailure[]>(() => {
+  if (failureScope.value === 'summary') {
+    return Object.values(summaryTasks.value).filter((task) => task.failed).map((task) => ({
+      key: task.paperId,
+      title: paperTitle(task.paperId),
+      stage: '论文总结',
+      message: task.error || unknownFailureReason,
+    }))
+  }
+
+  const failures: TaskFailure[] = []
+  if (failureScope.value === 'import') {
+    for (const jobId of failureJobIds.value) {
+      const job = importJobs.value[jobId]
+      if (!job) continue
+      job.errors.forEach((error, index) => failures.push({
+        key: `${jobId}:import:${index}`,
+        title: error.title || (error.id ? `论文 ${error.id}` : '导入任务'),
+        stage: 'PDF 导入',
+        message: error.message || unknownFailureReason,
+      }))
+      if (job.failed && !job.errors.length) {
+        failures.push({ key: jobId, title: '导入任务', stage: 'PDF 导入', message: unknownFailureReason })
+      }
+    }
+  }
+
+  for (const paper of Object.values(importedPaperProcessing.value)) {
+    if (!paper.failed || (paper.jobId ? !failureJobIds.value.includes(paper.jobId) : failureScope.value !== 'processing')) continue
+    const stages = [
+      { stage: 'PDF 解析', status: paper.parseStatus, error: paper.parseError },
+      { stage: '向量生成', status: paper.embeddingStatus, error: paper.embeddingError },
+    ]
+    for (const { stage, status, error } of stages) {
+      if (status !== 'failed') continue
+      failures.push({
+        key: `${paper.paperId}:${stage}`,
+        title: paper.title || paperTitle(paper.paperId),
+        stage,
+        message: error || unknownFailureReason,
+      })
+    }
+  }
+  return failures
+})
+
+const openTaskFailures = async (scope: FailureScope, jobIds: string[] = []) => {
+  if (showTaskFailures.value) {
+    showTaskFailures.value = false
+    return
+  }
+  const requestId = ++taskFailuresRequestId
+  isExpanded.value = false
+  failureScope.value = scope
+  failureJobIds.value = jobIds
+  taskFailuresLoadError.value = ''
+  showTaskFailures.value = true
+  loadingTaskFailures.value = scope === 'import'
+  if (scope !== 'import') return
+
+  // Import SSE events only contain the latest five errors. Fetch the complete
+  // job so the dropdown also includes errors missed while the tab was suspended.
+  try {
+    await Promise.all(jobIds.map(async (jobId) => {
+      const { job } = await api.getImportJob(jobId)
+      const current = importJobs.value[jobId]
+      if (!current) return
+      importJobs.value = {
+        ...importJobs.value,
+        [jobId]: { ...current, errors: mergeImportFailures(current.errors, job.errors) },
+      }
+    }))
+  } catch {
+    if (requestId === taskFailuresRequestId) {
+      taskFailuresLoadError.value = '无法加载完整失败记录，以下显示已收到的失败原因。'
+    }
+  } finally {
+    if (requestId === taskFailuresRequestId) loadingTaskFailures.value = false
+  }
+}
+
+const openActiveTaskFailures = () => {
+  const summary = activeTaskSummary.value
+  if (!summary?.failed) return
+  const jobIds = summary.scope === 'import'
+    ? activeImportJobs.value.map((job) => job.jobId)
+    : [...activeProcessingJobIds.value]
+  void openTaskFailures(summary.scope, jobIds)
+}
+
 const dismissImportJobStatus = (jobId?: string) => {
   if (!jobId) return
+  showTaskFailures.value = false
   const nextJobs = { ...importJobs.value }
   delete nextJobs[jobId]
   importJobs.value = nextJobs
@@ -405,7 +581,8 @@ const applyImportJobEvent = (event: Event) => {
       status: String(detail.status || 'running'),
       total: Number(detail.total || 0),
       completed: Number(detail.completed || 0),
-      failed: Number(detail.failed || 0),
+      failed: Math.max(Number(detail.failed || 0), detail.status === 'failed' ? 1 : 0),
+      errors: mergeImportFailures(importJobs.value[jobId]?.errors || [], detail.errors),
       at: String(detail.at || new Date().toISOString()),
     },
   }
@@ -432,6 +609,7 @@ const applyImportJobItemCompleted = (event: Event) => {
 }
 
 const dismissSummaryStatus = () => {
+  showTaskFailures.value = false
   summaryTasks.value = {}
 }
 
@@ -446,13 +624,13 @@ const applyPaperStatusEvent = (event: Event) => {
     if (status === 'queued' && !activeSummaryTasks.value.length && Object.keys(summaryTasks.value).length) {
       summaryTasks.value = {}
     }
-    const currentSummary = summaryTasks.value[paperId]
     summaryTasks.value = {
       ...summaryTasks.value,
       [paperId]: {
         paperId,
         status,
-        failed: currentSummary?.failed || status === 'failed',
+        failed: status === 'failed',
+        error: status === 'failed' && typeof detail.error === 'string' ? detail.error : undefined,
         at,
       },
     }
@@ -462,9 +640,16 @@ const applyPaperStatusEvent = (event: Event) => {
   if (!current) return
 
   const next = { ...current, at }
-  if (detail.jobType === 'parse_pdf') next.parseStatus = status
-  if (detail.jobType === 'generate_embedding') next.embeddingStatus = status
-  if (status === 'failed') next.failed = true
+  const error = status === 'failed' && typeof detail.error === 'string' ? detail.error : undefined
+  if (detail.jobType === 'parse_pdf') {
+    next.parseStatus = status
+    next.parseError = error
+  }
+  if (detail.jobType === 'generate_embedding') {
+    next.embeddingStatus = status
+    next.embeddingError = error
+  }
+  next.failed = next.parseStatus === 'failed' || next.embeddingStatus === 'failed'
   importedPaperProcessing.value = { ...importedPaperProcessing.value, [paperId]: next }
 }
 
@@ -476,6 +661,21 @@ watch(isExpanded, (val) => {
   } else {
     document.removeEventListener('mousedown', handleClickOutside)
     window.removeEventListener('resize', updateDropdownStyle)
+  }
+})
+
+watch(showTaskFailures, (visible) => {
+  if (visible) {
+    updateTaskFailuresStyle()
+    document.addEventListener('mousedown', handleTaskFailuresOutside)
+    document.addEventListener('keydown', handleTaskFailuresKeydown, true)
+    window.addEventListener('resize', updateTaskFailuresStyle)
+    window.addEventListener('scroll', updateTaskFailuresStyle, true)
+  } else {
+    document.removeEventListener('mousedown', handleTaskFailuresOutside)
+    document.removeEventListener('keydown', handleTaskFailuresKeydown, true)
+    window.removeEventListener('resize', updateTaskFailuresStyle)
+    window.removeEventListener('scroll', updateTaskFailuresStyle, true)
   }
 })
 
@@ -493,6 +693,10 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('mousedown', handleTaskFailuresOutside)
+  document.removeEventListener('keydown', handleTaskFailuresKeydown, true)
+  window.removeEventListener('resize', updateTaskFailuresStyle)
+  window.removeEventListener('scroll', updateTaskFailuresStyle, true)
   document.removeEventListener('mousedown', handleClickOutside)
   window.removeEventListener('resize', updateDropdownStyle)
   window.removeEventListener('yarc-open-agent-search-results', applyAgentSearchResults)
@@ -525,19 +729,41 @@ onUnmounted(() => {
         class="search-input"
       />
       <div class="search-actions">
-        <div v-if="activeTaskSummary" class="import-status active" :title="activeTaskSummary.title">
-          <span class="status-dot spinning"></span>
-          <span class="status-text">{{ activeTaskSummary.label }}</span>
-          <strong>{{ activeTaskSummary.completed }}/{{ activeTaskSummary.total }}</strong>
-          <span v-if="activeTaskSummary.failed" class="status-failed">
-            失败 {{ activeTaskSummary.failed }}
-          </span>
+        <div v-if="activeTaskSummary" ref="taskStatusRef" class="import-status active">
+          <button
+            type="button"
+            class="import-status-details"
+            :disabled="!activeTaskSummary.failed"
+            :aria-expanded="showTaskFailures"
+            aria-controls="task-failures-dropdown"
+            :title="activeTaskSummary.title + (activeTaskSummary.failed ? '；点击查看失败原因' : '')"
+            @mousedown.stop.prevent
+            @click.stop.prevent="openActiveTaskFailures"
+          >
+            <span class="status-dot spinning"></span>
+            <span class="status-text">{{ activeTaskSummary.label }}</span>
+            <strong>{{ activeTaskSummary.completed }}/{{ activeTaskSummary.total }}</strong>
+            <span v-if="activeTaskSummary.failed" class="status-failed">
+              失败 {{ activeTaskSummary.failed }}
+            </span>
+          </button>
         </div>
-        <div v-else-if="latestFinishedImportJob" class="import-status done" title="最近一次 PDF 导入/解析队列已结束">
-          <span class="status-dot"></span>
-          <span class="status-text">完成</span>
-          <strong>{{ latestFinishedImportJob.completed }}/{{ latestFinishedImportJob.total }}</strong>
-          <span v-if="latestFinishedFailedCount" class="status-failed">失败 {{ latestFinishedFailedCount }}</span>
+        <div v-else-if="latestFinishedImportJob" ref="taskStatusRef" class="import-status done">
+          <button
+            type="button"
+            class="import-status-details"
+            :disabled="!latestFinishedFailedCount"
+            :aria-expanded="showTaskFailures"
+            aria-controls="task-failures-dropdown"
+            :title="latestFinishedFailedCount ? '点击查看导入/解析队列失败原因' : '最近一次 PDF 导入/解析队列已结束'"
+            @mousedown.stop.prevent
+            @click.stop.prevent="openTaskFailures('import', [latestFinishedImportJob.jobId])"
+          >
+            <span class="status-dot"></span>
+            <span class="status-text">完成</span>
+            <strong>{{ latestFinishedImportJob.completed }}/{{ latestFinishedImportJob.total }}</strong>
+            <span v-if="latestFinishedFailedCount" class="status-failed">失败 {{ latestFinishedFailedCount }}</span>
+          </button>
           <button
             type="button"
             class="import-status-close"
@@ -547,11 +773,22 @@ onUnmounted(() => {
             @click.stop.prevent="dismissImportJobStatus(latestFinishedImportJob.jobId)"
           >×</button>
         </div>
-        <div v-else-if="latestFinishedSummary" class="import-status done" title="最近一次论文总结队列已结束">
-          <span class="status-dot"></span>
-          <span class="status-text">总结完成</span>
-          <strong>{{ latestFinishedSummary.completed }}/{{ latestFinishedSummary.total }}</strong>
-          <span v-if="latestFinishedSummary.failed" class="status-failed">失败 {{ latestFinishedSummary.failed }}</span>
+        <div v-else-if="latestFinishedSummary" ref="taskStatusRef" class="import-status done">
+          <button
+            type="button"
+            class="import-status-details"
+            :disabled="!latestFinishedSummary.failed"
+            :aria-expanded="showTaskFailures"
+            aria-controls="task-failures-dropdown"
+            :title="latestFinishedSummary.failed ? '点击查看论文总结失败原因' : '最近一次论文总结队列已结束'"
+            @mousedown.stop.prevent
+            @click.stop.prevent="openTaskFailures('summary')"
+          >
+            <span class="status-dot"></span>
+            <span class="status-text">总结完成</span>
+            <strong>{{ latestFinishedSummary.completed }}/{{ latestFinishedSummary.total }}</strong>
+            <span v-if="latestFinishedSummary.failed" class="status-failed">失败 {{ latestFinishedSummary.failed }}</span>
+          </button>
           <button
             type="button"
             class="import-status-close"
@@ -574,6 +811,33 @@ onUnmounted(() => {
         </button>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="showTaskFailures"
+        id="task-failures-dropdown"
+        ref="taskFailuresRef"
+        class="task-failures-dropdown"
+        :style="taskFailuresStyle"
+        role="region"
+        aria-label="任务失败原因"
+      >
+        <div class="task-failures-header">
+          <strong>任务失败原因</strong>
+          <button type="button" class="task-failures-close" aria-label="关闭失败原因" @click="showTaskFailures = false">×</button>
+        </div>
+        <div class="task-failures">
+          <p v-if="loadingTaskFailures" class="task-failures-notice" role="status">正在加载完整失败记录...</p>
+          <p v-if="taskFailuresLoadError" class="task-failures-notice" role="alert">{{ taskFailuresLoadError }}</p>
+          <article v-for="failure in taskFailures" :key="failure.key" class="task-failure">
+            <span class="task-failure-stage">{{ failure.stage }}</span>
+            <h4>{{ failure.title }}</h4>
+            <p class="task-failure-message">{{ failure.message }}</p>
+          </article>
+          <p v-if="!loadingTaskFailures && !taskFailures.length" class="task-failures-notice">{{ unknownFailureReason }}</p>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- Dropdown — Teleport 到 body 避免被 header 裁剪 -->
     <Teleport to="body">
@@ -837,6 +1101,110 @@ onUnmounted(() => {
 
 .status-failed {
   color: #dc2626;
+}
+
+.import-status-details {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.import-status-details:disabled {
+  cursor: default;
+}
+
+.import-status-details:not(:disabled):hover .status-failed {
+  text-decoration: underline;
+}
+
+.import-status-details:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.task-failures-dropdown {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-card);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.15);
+}
+
+.task-failures-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.task-failures-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.task-failures-close:hover {
+  background: var(--color-bg-muted);
+  color: var(--color-text);
+}
+
+.task-failures {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.task-failures-notice,
+.task-failure {
+  padding: 12px;
+}
+
+.task-failure + .task-failure {
+  border-top: 1px solid var(--color-border);
+}
+
+.task-failure-stage {
+  color: #dc2626;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.task-failure h4 {
+  margin: 6px 0;
+  color: var(--color-text);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.task-failure-message,
+.task-failures-notice {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .import-status-close {
