@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createBashToolDefinition, type ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { createBashToolDefinition, type ExtensionToolContext } from '@earendil-works/pi-coding-agent'
 
 test('Runtime-hosted Bash tolerates the absent ExtensionContext', async () => {
   let capturedEnv: NodeJS.ProcessEnv | undefined
@@ -13,7 +13,7 @@ test('Runtime-hosted Bash tolerates the absent ExtensionContext', async () => {
     },
   })
 
-  const result = await definition.execute('bash-test', { command: 'true' }, undefined, undefined, undefined as unknown as ExtensionContext)
+  const result = await definition.execute('bash-test', { command: 'true' }, undefined, undefined, undefined as unknown as ExtensionToolContext)
 
   assert.equal(result.content[0]?.type, 'text')
   assert.equal(result.content[0]?.type === 'text' ? result.content[0].text : undefined, '(no output)')

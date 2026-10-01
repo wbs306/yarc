@@ -21,6 +21,7 @@ import type {
   RuntimeWorkerMessage,
 } from '../lib/pi-runtime/protocol.js'
 import { SessionDurabilityCoordinator } from '../lib/pi-runtime/session-durability.js'
+import { createSessionSettings } from '../lib/pi-runtime/session-settings.js'
 import { AssistantAbortCoalescer } from '../lib/pi-runtime/assistant-abort-coalescer.js'
 import { isQuiescent, waitForRuntimeQuiescence } from '../lib/pi-runtime/quiescence.js'
 import { WebTuiSurface } from '../lib/pi-extension-ui/web-terminal.js'
@@ -38,12 +39,13 @@ const loadTuiClass = async () => {
   const codingAgentEntry = import.meta.resolve('@earendil-works/pi-coding-agent')
   const piTuiEntry = createRequire(codingAgentEntry).resolve('@earendil-works/pi-tui')
   const module = await import(pathToFileURL(piTuiEntry).href)
-  if (typeof module.TUI !== 'function') throw new Error('Pi TUI constructor is unavailable')
-  return module.TUI
+  if (typeof module.TuiMainScreen !== 'function') throw new Error('Pi main-screen TUI constructor is unavailable')
+  return module.TuiMainScreen
 }
 const loadDefaultTheme = async () => {
   loadedThemeModule = await import(new URL('../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js', import.meta.url).href)
-  loadedThemeModule.initTheme(undefined, false)
+  // Web surfaces do not report a terminal palette for Pi's new system theme.
+  loadedThemeModule.initTheme('dark', false)
   return loadedThemeModule.theme
 }
 
@@ -974,7 +976,10 @@ const handleSessionEvent = (event: any) => {
         emitContextUsage()
       }
     })
-    if (message?.role === 'assistant' && message.stopReason === 'aborted') {
+    // Newer providers may finalize cancellation as an error with AbortError's
+    // message. Coalesce it like an aborted stop until continuation is known.
+    if (message?.role === 'assistant' && (message.stopReason === 'aborted'
+      || (message.stopReason === 'error' && isAbortRelatedError(message.errorMessage)))) {
       deferredAssistantAborts.defer({
         assistantMessageId: mappedAssistantId,
         message: message.errorMessage || 'Request aborted',
@@ -1199,6 +1204,7 @@ const initialize = async (payload: RuntimeInitPayload) => {
     const services = await createAgentSessionServices({
       cwd,
       agentDir,
+      settingsManager: createSessionSettings(cwd, agentDir),
       resourceLoaderOptions: {
         extensionFactories: [{
           name: 'yarc-context-compact-acm',

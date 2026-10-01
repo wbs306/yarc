@@ -98,7 +98,7 @@ export default function (pi) {
     })
     const opened: any = await waitForMessage(worker, message => message.type === 'event' && message.event?.type === 'agent_ui_tui_open')
     assert.match(opened.event.surface.plainText, /Runtime surface ready/)
-    assert.match(opened.event.surface.plainText, /Host: TUI/)
+    assert.match(opened.event.surface.plainText, /Host: TuiMainScreen/)
 
     worker.postMessage({ type: 'tui_input', surfaceId: opened.event.surface.surfaceId, data: 'x' })
     const completed: any = await waitForMessage(worker, message => message.type === 'run_complete')
@@ -612,7 +612,8 @@ export default function (pi) {
     assert.equal(events.filter(event => event.type === 'tool_result').length, 6,
       JSON.stringify(events.filter(event => ['tool_call', 'tool_result', 'error'].includes(event.type))))
     assert.equal(messages.filter(message => message.type === 'control_request' && message.operation === 'navigate_tree').length, 2)
-    assert.ok(!events.some(event => event.type === 'error' || /continuation-failed/.test(event.message || '')))
+    assert.ok(!events.some(event => event.type === 'error' || /continuation-failed/.test(event.message || '')),
+      JSON.stringify(events.filter(event => event.type === 'error' || /continuation-failed/.test(event.message || ''))))
     assert.ok(!messages.some(message => message.type === 'extension_run_start'))
     const next = waitForMessage(worker, message => ['run_complete', 'run_error'].includes(message.type) && message.runId === 'next')
     worker.postMessage({ type: 'prompt', payload: { runId: 'next', assistantMessageId: 'next-assistant', prompt: 'Next message' } })

@@ -29,6 +29,7 @@ import { loadMineruContentListV2, renderSummaryMarkdownFromV2 } from '../lib/min
 import { PiRuntimeRegistry } from './pi-runtime-registry.js'
 import { runJournalStore } from '../lib/pi-runtime/run-journal.js'
 import { resolveLoadedSkillReadPath } from '../lib/pi-runtime/skill-read-path.js'
+import { createSessionSettings } from '../lib/pi-runtime/session-settings.js'
 import type { RuntimeToolExecutionContext, RuntimeToolHost } from '../lib/pi-runtime/protocol.js'
 import type { AgentInteractionResponse, ChatEvent, PiComposerMirror, PiRuntimeKey } from '@yarc/shared'
 
@@ -560,6 +561,7 @@ export class PiService {
       const sessionManager = SessionManager.open(sessionFile, sessionDir, agentWorkspace.cwd)
       const result = await createAgentSession({
         sessionManager,
+        settingsManager: createSessionSettings(agentWorkspace.cwd, agentWorkspace.agentDir),
         modelRuntime: this.modelRuntime,
         ...(model ? { model } : {}),
         resourceLoader,
@@ -620,6 +622,7 @@ export class PiService {
     try {
       const { session } = await createAgentSession({
         sessionManager,
+        settingsManager: createSessionSettings(agentWorkspace.cwd, agentWorkspace.agentDir),
         modelRuntime: this.modelRuntime,
         resourceLoader,
         customTools: this.createWorkspaceToolOverrides(agentWorkspace.cwd),
@@ -2515,6 +2518,7 @@ export class PiService {
     try {
       const result = await createAgentSession({
         sessionManager,
+        settingsManager: createSessionSettings(agentWorkspace.cwd, agentWorkspace.agentDir),
         modelRuntime: this.modelRuntime,
         ...(model ? { model: this.modelForSession(model) } : {}),
         resourceLoader,
@@ -2671,6 +2675,7 @@ export class PiService {
     try {
       const result = await createAgentSession({
         sessionManager,
+        settingsManager: createSessionSettings(agentWorkspace.cwd, agentWorkspace.agentDir),
         modelRuntime: this.modelRuntime,
         ...(model ? { model: this.modelForSession(model) } : {}),
         resourceLoader,
@@ -2924,6 +2929,7 @@ export class PiService {
     try {
       const result = await createAgentSession({
         sessionManager,
+        settingsManager: createSessionSettings(agentWorkspace.cwd, agentWorkspace.agentDir),
         modelRuntime: this.modelRuntime,
         ...(model ? { model: this.modelForSession(model) } : {}),
         customTools: [...this.createWorkspaceToolOverrides(agentWorkspace.cwd,

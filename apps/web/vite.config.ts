@@ -6,6 +6,8 @@ import { fileURLToPath, URL } from 'node:url'
 export default defineConfig({
   plugins: [vue(), tailwindcss()],
   resolve: {
+    // UIW themes import highlight without declaring it; use the app's copy.
+    dedupe: ['@lezer/highlight'],
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 import { persistFailedPromptIfMissing } from './pi-failed-turn.js'
 
@@ -10,6 +13,25 @@ const failureModel = {
 }
 
 describe('PiService failed-turn fallback', () => {
+  it('reopens a first user prompt before any assistant reply without duplicating it on failure', async t => {
+    const root = await mkdtemp(join(tmpdir(), 'yarc-pi-first-prompt-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const manager = SessionManager.create(root, root)
+    manager.appendMessage({ role: 'user', content: 'first prompt', timestamp: 1 })
+    const sessionFile = manager.getSessionFile()
+    assert.ok(sessionFile)
+
+    const reopened = SessionManager.open(sessionFile)
+    assert.equal(reopened.getHeader()?.version, 3)
+    assert.equal(reopened.getBranch().length, 1)
+    persistFailedPromptIfMissing(reopened, null, 'first prompt', 'provider failed', failureModel)
+    const messages = SessionManager.open(sessionFile).buildSessionContext().messages
+    assert.deepEqual(messages.map(message => message.role), ['user', 'assistant'])
+    const user = messages[0]
+    assert.ok(user?.role === 'user')
+    assert.equal(user.content, 'first prompt')
+  })
+
   it('writes a complete typed user/error turn without changing the session model identity', () => {
     const manager = SessionManager.inMemory(process.cwd())
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
-import { PiConversationService } from './pi-conversation.service.js'
+import { PiConversationService, type ConversationMessage } from './pi-conversation.service.js'
 
 const timestamp = '2026-01-01T00:00:00.000Z'
 const userEntry = (id: string, parentId: string | null, text: string) => ({
@@ -75,6 +75,19 @@ describe('PiConversationService branch projection', () => {
       assistantEntry('error-4', 'error-3', 'error', 'final failure'),
     ])
     assert.deepEqual(exhaustedRetry.map((message: any) => message.id), ['user-2', 'error-4'])
+  })
+
+  it('preserves raw display history when Pi edits model context', () => {
+    const manager = SessionManager.inMemory(process.cwd())
+    const omitted = manager.appendMessage({ role: 'user', content: 'original first', timestamp: 1 })
+    const replaced = manager.appendMessage({ role: 'user', content: 'original second', timestamp: 2 })
+    manager.appendContextEdit(omitted, null)
+    manager.appendContextEdit(replaced, { content: 'model-only replacement' })
+
+    const service = new PiConversationService()
+    const displayed = (service as any).entriesToMessages(manager.getBranch())
+    assert.deepEqual(displayed.map((message: ConversationMessage) => message.content), ['original first', 'original second'])
+    assert.deepEqual(manager.buildSessionContext().messages.map(message => message.role === 'user' ? message.content : undefined), ['model-only replacement'])
   })
 
   it('creates an empty child session when editing the root user', async () => {

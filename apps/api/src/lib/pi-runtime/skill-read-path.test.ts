@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } fr
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import test, { type TestContext } from 'node:test'
-import { createReadToolDefinition, type ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { createReadToolDefinition, type ExtensionToolContext } from '@earendil-works/pi-coding-agent'
 import { resolveLoadedSkillReadPath } from './skill-read-path.js'
 import { resolvePublicSharedFileReference } from '../../services/global-shared-file.service.js'
 
@@ -44,7 +44,7 @@ test('Pi read can open absolute and project-relative skill paths rejected by pub
     detectImageMimeType: async () => null,
   } })
   for (const path of [skillFile, relativePath]) {
-    const result = await tool.execute('read-skill', { path }, undefined, undefined, undefined as unknown as ExtensionContext)
+    const result = await tool.execute('read-skill', { path }, undefined, undefined, undefined as unknown as ExtensionToolContext)
     assert.ok(result.content.some(item => item.type === 'text' && item.text.includes('# Demo skill')))
   }
 })

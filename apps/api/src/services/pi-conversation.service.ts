@@ -263,7 +263,7 @@ export class PiConversationService {
       const header = rootSession.getHeader()
       if (!rootSessionFile || !header) throw new Error('Failed to create root edit branch')
 
-      // SessionManager defers writing a new file until the first assistant
+      // SessionManager defers writing a new file until a user or assistant
       // message. Materialize the public header now so PiService can reopen this
       // exact empty session before it appends the edited root prompt.
       await writeFile(rootSessionFile, `${JSON.stringify(header)}\n`, { flag: 'wx' })
