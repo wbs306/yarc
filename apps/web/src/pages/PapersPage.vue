@@ -271,7 +271,10 @@ const loadRecentWorkspaceFiles = (): WorkspaceRecentFile[] => {
 }
 
 const workspaceFiles = ref<FileNode[]>([])
+const workspaceDirectoryLoading = ref<Set<string>>(new Set())
+const workspaceDirectoryLoads = new Map<string, Promise<boolean>>()
 let workspaceFilesRefreshTimer: number | null = null
+let workspaceFilesRefreshPath: string | undefined
 let workspaceFilesStale = false
 let workspaceLoadGeneration = 0
 const selectedWorkspaceFile = ref<FileNode | null>(null)
@@ -998,7 +1001,7 @@ const uploadWorkspaceFiles = async (files: File[], parentPath = '') => {
   }
 
   try {
-    await loadWorkspaceFiles(true)
+    await refreshWorkspaceDirectory(parentPath)
     if (uploaded.length === 1) {
       const uploadedNode = findWorkspaceNode(workspaceFiles.value, uploaded[0].path) || uploaded[0]
       if (uploadedNode.type === 'file') await selectWorkspaceFile(uploadedNode)
@@ -1028,7 +1031,7 @@ const handleCreate = async (parentPath: string, name: string, type: 'file' | 'di
     } else {
       await api.createFile(path)
     }
-    await loadWorkspaceFiles(true)
+    await refreshWorkspaceDirectory(parentPath)
   } catch (err) {
     filesError.value = (err as Error).message || `创建${type === 'directory' ? '文件夹' : '文件'}失败`
   }
@@ -1080,6 +1083,80 @@ const replaceWorkspaceDirectoryChildren = (nodes: FileNode[], path: string, chil
   return { ...node, children: replaceWorkspaceDirectoryChildren(node.children, path, children) }
 })
 
+const mergeWorkspaceTree = (fresh: FileNode[], previous: FileNode[]): FileNode[] => {
+  const previousByPath = new Map(previous.map(node => [node.path, node]))
+  return fresh.map(node => {
+    const previousNode = previousByPath.get(node.path)
+    if (node.type === 'directory'
+      && previousNode?.type === 'directory'
+      && previousNode.children !== undefined
+      && node.children === undefined) {
+      return { ...node, children: previousNode.children }
+    }
+    return node
+  })
+}
+
+const setWorkspaceDirectoryLoading = (path: string, loading: boolean) => {
+  const next = new Set(workspaceDirectoryLoading.value)
+  if (loading) next.add(path)
+  else next.delete(path)
+  workspaceDirectoryLoading.value = next
+}
+
+const loadWorkspaceDirectory = (node: FileNode): Promise<boolean> => {
+  if (node.type !== 'directory' || node.children !== undefined) return Promise.resolve(true)
+
+  const existing = workspaceDirectoryLoads.get(node.path)
+  if (existing) return existing
+
+  const path = node.path
+  const generation = workspaceLoadGeneration
+  setWorkspaceDirectoryLoading(path, true)
+  const request = (async () => {
+    try {
+      const response = await api.getFileTree(path)
+      if (generation !== workspaceLoadGeneration) return false
+      workspaceFiles.value = replaceWorkspaceDirectoryChildren(workspaceFiles.value, path, response.files as FileNode[])
+      workspaceFilesStale = false
+      workspaceTreeFromCache.value = false
+      filesError.value = ''
+      void putOfflineWorkspaceTree(workspaceFiles.value, isProjectWorkspace.value ? `project:${projectWorkspaceId.value}` : 'global')
+      return true
+    } catch (err) {
+      if (generation === workspaceLoadGeneration) {
+        filesError.value = (err as Error).message || `加载目录失败：${path}`
+      }
+      return false
+    } finally {
+      if (generation === workspaceLoadGeneration) setWorkspaceDirectoryLoading(path, false)
+    }
+  })()
+  workspaceDirectoryLoads.set(path, request)
+  void request.then(
+    () => {
+      if (workspaceDirectoryLoads.get(path) === request) workspaceDirectoryLoads.delete(path)
+    },
+    () => {
+      if (workspaceDirectoryLoads.get(path) === request) workspaceDirectoryLoads.delete(path)
+    },
+  )
+  return request
+}
+
+const refreshWorkspaceDirectory = async (path = '') => {
+  const generation = workspaceLoadGeneration
+  const response = await api.getFileTree(path || undefined)
+  if (generation !== workspaceLoadGeneration) return false
+  workspaceFiles.value = path
+    ? replaceWorkspaceDirectoryChildren(workspaceFiles.value, path, response.files as FileNode[])
+    : mergeWorkspaceTree(response.files as FileNode[], workspaceFiles.value)
+  workspaceFilesStale = false
+  workspaceTreeFromCache.value = false
+  void putOfflineWorkspaceTree(workspaceFiles.value, isProjectWorkspace.value ? `project:${projectWorkspaceId.value}` : 'global')
+  return true
+}
+
 const findDeepestWorkspaceDirectory = (nodes: FileNode[], targetPath: string): FileNode | null => {
   const segments = targetPath.split('/').filter(Boolean)
   segments.pop()
@@ -1106,12 +1183,8 @@ const ensureWorkspaceNodeLoaded = async (path: string): Promise<FileNode | null>
     const directory = findDeepestWorkspaceDirectory(workspaceFiles.value, path)
     if (!directory || directory.path === lastHydratedPath) break
 
-    const response = await api.getFileTree(directory.path)
+    if (!await loadWorkspaceDirectory(directory)) return null
     if (generation !== workspaceLoadGeneration) return null
-    workspaceFiles.value = replaceWorkspaceDirectoryChildren(workspaceFiles.value, directory.path, response.files as FileNode[])
-    workspaceFilesStale = false
-    workspaceTreeFromCache.value = false
-    void putOfflineWorkspaceTree(workspaceFiles.value, isProjectWorkspace.value ? `project:${projectWorkspaceId.value}` : 'global')
     lastHydratedPath = directory.path
     node = findWorkspaceNode(workspaceFiles.value, path)
   }
@@ -1163,6 +1236,13 @@ const clearWorkspaceEditor = () => {
 // next project.
 const resetWorkspaceScope = () => {
   workspaceLoadGeneration += 1
+  workspaceDirectoryLoads.clear()
+  workspaceDirectoryLoading.value = new Set()
+  workspaceFilesRefreshPath = undefined
+  if (workspaceFilesRefreshTimer !== null) {
+    window.clearTimeout(workspaceFilesRefreshTimer)
+    workspaceFilesRefreshTimer = null
+  }
   void liveFiles.releaseAll()
   workspaceFiles.value = []
   workspaceFilesStale = true
@@ -1204,16 +1284,19 @@ const canCreateInFileContext = () => !isPapersWorkspacePath(fileContextCreatePar
 
 const loadWorkspaceFiles = async (silent = false) => {
   const generation = ++workspaceLoadGeneration
+  workspaceDirectoryLoads.clear()
+  workspaceDirectoryLoading.value = new Set()
   const cacheKey = isProjectWorkspace.value ? `project:${projectWorkspaceId.value}` : 'global'
   if (!silent) filesLoading.value = true
   filesError.value = ''
   try {
     const res = await api.getFileTree()
     if (generation !== workspaceLoadGeneration) return
-    workspaceFiles.value = res.files
+    const previousTree = workspaceTreeFromCache.value ? [] : workspaceFiles.value
+    workspaceFiles.value = mergeWorkspaceTree(res.files, previousTree)
     workspaceFilesStale = false
     workspaceTreeFromCache.value = false
-    void putOfflineWorkspaceTree(res.files, cacheKey)
+    void putOfflineWorkspaceTree(workspaceFiles.value, cacheKey)
     if (selectedWorkspacePath.value) {
       selectedWorkspaceFile.value = findWorkspaceNode(workspaceFiles.value, selectedWorkspacePath.value) || selectedWorkspaceFile.value
     }
@@ -1630,6 +1713,7 @@ const openWorkspaceFileReference = async (rawPath: string) => {
 const saveWorkspaceFile = async () => {
   if (!selectedWorkspaceFile.value || !workspaceCanEdit.value || workspaceSaving.value) return
   const live = currentLiveClient.value
+  const savedPath = selectedWorkspaceFile.value.path
   workspaceSaving.value = true
   filesError.value = ''
   try {
@@ -1642,7 +1726,7 @@ const saveWorkspaceFile = async () => {
       workspaceSavedContent.value = contentToSave
     }
     snapshotCurrentWorkspaceTab()
-    await loadWorkspaceFiles(true)
+    await refreshWorkspaceDirectory(workspaceParentPath(savedPath))
   } catch (err) {
     filesError.value = (err as Error).message || '保存失败'
   } finally {
@@ -1755,12 +1839,13 @@ const toggleLatexBuild = async () => {
 const resolveCurrentLiveConflict = async (strategy: 'use-live' | 'use-disk') => {
   const live = currentLiveClient.value
   if (!live) return
+  const resolvedPath = live.path
   filesError.value = ''
   try {
     await live.resolveConflict(strategy)
     workspaceSavedContent.value = live.content.value
     snapshotCurrentWorkspaceTab()
-    await loadWorkspaceFiles(true)
+    await refreshWorkspaceDirectory(workspaceParentPath(resolvedPath))
   } catch (err) {
     filesError.value = (err as Error).message || '冲突处理失败'
   }
@@ -1908,10 +1993,11 @@ const renameWorkspaceNode = async (node: FileNode, newName?: string) => {
   filesError.value = ''
   try {
     const oldPath = node.path
-    const target = joinWorkspacePath(workspaceParentPath(oldPath), name)
+    const parentPath = workspaceParentPath(oldPath)
+    const target = joinWorkspacePath(parentPath, name)
     const res = await api.renamePath(oldPath, target)
     removeRecentWorkspacePath(oldPath)
-    await loadWorkspaceFiles(true)
+    await refreshWorkspaceDirectory(parentPath)
     const renamed = (findWorkspaceNode(workspaceFiles.value, res.file.path) || res.file) as FileNode
     await selectWorkspaceFile(renamed)
   } catch (err) {
@@ -1991,15 +2077,17 @@ const moveWorkspaceNode = async (node: FileNode, targetDirPath: string) => {
 
   filesError.value = ''
   try {
+    const sourceParentPath = workspaceParentPath(node.path)
     const res = await api.renamePath(node.path, targetPath)
     removeRecentWorkspacePath(node.path)
-    await loadWorkspaceFiles(true)
+    await refreshWorkspaceDirectory(sourceParentPath)
+    if (targetDir !== sourceParentPath) await refreshWorkspaceDirectory(targetDir)
 
     if (selectedWasInsideMove) {
       const nextSelectedPath = selectedBeforeMove === node.path
         ? res.file.path
         : joinWorkspacePath(res.file.path, selectedBeforeMove.slice(node.path.length + 1))
-      const movedSelectedNode = findWorkspaceNode(workspaceFiles.value, nextSelectedPath)
+      const movedSelectedNode = await ensureWorkspaceNodeLoaded(nextSelectedPath)
       selectedWorkspaceFile.value = null
       localStorage.removeItem(workspaceFileStorageKey.value)
       clearWorkspaceEditor()
@@ -2819,6 +2907,11 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', onDocumentClick)
   document.removeEventListener('keydown', onDocumentKeydown)
   document.removeEventListener('scroll', closeAllContextMenus, true)
+  if (workspaceFilesRefreshTimer !== null) {
+    window.clearTimeout(workspaceFilesRefreshTimer)
+    workspaceFilesRefreshTimer = null
+  }
+  workspaceFilesRefreshPath = undefined
 })
 
 // ── Drag resize ──────────────────────────────────────────────────────────────
@@ -2969,13 +3062,34 @@ const refreshSearchCategoriesSoon = () => {
   }, 200)
 }
 
-const refreshWorkspaceFilesSoon = () => {
+const refreshWorkspaceFilesSoon = (changedPath?: string) => {
   workspaceFilesStale = true
   if (sidebarMode.value !== 'files') return
+
+  if (changedPath) {
+    const normalizedPath = normalizeWorkspaceFilePath(changedPath)
+    const changedNode = findWorkspaceNode(workspaceFiles.value, normalizedPath)
+    const candidatePath = changedNode?.type === 'directory' && changedNode.children !== undefined
+      ? normalizedPath
+      : workspaceParentPath(normalizedPath)
+    const parentNode = candidatePath ? findWorkspaceNode(workspaceFiles.value, candidatePath) : null
+    workspaceFilesRefreshPath = !candidatePath || (parentNode?.type === 'directory' && parentNode.children !== undefined)
+      ? candidatePath
+      : undefined
+  } else {
+    workspaceFilesRefreshPath = undefined
+  }
+
   if (workspaceFilesRefreshTimer !== null) window.clearTimeout(workspaceFilesRefreshTimer)
   workspaceFilesRefreshTimer = window.setTimeout(() => {
     workspaceFilesRefreshTimer = null
-    void loadWorkspaceFiles(true)
+    const path = workspaceFilesRefreshPath
+    workspaceFilesRefreshPath = undefined
+    if (path !== undefined) {
+      void refreshWorkspaceDirectory(path).catch(() => { void loadWorkspaceFiles(true) })
+    } else {
+      void loadWorkspaceFiles(true)
+    }
   }, 200)
 }
 
@@ -3066,7 +3180,7 @@ const onRealtimeFilesChanged = (event: Event) => {
     return
   }
 
-  if (action !== 'live-save') refreshWorkspaceFilesSoon()
+  if (action !== 'live-save') refreshWorkspaceFilesSoon(changedPath || undefined)
 
   if (action === 'external-change') {
     void refreshOpenWorkspaceFileContent(changedPath || undefined)
@@ -3101,7 +3215,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('yarc-project-files-changed', onRealtimeProjectFilesChanged)
   if (libraryRefreshTimer !== null) window.clearTimeout(libraryRefreshTimer)
   if (searchCategoryRefreshTimer !== null) window.clearTimeout(searchCategoryRefreshTimer)
-  if (workspaceFilesRefreshTimer !== null) window.clearTimeout(workspaceFilesRefreshTimer)
+  if (workspaceFilesRefreshTimer !== null) {
+    window.clearTimeout(workspaceFilesRefreshTimer)
+    workspaceFilesRefreshTimer = null
+  }
+  workspaceFilesRefreshPath = undefined
 })
 
 const openContextMenu = (e: Event, cat?: { id: string; name: string; parentId?: string | null }) => {
@@ -4174,8 +4292,9 @@ const showSearchPaperPopup = (paper: any) => {
             <input ref="workspaceUploadInput" class="visually-hidden-input" type="file" multiple @change="handleWorkspaceUploadInput" />
             <div v-if="workspaceUploading" class="side-empty">正在上传文件…</div>
             <div v-else-if="filesLoading" class="side-empty">正在加载文件…</div>
-            <div v-else-if="filesError" class="side-empty error-text">{{ filesError }}</div>
+            <div v-else-if="filesError && !workspaceFiles.length" class="side-empty error-text">{{ filesError }}</div>
             <template v-else>
+              <div v-if="filesError" class="side-empty error-text">{{ filesError }}</div>
               <div v-if="workspaceTreeFromCache" class="side-empty workspace-offline-tree-note">离线模式：显示最近缓存的文件列表</div>
               <div v-if="!workspaceFiles.length" class="side-empty">暂无文件</div>
               <FileTree
@@ -4184,6 +4303,7 @@ const showSearchPaperPopup = (paper: any) => {
                 :selected-path="selectedWorkspacePath"
                 :creating-parent-path="creatingParentPath"
                 :creating-type="creatingType"
+                :loading-paths="workspaceDirectoryLoading"
                 @select="selectWorkspaceFile"
                 @context-menu="openFileContextMenu"
                 @rename="handleTreeRename"
@@ -4191,6 +4311,7 @@ const showSearchPaperPopup = (paper: any) => {
                 @cancel-create="cancelCreate"
                 @move="moveWorkspaceNode"
                 @upload="(targetDirPath, files) => uploadWorkspaceFiles(files, targetDirPath)"
+                @expand="loadWorkspaceDirectory"
               />
             </template>
           </div>

@@ -137,7 +137,7 @@ export class ProjectFileService {
     const resolved = await resolveProjectPath(projectId, relativePath)
     const info = await lstat(resolved.fullPath)
     if (info.isSymbolicLink()) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Symlinks are not exposed by Project File API', 400)
-    if (info.isFile()) return [await this.node(projectId, resolved.relativePath, resolved.fullPath, info)]
+    if (info.isFile()) return [this.node(resolved.relativePath, resolved.fullPath, info)]
     if (!info.isDirectory()) return []
     const entries = await readdir(resolved.fullPath, { withFileTypes: true })
     const nodes: ProjectFileNode[] = []
@@ -149,7 +149,7 @@ export class ProjectFileService {
         const child = await resolveProjectPath(projectId, relative)
         const childInfo = await lstat(child.fullPath)
         if (childInfo.isSymbolicLink()) continue
-        nodes.push(await this.node(projectId, relative, child.fullPath, childInfo))
+        nodes.push(this.node(relative, child.fullPath, childInfo))
       } catch {
         // A broken/unsafe symlink must not break the whole tree.
       }
@@ -157,7 +157,7 @@ export class ProjectFileService {
     return nodes
   }
 
-  private async node(projectId: string, relativePath: string, fullPath: string, info: Awaited<ReturnType<typeof lstat>>): Promise<ProjectFileNode> {
+  private node(relativePath: string, fullPath: string, info: Awaited<ReturnType<typeof lstat>>): ProjectFileNode {
     const name = basename(relativePath || fullPath)
     const extension = extensionFor(name)
     const base: ProjectFileNode = {
@@ -175,7 +175,9 @@ export class ProjectFileService {
         legacyOffice: LEGACY_OFFICE_EXTENSIONS.has(extension),
       } : {}),
     }
-    if (info.isDirectory()) base.children = await this.getFileTree(projectId, relativePath)
+    // Directory contents are loaded explicitly by getFileTree(path). Keeping
+    // children undefined distinguishes an unexpanded directory from an
+    // already-loaded empty directory in the client tree.
     return base
   }
 

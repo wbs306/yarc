@@ -21,8 +21,6 @@ const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.sv
 const OFFICE_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx'])
 const LEGACY_OFFICE_EXTENSIONS = new Set(['.doc', '.xls', '.ppt'])
 const MAX_TEXT_FILE_SIZE = 2 * 1024 * 1024 // 2MB
-const DEFAULT_TREE_DEPTH = 4
-const PI_TREE_DEPTH = 6
 
 // Items hidden from the file tree (internal app resources)
 const EXCLUDED_NAMES = new Set(['backgrounds', 'model-catalog.json', 'temporary-pdfs'])
@@ -162,13 +160,6 @@ export class FileService {
     return isPiRuntimeResourcePath(this.normalizeRelativePath(filePath))
   }
 
-  private treeDepthForPath(filePath: string): number {
-    const relPath = this.normalizeRelativePath(filePath)
-    return relPath === '.pi' || relPath.startsWith('.pi/')
-      ? PI_TREE_DEPTH
-      : DEFAULT_TREE_DEPTH
-  }
-
   private async emitFilesChanged(action: string, path?: string) {
     if (action !== 'external-change' && path) {
       await this.changeWatcher.publish({
@@ -238,7 +229,7 @@ export class FileService {
     this.unsubscribeDataChanges = null
   }
 
-  private async buildNode(fullPath: string, depth: number): Promise<FileNode | null> {
+  private async buildNode(fullPath: string): Promise<FileNode | null> {
     const relPath = this.toRelativePath(fullPath)
     const name = basename(fullPath)
     if (this.isHiddenPath(relPath) || this.isSensitivePath(relPath) || this.isExcludedPath(relPath) || name === 'node_modules') return null
@@ -258,17 +249,10 @@ export class FileService {
     }
 
     if (entryStat.isDirectory()) {
-      const node: FileNode = { ...common, type: 'directory', children: [] }
-      if (depth < this.treeDepthForPath(relPath)) {
-        const entries = await readdir(fullPath, { withFileTypes: true })
-        const children: FileNode[] = []
-        for (const entry of entries) {
-          const child = await this.buildNode(resolve(fullPath, entry.name), depth + 1)
-          if (child) children.push(child)
-        }
-        node.children = this.sortNodes(children)
-      }
-      return node
+      // Directory contents are loaded explicitly by getFileTree(path). Keeping
+      // children undefined distinguishes an unexpanded directory from an
+      // already-loaded empty directory in the client tree.
+      return { ...common, type: 'directory' }
     }
 
     return {
@@ -300,7 +284,7 @@ export class FileService {
     const entries = await readdir(fullPath, { withFileTypes: true })
     const nodes: FileNode[] = []
     for (const entry of entries) {
-      const node = await this.buildNode(resolve(fullPath, entry.name), 1)
+      const node = await this.buildNode(resolve(fullPath, entry.name))
       if (node) nodes.push(node)
     }
 
@@ -426,7 +410,7 @@ export class FileService {
     }
 
     await liveFileService.withWorkspaceMutationLock(() => atomicWriteTextFile(fullPath, content))
-    const node = await this.buildNode(fullPath, DEFAULT_TREE_DEPTH)
+    const node = await this.buildNode(fullPath)
     if (!node) throw new AppError('CREATE_FAILED', 'Failed to create file', 500)
     void this.emitFilesChanged('create-file', node.path)
     return node
@@ -437,7 +421,7 @@ export class FileService {
     if (this.isProtectedPath(dirPath)) throw new AppError('PROTECTED_PATH', 'This path is protected', 403)
     const fullPath = await this.resolvePath(dirPath)
     await mkdir(fullPath, { recursive: false })
-    const node = await this.buildNode(fullPath, DEFAULT_TREE_DEPTH)
+    const node = await this.buildNode(fullPath)
     if (!node) throw new AppError('CREATE_FAILED', 'Failed to create directory', 500)
     this.emitFilesChanged('create-directory', node.path)
     return node
@@ -461,7 +445,7 @@ export class FileService {
       await mkdir(dirname(to), { recursive: true })
       await rename(from, to)
     })
-    const node = await this.buildNode(to, DEFAULT_TREE_DEPTH)
+    const node = await this.buildNode(to)
     if (!node) throw new AppError('RENAME_FAILED', 'Failed to rename path', 500)
     this.emitFilesChanged('rename', node.path)
     return node
@@ -494,7 +478,7 @@ export class FileService {
     await mkdir(dirname(target), { recursive: true })
     const buffer = Buffer.from(await file.arrayBuffer())
     await liveFileService.withWorkspaceMutationLock(() => atomicWriteFile(target, buffer))
-    const node = await this.buildNode(target, DEFAULT_TREE_DEPTH)
+    const node = await this.buildNode(target)
     if (!node) throw new AppError('UPLOAD_FAILED', 'Failed to upload file', 500)
     this.emitFilesChanged('upload', node.path)
     return node

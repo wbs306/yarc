@@ -11,12 +11,14 @@ const props = withDefaults(defineProps<{
   creatingParentPath?: string | undefined
   creatingType?: 'file' | 'directory'
   parentPath?: string
+  loadingPaths?: ReadonlySet<string>
 }>(), {
   selectedPath: '',
   level: 0,
   creatingParentPath: undefined,
   creatingType: 'file',
   parentPath: '',
+  loadingPaths: () => new Set<string>(),
 })
 
 const emit = defineEmits<{
@@ -27,6 +29,7 @@ const emit = defineEmits<{
   cancelCreate: []
   move: [node: FileNode, targetDirPath: string]
   upload: [targetDirPath: string, files: File[]]
+  expand: [node: FileNode]
 }>()
 
 const loadExpandedPaths = () => {
@@ -71,6 +74,26 @@ watch(
   { immediate: true },
 )
 
+const isExpanded = (node: FileNode) => expanded.value.has(node.path)
+
+const requestExpandedDirectories = () => {
+  for (const node of props.nodes) {
+    if (node.type !== 'directory' || !isExpanded(node) || node.children !== undefined || props.loadingPaths.has(node.path)) continue
+    emit('expand', node)
+  }
+}
+
+// Expanded paths persist across reloads, so an already-expanded directory may
+// need to be fetched as soon as its shallow node appears in the tree.
+watch(
+  () => [
+    ...props.nodes.map((node) => `${node.path}:${node.type}:${node.children === undefined ? 'unloaded' : 'loaded'}`),
+    ...Array.from(expanded.value).map((path) => `expanded:${path}`),
+  ],
+  requestExpandedDirectories,
+  { immediate: true },
+)
+
 const renamingPath = ref<string | null>(null)
 const renamingValue = ref('')
 const renameInput = ref<HTMLInputElement | null>(null)
@@ -104,7 +127,7 @@ watch(
   }
 )
 
-const isExpanded = (node: FileNode) => expanded.value.has(node.path)
+const isLoading = (node: FileNode) => props.loadingPaths.has(node.path)
 
 const toggle = (node: FileNode) => {
   if (node.type !== 'directory') return
@@ -114,6 +137,7 @@ const toggle = (node: FileNode) => {
   else next.delete(node.path)
   expanded.value = next
   persistExpandedPath(node.path, willExpand)
+  if (willExpand && node.children === undefined && !isLoading(node)) emit('expand', node)
 }
 
 const handleNodeClick = (node: FileNode) => {
@@ -402,8 +426,9 @@ defineExpose({ startRename })
         @dragleave="handleDirectoryDragLeave($event, node)"
         @drop="handleDirectoryDrop($event, node.path)"
       >
-        <span class="file-toggle" :class="{ expanded: isExpanded(node), visible: node.type === 'directory' }">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <span class="file-toggle" :class="{ expanded: isExpanded(node), visible: node.type === 'directory', loading: isLoading(node) }">
+          <span v-if="isLoading(node)" class="file-tree-spinner" aria-label="加载中" />
+          <svg v-else width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M4.5 3L7.5 6L4.5 9" />
           </svg>
         </span>
@@ -499,6 +524,7 @@ defineExpose({ startRename })
           :creating-parent-path="creatingParentPath"
           :creating-type="creatingType"
           :parent-path="node.path"
+          :loading-paths="loadingPaths"
           @select="emit('select', $event)"
           @context-menu="(e, child) => emit('contextMenu', e, child)"
           @rename="(child, newName) => emit('rename', child, newName)"
@@ -506,6 +532,7 @@ defineExpose({ startRename })
           @cancel-create="emit('cancelCreate')"
           @move="(child, targetDirPath) => emit('move', child, targetDirPath)"
           @upload="(targetDirPath, files) => emit('upload', targetDirPath, files)"
+          @expand="(child) => emit('expand', child)"
         />
       </Transition>
     </div>
@@ -613,6 +640,19 @@ defineExpose({ startRename })
   opacity: 0.7;
 }
 
+.file-toggle.loading {
+  opacity: 0.8;
+}
+
+.file-tree-spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: file-tree-spin 0.7s linear infinite;
+}
+
 .file-node:hover .file-toggle.visible {
   opacity: 1;
 }
@@ -715,5 +755,9 @@ defineExpose({ startRename })
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+@keyframes file-tree-spin {
+  to { transform: rotate(360deg); }
 }
 </style>
