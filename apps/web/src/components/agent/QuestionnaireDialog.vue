@@ -33,12 +33,14 @@ const props = defineProps<{
   request: AgentInteractionRequest
   submitting?: boolean
   error?: string
+  visible?: boolean
 }>()
 
 const emit = defineEmits<{
   submit: [value: unknown]
   cancel: []
   chat: [value: unknown]
+  hide: []
 }>()
 
 const activeIndex = ref(0)
@@ -70,10 +72,11 @@ const insertTextareaNewline = (e: KeyboardEvent) => {
 
 // E3: Keyboard shortcuts
 const onKeydown = (e: KeyboardEvent) => {
-  // Esc → cancel
+  if (props.visible === false || props.submitting) return
+  // Esc only hides the questionnaire; explicit Cancel still abandons it.
   if (e.key === 'Escape') {
     e.preventDefault()
-    emit('cancel')
+    emit('hide')
     return
   }
   // Ctrl+Enter has no reliable native textarea behavior across browsers, so
@@ -233,7 +236,7 @@ const chatAboutThis = () => {
         <h3>{{ request.title || 'Agent 需要确认一些问题' }}</h3>
         <p>{{ request.message || '请选择或输入答案，提交后 Agent 会继续。' }}</p>
       </div>
-      <button type="button" class="icon-btn" :disabled="submitting" title="取消" @click="emit('cancel')">✕</button>
+      <button type="button" class="icon-btn" :disabled="submitting" title="暂时收起，可从工具调用卡片重新打开" aria-label="暂时收起问题" @click="emit('hide')">✕</button>
     </header>
 
     <nav class="question-tabs" aria-label="问题列表">
@@ -300,7 +303,7 @@ const chatAboutThis = () => {
 
     <footer class="questionnaire-footer">
       <p v-if="validationError || error" class="form-error">{{ validationError || error }}</p>
-      <span v-else class="footer-hint">请求 ID: {{ request.requestId.slice(0, 8) }}</span>
+      <span v-else class="footer-hint">Esc 暂时收起 · 可从工具调用卡片重新打开</span>
       <div class="footer-actions">
         <button type="button" class="ghost-btn" :disabled="submitting" @click="chatAboutThis">继续聊天</button>
         <button type="button" class="ghost-btn" :disabled="submitting" @click="emit('cancel')">取消</button>

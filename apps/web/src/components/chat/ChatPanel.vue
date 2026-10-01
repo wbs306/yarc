@@ -970,6 +970,13 @@ const messageSegments = (msg: any) => {
 
 const hasThinkingSegments = (msg: any) => messageSegments(msg).some((seg: any) => seg.type === 'thinking')
 const toolForSegment = (msg: any, seg: any) => (msg.toolCalls || []).find((tc: any) => tc.id === seg.toolCallId)
+const pendingToolQuestion = (tc: { id: string; name: string }) => tc.name === 'ask_user_question'
+  ? chatStore.questionnaireForTool(tc.id)
+  : undefined
+const openToolQuestion = (tc: { id: string; name: string }) => {
+  const request = pendingToolQuestion(tc)
+  if (request) chatStore.openInteraction(request.requestId)
+}
 const toolSearchResults = (tc: any) => tc?.searchResults || null
 const openToolSearchResults = (tc: any) => {
   const searchResults = toolSearchResults(tc)
@@ -1373,6 +1380,13 @@ const contextUsageTitle = computed(() => {
               </span>
               <span v-if="toolForSegment(msg, seg)?.inputText" class="tool-progress" title="正在生成参数；token 数量为估算值">{{ formatToolInputTokens(toolForSegment(msg, seg)) }}</span>
               <button
+                v-if="pendingToolQuestion(toolForSegment(msg, seg))"
+                type="button"
+                class="tool-question-btn"
+                title="打开尚未回答的问题"
+                @click.stop.prevent="openToolQuestion(toolForSegment(msg, seg))"
+              >打开问题</button>
+              <button
                 v-if="toolSearchResults(toolForSegment(msg, seg))"
                 type="button"
                 class="tool-search-results-btn"
@@ -1713,8 +1727,8 @@ const contextUsageTitle = computed(() => {
 .tool-detail-label { margin-bottom: 5px; color: var(--color-text-muted); font-size: 10px; font-weight: 500; }
 .tool-detail-section pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 12px/1.65 var(--font-mono, ui-monospace, monospace); color: var(--color-text-secondary); }
 .msg-tool .tool-detail-section .tool-result { padding-left: 8px; }
-.tool-search-results-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-bg-card); color: var(--color-primary); font: inherit; font-size: 11px; line-height: 1.2; cursor: pointer; flex-shrink: 0; }
-.tool-search-results-btn:hover { border-color: var(--color-primary); background: var(--color-primary-soft); }
+.tool-question-btn, .tool-search-results-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-bg-card); color: var(--color-primary); font: inherit; font-size: 11px; line-height: 1.2; cursor: pointer; flex-shrink: 0; }
+.tool-question-btn:hover, .tool-search-results-btn:hover { border-color: var(--color-primary); background: var(--color-primary-soft); }
 .tool-search-results-btn svg { flex: 0 0 auto; }
 .msg-tool .tool-progress { flex: 0 0 auto; color: var(--color-text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .msg-thinking > div, .msg-tool > div, .msg-compaction > div { margin-top: 4px; padding: 8px 10px; background: var(--color-bg-muted); border-radius: var(--radius-sm); font-size: 12px; color: var(--color-text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }

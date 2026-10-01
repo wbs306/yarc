@@ -143,6 +143,7 @@ export const useChatStore = defineStore('chat', () => {
   // Agent web-native interactions (ask_user_question, future confirm/select/input)
   const interactions = ref<Record<string, AgentInteractionRequest>>({})
   const activeInteractionId = ref<string | null>(null)
+  const hiddenInteractionIds = ref(new Set<string>())
 
   // UI Context bridge state (from Pi extensions via ctx.ui.*)
   const uiStatus = ref<Record<string, string>>({})
@@ -220,11 +221,11 @@ export const useChatStore = defineStore('chat', () => {
   }
   const activeInteraction = computed(() => {
     const current = activeInteractionId.value ? interactions.value[activeInteractionId.value] : null
-    if (current && current.kind !== 'notification'
+    if (current && current.kind !== 'notification' && !hiddenInteractionIds.value.has(current.requestId)
       && (!currentConvId.value || current.conversationId === currentConvId.value)
       && (!currentBranchId.value || current.branchId === currentBranchId.value)) return current
     const candidates = Object.values(interactions.value)
-      .filter((item) => item.kind !== 'notification'
+      .filter((item) => item.kind !== 'notification' && !hiddenInteractionIds.value.has(item.requestId)
         && (!currentConvId.value || item.conversationId === currentConvId.value)
         && (!currentBranchId.value || item.branchId === currentBranchId.value))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
@@ -390,20 +391,41 @@ export const useChatStore = defineStore('chat', () => {
   }
   const refreshActiveInteraction = () => {
     const current = activeInteractionId.value ? interactions.value[activeInteractionId.value] : null
-    if (current
+    if (current && current.kind !== 'notification' && !hiddenInteractionIds.value.has(current.requestId)
       && (!currentConvId.value || current.conversationId === currentConvId.value)
       && (!currentBranchId.value || current.branchId === currentBranchId.value)) return
     activeInteractionId.value = Object.values(interactions.value)
-      .filter((item) => item.kind !== 'notification'
+      .filter((item) => item.kind !== 'notification' && !hiddenInteractionIds.value.has(item.requestId)
         && (!currentConvId.value || item.conversationId === currentConvId.value)
         && (!currentBranchId.value || item.branchId === currentBranchId.value))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]?.requestId || null
   }
   const dismissInteraction = (requestId: string) => {
     delete interactions.value[requestId]
+    hiddenInteractionIds.value.delete(requestId)
     if (activeInteractionId.value === requestId) activeInteractionId.value = null
     refreshActiveInteraction()
   }
+  const hideInteraction = (requestId: string) => {
+    if (interactions.value[requestId]?.kind !== 'questionnaire') return
+    hiddenInteractionIds.value.add(requestId)
+    if (activeInteractionId.value === requestId) activeInteractionId.value = null
+    refreshActiveInteraction()
+  }
+  const openInteraction = (requestId: string) => {
+    const request = interactions.value[requestId]
+    if (!request || request.kind !== 'questionnaire'
+      || request.conversationId !== currentConvId.value
+      || request.branchId !== currentBranchId.value) return
+    hiddenInteractionIds.value.delete(requestId)
+    activeInteractionId.value = requestId
+  }
+  const questionnaireForTool = (toolCallId: string) => Object.values(interactions.value).find((request) => {
+    if (request.kind !== 'questionnaire' || request.conversationId !== currentConvId.value
+      || request.branchId !== currentBranchId.value) return false
+    const payload = request.payload as { toolCallId?: string } | null
+    return payload?.toolCallId === toolCallId
+  })
   const beginStreamConnection = (convId: string) => {
     const token = ++streamConnectionSeq
     streamConnectionTokens.set(convId, token)
@@ -908,9 +930,7 @@ export const useChatStore = defineStore('chat', () => {
       branchId: interaction?.branchId,
       clientId: runtimeClientId,
     })
-    delete interactions.value[requestId]
-    if (activeInteractionId.value === requestId) activeInteractionId.value = null
-    refreshActiveInteraction()
+    dismissInteraction(requestId)
   }
 
   const askBtw = async (question: string) => {
@@ -1075,7 +1095,7 @@ export const useChatStore = defineStore('chat', () => {
     }
     conversations.value = conversations.value.filter(c => c.id !== id)
     for (const [requestId, interaction] of Object.entries(interactions.value)) {
-      if (interaction.conversationId === id) delete interactions.value[requestId]
+      if (interaction.conversationId === id) dismissInteraction(requestId)
     }
     refreshActiveInteraction()
     branchCache.value.clear()
@@ -1517,12 +1537,11 @@ export const useChatStore = defineStore('chat', () => {
         if (d.kind === 'notification') {
           window.setTimeout(() => dismissInteraction(d.requestId), 6000)
         } else if ((!currentConvId.value || d.conversationId === currentConvId.value)
-          && (!currentBranchId.value || d.branchId === currentBranchId.value)) activeInteractionId.value = d.requestId;
+          && (!currentBranchId.value || d.branchId === currentBranchId.value)
+          && !hiddenInteractionIds.value.has(d.requestId)) activeInteractionId.value = d.requestId;
         break;
       case 'agent_interaction_resolved':
-        delete interactions.value[d.requestId];
-        if (activeInteractionId.value === d.requestId) activeInteractionId.value = null;
-        refreshActiveInteraction();
+        dismissInteraction(d.requestId);
         if (d.reason === 'timeout') chatError.value = 'Agent 交互请求已超时，已按取消处理。';
         break;
       case 'error': { flushTextQueue(m, c); const t = `❌ ${d.message}`; m.content += m.content ? `\n\n${t}` : t; if (c === currentConvId.value) chatError.value = d.message; appendSeg(m, t, 'error'); break }
@@ -1792,7 +1811,7 @@ export const useChatStore = defineStore('chat', () => {
     // and terminal `done` event reach the current page, and prevents the next
     // prompt from racing the still-settling Pi session.
     for (const [requestId, interaction] of Object.entries(interactions.value)) {
-      if (interaction.streamMessageId === m) delete interactions.value[requestId]
+      if (interaction.streamMessageId === m) dismissInteraction(requestId)
     }
     refreshActiveInteraction()
 
@@ -1831,6 +1850,7 @@ export const useChatStore = defineStore('chat', () => {
     setCurrentModel, setReasoningEffort, fetchConversations, fetchModels,
     createConversation, renameConversation, deleteConversation, selectConversation,
     sendMessage, stopStreaming, switchBranch, respondInteraction, dismissInteraction,
+    hideInteraction, openInteraction, questionnaireForTool,
     loadRuntimeSnapshot, syncComposer, getRuntimeAutocomplete, applyRuntimeAutocomplete, sendTuiInput, resizeTui, closeTui,
     askBtw, cancelBtw, insertBtwAnswer, sendBtwAsMainMessage, handleBtwEvent, clearBtwItems,
   }

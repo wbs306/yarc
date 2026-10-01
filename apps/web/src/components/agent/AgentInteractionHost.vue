@@ -11,6 +11,9 @@ const submitting = ref(false)
 
 const active = computed(() => chatStore.activeInteraction)
 const notifications = computed(() => chatStore.notificationInteractions)
+// Keep pending questionnaires mounted while hidden so their answer drafts survive.
+const questionnaires = computed(() => Object.values(chatStore.interactions)
+  .filter(request => request.kind === 'questionnaire'))
 const overlaySurfaces = computed(() => Object.values(chatStore.tuiSurfaces)
   .filter(surface => surface.overlay || surface.kind === 'custom'))
 
@@ -73,18 +76,22 @@ const notificationType = (request: AgentInteractionRequest) => {
     </button>
   </div>
 
-  <div v-if="active" class="agent-interaction-host">
+  <div v-show="active" class="agent-interaction-host">
     <QuestionnaireDialog
-      v-if="active.kind === 'questionnaire'"
-      :request="active"
+      v-for="request in questionnaires"
+      :key="request.requestId"
+      v-show="active?.requestId === request.requestId"
+      :visible="active?.requestId === request.requestId"
+      :request="request"
       :submitting="submitting"
       :error="error"
       @submit="submit"
       @cancel="cancel"
       @chat="chat"
+      @hide="chatStore.hideInteraction(request.requestId)"
     />
     <GenericInteractionDialog
-      v-else
+      v-if="active && active.kind !== 'questionnaire'"
       :request="active"
       :submitting="submitting"
       :error="error"

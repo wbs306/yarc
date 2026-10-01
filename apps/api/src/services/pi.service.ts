@@ -1085,7 +1085,7 @@ export class PiService {
         label: 'Ask User Question',
         description: 'Ask the user one or more structured questions in the YARC web UI. Use this when you need the user to choose among options, provide custom input, or decide how to proceed.',
         parameters: askUserQuestionSchema,
-        async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
+        async execute(toolCallId: string, params: any, signal?: AbortSignal) {
           const validation = validateAskUserQuestionParams(params)
           if (!validation.ok) {
             return {
@@ -1112,7 +1112,7 @@ export class PiService {
               kind: 'questionnaire',
               title: 'Agent 需要确认一些问题',
               message: '请选择或输入答案，提交后 Agent 会继续执行。',
-              payload: { questions: validation.questions },
+              payload: { toolCallId, questions: validation.questions },
               emitRequest: interactionContext.emit,
               emitResolved: interactionContext.emit,
             })
