@@ -525,6 +525,38 @@ export const useChatStore = defineStore('chat', () => {
     branchCache.value.set(bid, [...arr])
   }
 
+  const applyPiAssistantEntry = (event: any, branchId: string | null | undefined, fallback: Message): Message => {
+    if (event?.type !== 'pi_assistant_entry' || !event.messageId || !event.entryId || !branchId) return fallback
+    const arr = branchCache.value.get(branchId)
+    if (!arr) return fallback
+    const pendingIndex = arr.findIndex(message => message.id === event.messageId)
+    if (pendingIndex < 0) return fallback
+
+    const canonicalIndex = arr.findIndex(message => message.id === event.entryId)
+    if (canonicalIndex >= 0 && canonicalIndex !== pendingIndex) {
+      const canonical = arr[canonicalIndex]
+      arr.splice(pendingIndex, 1)
+      branchCache.value.set(branchId, [...arr])
+      return fallback.id === event.messageId ? canonical : fallback
+    }
+
+    const mapped = cloneMessage(arr[pendingIndex])
+    mapped.id = event.entryId
+    mapped.metadata = {
+      ...mapped.metadata,
+      pending: false,
+      streamStatus: 'completed',
+      pi: {
+        ...(mapped.metadata.pi || {}),
+        entryId: event.entryId,
+        sessionFile: event.sessionFile,
+      },
+    }
+    arr[pendingIndex] = mapped
+    branchCache.value.set(branchId, [...arr])
+    return fallback.id === event.messageId ? mapped : fallback
+  }
+
   const scheduleStreamReconnect = (convId: string, delayMs = 1200) => {
     const old = streamReconnectTimers.get(convId)
     if (old) window.clearTimeout(old)
@@ -1455,14 +1487,17 @@ export const useChatStore = defineStore('chat', () => {
     return target
   }
 
-  const applyEvent = (d: any, fallbackMessage: Message, c: string) => {
+  const applyEvent = (d: any, fallbackMessage: Message, c: string, options: { immediateText?: boolean } = {}) => {
     if (d.type !== 'runtime_branch_changed' && !isCurrentRuntimeEvent(d)) return
     const m = resolveEventAssistant(d, fallbackMessage, c)
     switch (d.type) {
       case 'assistant_message_start':
         m.metadata.runGroupId = d.runGroupId
         break
-      case 'text': enqueue(m, d.content, c); break
+      case 'text':
+        if (options.immediateText) appendText(m, d.content, c)
+        else enqueue(m, d.content, c)
+        break
       case 'thinking':
         flushTextQueue(m, c)
         m.metadata.thinking = (m.metadata.thinking || '') + d.content
@@ -1683,9 +1718,10 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     const bid = (sm as any).branchId || currentBranchId.value
+    const replayEvents = Array.isArray(r.events) ? r.events : []
     const recoveredUser = r.userMessage as Message | null | undefined
     const recoveredUserEntryId = recoveredUser?.id
-      ? (r.events || []).find((event: any) => event?.type === 'pi_user_entry' && event.messageId === recoveredUser.id)?.entryId
+      ? replayEvents.find((event: any) => event?.type === 'pi_user_entry' && event.messageId === recoveredUser.id)?.entryId
       : null
     let msgRef: Message = {
       id: sm.id,
@@ -1701,22 +1737,54 @@ export const useChatStore = defineStore('chat', () => {
     if (bid) {
       currentBranchId.value = bid
       const arr = branchCache.value.get(bid) || []
+      const replayAssistantIds = new Set<string>([sm.id])
+      for (const event of replayEvents) {
+        if (event?.type === 'assistant_message_start' && typeof event.messageId === 'string') replayAssistantIds.add(event.messageId)
+        if (typeof event?.assistantMessageId === 'string') replayAssistantIds.add(event.assistantMessageId)
+      }
+
+      // Rebuild the active run from the REST snapshot. This also handles a
+      // reconnect on the same page: previously rendered temporary assistant
+      // messages must not receive the full replay a second time.
+      for (const messageId of replayAssistantIds) {
+        const queued = textQueues.get(messageId)
+        if (queued && queued.timer !== null) window.clearTimeout(queued.timer)
+        textQueues.delete(messageId)
+      }
+      const retained = arr.filter(message => !replayAssistantIds.has(message.id))
 
       // The optimistic user message only lived in the old page. Restore it on
       // refresh unless Pi JSONL has already supplied its canonical entry.
-      if (recoveredUser?.id && !arr.some(m => m.id === recoveredUserEntryId)) {
-        const userIdx = arr.findIndex(m => m.id === recoveredUser.id)
+      if (recoveredUser?.id && !retained.some(m => m.id === recoveredUserEntryId)) {
+        const userIdx = retained.findIndex(m => m.id === recoveredUser.id)
         const userMessage = cloneMessage(recoveredUser)
-        if (userIdx >= 0) arr[userIdx] = userMessage
-        else arr.push(userMessage)
+        if (userIdx >= 0) retained[userIdx] = userMessage
+        else retained.push(userMessage)
       }
 
-      const idx = arr.findIndex(m => m.id === sm.id)
-      if (idx >= 0) arr[idx] = msgRef
-      else arr.push(msgRef)
-      branchCache.value.set(bid, [...arr])
-      msgRef = branchCache.value.get(bid)![idx >= 0 ? idx : arr.length - 1]!
+      retained.push(msgRef)
+      branchCache.value.set(bid, [...retained])
+      msgRef = branchCache.value.get(bid)![retained.length - 1]!
     }
+
+    // Hydrate everything already buffered in one synchronous pass, then attach
+    // after that cursor. Only genuinely new deltas use the typing animation.
+    let replaySequence = 0
+    let streamFailed = false
+    if (convId === currentConvId.value) streamingContent.value = ''
+    for (const event of replayEvents) {
+      replaySequence = Math.max(replaySequence, Number(event?.eventSequence || 0))
+      if (event?.type === 'pi_user_entry') {
+        applyPiUserEntry(event, bid)
+      } else if (event?.type === 'pi_assistant_entry') {
+        msgRef = applyPiAssistantEntry(event, bid, msgRef)
+      } else {
+        if (event?.type === 'error') streamFailed = true
+        applyEvent(event, msgRef, convId, { immediateText: true })
+      }
+    }
+    if (replaySequence > 0) streamEventSequences.set(sm.id, replaySequence)
+    else streamEventSequences.delete(sm.id)
 
     const attachToken = beginStreamConnection(convId)
     markActive(convId, sm.id)
@@ -1731,7 +1799,6 @@ export const useChatStore = defineStore('chat', () => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${location.host}/api/chat?conversation_id=${convId}`)
     let streamCompleted = false
-    let streamFailed = false
     attachAbort.signal.addEventListener('abort', () => ws.close())
     ws.onopen = () => {
       if (attachAbort.signal.aborted || currentConvId.value !== convId || !ownsStreamConnection(convId, attachToken)) {
@@ -1763,6 +1830,10 @@ export const useChatStore = defineStore('chat', () => {
         }
         if (d.type === 'pi_user_entry') {
           applyPiUserEntry(d, bid)
+          return
+        }
+        if (d.type === 'pi_assistant_entry') {
+          msgRef = applyPiAssistantEntry(d, bid, msgRef)
           return
         }
         if (d.type === 'error') streamFailed = true
