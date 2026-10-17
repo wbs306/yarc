@@ -133,8 +133,8 @@ const selectedCategory = ref<string | null>(initialLibraryView
   : localStorage.getItem('yarc_category') || null)
 // Route takes precedence over localStorage for sidebar mode
 const getInitialSidebarMode = (): 'library' | 'files' | 'settings' | 'ieee' | 'projects' => {
-  if (route.name === 'project-workspace') return 'files'
-  if (route.name === 'projects' || route.name === 'project-settings') return 'projects'
+  if (route.name === 'project-workspace' || route.name === 'project-settings') return 'files'
+  if (route.name === 'projects') return 'projects'
   if (route.name === 'files') return 'files'
   if (route.name === 'settings') return 'settings'
   return readPersistedLibraryView()?.kind === 'ieee_journal' ? 'ieee' : 'library'
@@ -143,7 +143,7 @@ const sidebarMode = ref<'library' | 'files' | 'settings' | 'ieee' | 'projects'>(
 const isProjectMode = computed(() => route.name === 'projects' || route.name === 'project-workspace' || route.name === 'project-settings')
 const projectResource = ref<CurrentChatResource | null>(null)
 const projectPanel = ref<'files' | 'git' | 'history'>('files')
-const isProjectWorkspace = computed(() => route.name === 'project-workspace' && typeof route.params.id === 'string')
+const isProjectWorkspace = computed(() => (route.name === 'project-workspace' || route.name === 'project-settings') && typeof route.params.id === 'string')
 const projectWorkspaceId = computed(() => isProjectWorkspace.value ? String(route.params.id) : '')
 const workspaceFileStorageKey = computed(() => projectWorkspaceId.value
   ? `yarc_workspace_file:project:${projectWorkspaceId.value}`
@@ -374,6 +374,12 @@ const latexSourceFile = computed(() => {
 })
 const latexSourceLine = ref(1)
 const latexSourceColumn = ref(1)
+const latexCompileTargetId = computed(() => {
+  if (!isProjectWorkspace.value || !latexEntryPath.value) return undefined
+  const targetId = projectsStore.defaultLatexTarget
+  const target = projectsStore.latexTargets.find(item => item.id === targetId)
+  return target?.entry === latexEntryPath.value ? target.id : undefined
+})
 const workspaceIsMarkdown = computed(() => workspaceLanguage.value === 'markdown')
 const markdownViewMode = ref<MarkdownViewMode>('edit')
 const markdownPreviewRef = ref<HTMLElement | null>(null)
@@ -1743,6 +1749,7 @@ const openLatexBuild = async () => {
   }
 
   const cursor = workspaceEditorRef.value?.getCursorPosition()
+  if (isProjectWorkspace.value) await projectsStore.fetchLatexTargets(projectWorkspaceId.value).catch(() => {})
   if (workspaceDirty.value) {
     await saveWorkspaceFile()
     if (workspaceDirty.value) return
@@ -2163,9 +2170,12 @@ watch(
   () => [route.name, String(route.params.id || '')] as const,
   ([name, projectId], previous) => {
     const [previousName, previousProjectId] = previous || []
-    const enteringProjectWorkspace = name === 'project-workspace'
-      && (previousName !== 'project-workspace' || previousProjectId !== projectId)
-    const leavingProjectWorkspace = previousName === 'project-workspace' && name !== 'project-workspace'
+    const isProjectWorkspaceRoute = name === 'project-workspace' || name === 'project-settings'
+    const wasProjectWorkspaceRoute = previousName === 'project-workspace' || previousName === 'project-settings'
+    const enteringProjectWorkspace = isProjectWorkspaceRoute
+      && (!wasProjectWorkspaceRoute || previousProjectId !== projectId)
+    const leavingProjectWorkspace = wasProjectWorkspaceRoute
+      && (!isProjectWorkspaceRoute || previousProjectId !== projectId)
     if (enteringProjectWorkspace || leavingProjectWorkspace) resetWorkspaceScope()
 
     const nextConversationProjectId = conversationProjectIdForRoute(name, projectId)
@@ -2176,17 +2186,18 @@ watch(
       void chatStore.fetchConversations(nextConversationProjectId)
     }
 
-    if (name === 'project-workspace') {
+    if (isProjectWorkspaceRoute) {
       projectResource.value = null
-      projectPanel.value = 'files'
+      if (enteringProjectWorkspace) projectPanel.value = 'files'
       sidebarMode.value = 'files'
       localStorage.setItem('yarc_sidebar_mode', 'files')
       if (!projectsStore.loading && projectsStore.currentProject?.id !== projectId) {
         void projectsStore.fetchProject(projectId).catch(() => {})
       }
+      void projectsStore.fetchLatexTargets(projectId).catch(() => {})
       if (!projectsStore.projects.length && !projectsStore.loading) void projectsStore.fetchProjects().catch(() => {})
       if (!filesLoading.value && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFiles()
-    } else if (name === 'projects' || name === 'project-settings') {
+    } else if (name === 'projects') {
       projectResource.value = null
       setSidebarMode('projects')
     } else if (name === 'files') setSidebarMode('files')
@@ -4078,7 +4089,10 @@ const showSearchPaperPopup = (paper: any) => {
               <button class="project-back-btn" title="返回项目列表" @click="router.push('/projects')">←</button>
               <strong class="project-workspace-title">{{ projectsStore.currentProject?.name || '项目' }}</strong>
             </div>
-            <button class="side-mini-btn" :disabled="filesLoading" @click="loadWorkspaceFiles()">刷新</button>
+            <div class="project-workspace-header-actions">
+              <button class="side-mini-btn project-settings-button" title="项目设置" @click="router.push(`/projects/${projectWorkspaceId}/settings`)">设置</button>
+              <button class="side-mini-btn" :disabled="filesLoading" @click="loadWorkspaceFiles()">刷新</button>
+            </div>
           </div>
           <div v-else class="side-header">
             <h2>{{ sidebarMode === 'files' ? '文件' : sidebarMode === 'settings' ? '设置' : '文献库' }}</h2>
@@ -5081,6 +5095,7 @@ const showSearchPaperPopup = (paper: any) => {
                 :path="latexEntryPath || selectedWorkspaceFile.path"
                 :name="latexEntryPath.split('/').pop() || selectedWorkspaceFile.name"
                 :source-file="latexSourceFile"
+                :target-id="latexCompileTargetId"
                 :source-line="latexSourceLine"
                 :source-column="latexSourceColumn"
                 @close="latexBuildVisible = false"
@@ -5858,7 +5873,7 @@ const showSearchPaperPopup = (paper: any) => {
   border-bottom: 1px solid var(--color-border);
 }
 
-.project-workspace-header{padding:10px 12px}.project-workspace-switcher{display:flex;align-items:center;gap:7px;min-width:0;flex:1}.project-workspace-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text);font-size:14px;font-weight:600}.project-back-btn{width:28px;height:28px;flex:0 0 auto;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--color-text-muted);font-size:17px;cursor:pointer}.project-back-btn:hover{background:var(--color-bg-muted);color:var(--color-primary)}
+.project-workspace-header{padding:10px 12px}.project-workspace-header-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}.project-workspace-switcher{display:flex;align-items:center;gap:7px;min-width:0;flex:1}.project-workspace-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text);font-size:14px;font-weight:600}.project-back-btn{width:28px;height:28px;flex:0 0 auto;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--color-text-muted);font-size:17px;cursor:pointer}.project-back-btn:hover{background:var(--color-bg-muted);color:var(--color-primary)}
 .side-header h2 {
   font-size: 16px;
   font-weight: 600;

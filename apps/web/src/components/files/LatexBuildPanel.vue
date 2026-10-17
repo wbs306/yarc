@@ -12,6 +12,7 @@ const props = withDefaults(defineProps<{
   sourceColumn?: number
   autoStart?: boolean
   engine?: LatexEngine
+  targetId?: string
   buildApi?: Pick<ReturnType<typeof useApi>, 'compileLatex' | 'getLatexBuild' | 'getLatexBuildLog' | 'cancelLatexBuild' | 'getLatexPdfUrl' | 'getLatexSyncTex'>
 }>(), {
   autoStart: false,
@@ -186,7 +187,7 @@ const startBuild = async () => {
   clearPdfHighlight()
   syncedBuildId = ''
   try {
-    const result = await api.value.compileLatex(props.path, engine.value)
+    const result = await api.value.compileLatex(props.path, engine.value, props.targetId)
     if (sequence !== requestSequence) return
     build.value = result.build
     await pollBuild(result.build.id, sequence)

@@ -569,10 +569,10 @@ export function useApi() {
 
     // LaTeX builds. Project routes are selected from the current /projects/:id URL;
     // the same panel can therefore serve both the global Files workspace and a Project.
-    compileLatex: (path: string, engine: LatexEngine = 'xelatex') =>
+    compileLatex: (path: string, engine: LatexEngine = 'xelatex', targetId?: string) =>
       request<{ build: LatexBuild }>(latexBuildsEndpoint(), {
         method: 'POST',
-        body: JSON.stringify({ path, engine }),
+        body: JSON.stringify({ path, engine, ...(targetId ? { targetId } : {}) }),
       }),
 
     getLatexBuild: (id: string) =>
