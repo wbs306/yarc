@@ -1113,8 +1113,15 @@ const flushDeferredAssistantAborts = () => {
 const runPrompt = async (payload: Extract<RuntimeHostMessage, { type: 'prompt' }>['payload']) => {
   beginRun(payload.runId, payload.assistantMessageId, payload.userMessageId)
   if (/^\/acm(?:\s|$)/.test(payload.prompt.trim())) acmEnabled = true
-  const initialLeafId = session?.sessionManager?.getLeafId?.() || null
+  let initialLeafId = session?.sessionManager?.getLeafId?.() || null
+  let retryNavigationComplete = !payload.retryMessageId
   try {
+    if (payload.retryMessageId) {
+      const navigation = await session.navigateTree(payload.retryMessageId, { summarize: false })
+      if (navigation.cancelled) throw new Error('Failed-turn retry was cancelled')
+      retryNavigationComplete = true
+      initialLeafId = session?.sessionManager?.getLeafId?.() || null
+    }
     await configureSession(payload)
     emit({
       type: 'session_state',
@@ -1140,12 +1147,14 @@ const runPrompt = async (payload: Extract<RuntimeHostMessage, { type: 'prompt' }
     markFailedIfBusy()
     flushDeferredAssistantAborts()
     const message = (err as Error).message || 'Pi runtime failed'
-    try {
-      persistFailedPromptIfMissing(session.sessionManager, initialLeafId, payload.prompt, message, session.model)
-      durability.commit(session.sessionFile)
-      emitMetadata()
-    } catch (persistError) {
-      console.warn('[PiRuntimeWorker] Failed to persist errored prompt:', (persistError as Error).message)
+    if (retryNavigationComplete) {
+      try {
+        persistFailedPromptIfMissing(session.sessionManager, initialLeafId, payload.prompt, message, session.model)
+        durability.commit(session.sessionFile)
+        emitMetadata()
+      } catch (persistError) {
+        console.warn('[PiRuntimeWorker] Failed to persist errored prompt:', (persistError as Error).message)
+      }
     }
     emit({ type: 'error', message, conversationId: key?.conversationId, branchId: key?.branchId })
     resetWorkingUi()

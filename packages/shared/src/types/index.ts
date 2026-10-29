@@ -351,6 +351,8 @@ export interface ChatRequest {
   thinking_enabled?: boolean
   branchId?: string
   editMessageId?: string
+  /** Retry a failed user turn in-place without creating a named YARC branch. */
+  retryMessageId?: string
   context?: {
     paperId?: string
     pageNumber: number

@@ -29,6 +29,13 @@ interface StoredContext {
   fileRefs?: string[]
 }
 
+type PreparedChatRequest = ChatRequest & {
+  editForkMessageId?: string
+  userMessageId?: string
+  assistantMessageId?: string
+  retryPrompt?: string
+}
+
 export class ChatService {
   /**
    * Prepare message context for a chat request.
@@ -36,8 +43,10 @@ export class ChatService {
    * Pi SDK handles message persistence in JSONL.
    */
   async handleEditBranch(conversationId: string, request: ChatRequest) {
-    const { model, context, editMessageId } = request as ChatRequest & { branchId?: string }
+    const preparedRequest = request as PreparedChatRequest
+    const { model, context, editMessageId, retryMessageId } = preparedRequest
 
+    if (editMessageId && retryMessageId) throw new Error('A message cannot be edited and retried at the same time')
     if (model) await conversationService.updateModel(conversationId, model)
 
     if (editMessageId) {
@@ -49,10 +58,18 @@ export class ChatService {
         editMessageId,
         request.content,
         context || undefined,
-        (request as any).editForkMessageId
+        preparedRequest.editForkMessageId
       )
-      ;(request as any).branchId = result.branchId
+      preparedRequest.branchId = result.branchId
       return { branchId: result.branchId, entryId: null, piParentEntryId: result.forkEntryId }
+    }
+
+    if (retryMessageId) {
+      const branchId = request.branchId || 'main'
+      const retry = await piConversationService.prepareFailedTurnRetry(conversationId, branchId, retryMessageId)
+      preparedRequest.content = retry.content
+      preparedRequest.retryPrompt = retry.prompt
+      return { branchId, entryId: null, piParentEntryId: retry.parentEntryId }
     }
 
     // For new messages, just return the branch info
@@ -66,18 +83,19 @@ export class ChatService {
     request: ChatRequest,
     options: { persistUserMessage?: boolean; cancelledMessageId?: string } = {}
   ): AsyncGenerator<ChatEvent> {
-    const { content, model, reasoning_effort, thinking_enabled, context } = request
-    let branchId = (request as any).branchId as string | undefined
-    const userMessageId = (request as any).userMessageId as string | undefined
-    const assistantMessageId = (request as any).assistantMessageId as string | undefined
+    const preparedRequest = request as PreparedChatRequest
+    let branchId = request.branchId
 
     if (options.persistUserMessage !== false) {
       const prepared = await this.handleEditBranch(conversationId, request)
       branchId = prepared.branchId
     }
 
+    const { content, model, reasoning_effort, thinking_enabled, context, retryMessageId, retryPrompt } = preparedRequest
+    const userMessageId = preparedRequest.userMessageId
+    const assistantMessageId = preparedRequest.assistantMessageId
     let persistPreflightFailure = false
-    let failedPrompt = content
+    let failedPrompt = retryPrompt || content
     try {
       const compactCommand = this.parseCompactCommand(content)
       if (compactCommand) {
@@ -96,14 +114,13 @@ export class ChatService {
 
       persistPreflightFailure = true
 
-      // Build context block and collect stored context for message metadata.
-      const { contextBlock } = yield* this.buildContextBlock(content, context, conversationId)
-
-      // Build the final user message: [context] block + pure user message.
-      // Pi session already has the full conversation history (messages, tool calls,
-      // tool results, compaction) via SessionManager.open(sessionFile), so we
-      // only send the current user message.
-      const userMessage = this.buildUserMessage(content, contextBlock)
+      // A failed-turn retry must replay the exact canonical prompt, including
+      // its original injected context. New messages still resolve fresh context.
+      let userMessage = retryPrompt
+      if (!userMessage) {
+        const { contextBlock } = yield* this.buildContextBlock(content, context, conversationId)
+        userMessage = this.buildUserMessage(content, contextBlock)
+      }
       failedPrompt = userMessage
 
       // The context block is part of the canonical user message. Do not append
@@ -114,7 +131,7 @@ export class ChatService {
       // Keep the fallback armed while entering PiService too. Its setup can
       // still throw before it obtains a SessionManager; the persistence helper
       // is idempotent when Pi already wrote part or all of the turn.
-      yield* this.callAI(userMessage, model, reasoning_effort, thinking_enabled, conversationId, branchId, userMessageId, assistantMessageId, options.cancelledMessageId)
+      yield* this.callAI(userMessage, model, reasoning_effort, thinking_enabled, conversationId, branchId, userMessageId, assistantMessageId, options.cancelledMessageId, retryMessageId)
     } catch (err) {
       const message = `Pi 对话调用失败：${(err as Error).message || '未知错误'}`
       if (persistPreflightFailure) {
@@ -386,7 +403,8 @@ export class ChatService {
     branchId?: string,
     userMessageId?: string,
     assistantMessageId?: string,
-    cancelledMessageId?: string
+    cancelledMessageId?: string,
+    retryMessageId?: string
   ): AsyncGenerator<ChatEvent> {
     let emittedText = false
     let emittedError = false
@@ -403,6 +421,7 @@ export class ChatService {
       prompt: userMessage,
       reasoningEffort,
       thinkingEnabled,
+      retryMessageId,
       _cancelled: cancelledMessageId,
     })) {
       if (event.type === 'text') emittedText = true

@@ -2832,6 +2832,7 @@ export class PiService {
     prompt: string
     reasoningEffort?: string
     thinkingEnabled?: boolean
+    retryMessageId?: string
     _cancelled?: string  // messageId to check for cancellation
   }): AsyncGenerator<ChatEvent> {
     if (options.conversationId && options.branchId && options.assistantMessageId) {
@@ -2852,6 +2853,7 @@ export class PiService {
           model: options.model,
           thinkingLevel: options.reasoningEffort,
           thinkingEnabled: options.thinkingEnabled,
+          retryMessageId: options.retryMessageId,
         })
       } finally {
         unregisterAbortHandler?.()

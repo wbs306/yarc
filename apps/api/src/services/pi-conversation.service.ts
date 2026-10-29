@@ -226,6 +226,49 @@ export class PiConversationService {
   /**
    * Create a new branch by editing a message.
    */
+  async prepareFailedTurnRetry(
+    conversationId: string,
+    branchId: string,
+    userEntryId: string
+  ): Promise<{ parentEntryId: string | null; prompt: string; content: string }> {
+    const sessionFile = await this.getSessionFile(conversationId, branchId)
+    if (!sessionFile) throw new Error('Session file not found')
+
+    const sm = SessionManager.open(sessionFile)
+    const branch = sm.getBranch()
+    const userIndex = branch.findIndex(entry => entry.id === userEntryId)
+    if (userIndex < 0) throw new Error(`Entry not found on active branch: ${userEntryId}`)
+
+    const userEntry = branch[userIndex]
+    if (userEntry.type !== 'message' || userEntry.message.role !== 'user') {
+      throw new Error(`Only user messages can be retried: ${userEntryId}`)
+    }
+
+    const laterEntries = branch.slice(userIndex + 1)
+    if (laterEntries.some(entry => entry.type === 'message' && entry.message.role === 'user')) {
+      throw new Error('Only the latest user turn can be retried')
+    }
+
+    const finalAssistant = [...laterEntries]
+      .reverse()
+      .find((entry): entry is SessionMessageEntry => entry.type === 'message' && entry.message.role === 'assistant')
+    const assistantMessage = finalAssistant?.message as any
+    const failed = assistantMessage
+      && (assistantMessage.stopReason === 'error'
+        || assistantMessage.stopReason === 'aborted'
+        || !!assistantMessage.errorMessage)
+    if (!failed) throw new Error('Only a failed turn can be retried')
+
+    const prompt = this.extractUserContent(userEntry.message)
+    if (!prompt) throw new Error('Cannot retry an empty user message')
+
+    return {
+      parentEntryId: userEntry.parentId,
+      prompt,
+      content: this.parseInjectedContext(prompt).content,
+    }
+  }
+
   async createBranchFromEdit(
     conversationId: string,
     sourceBranchId: string,

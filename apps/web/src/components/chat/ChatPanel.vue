@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { copyToClipboard } from '@/lib/clipboard'
+import { getChatRecovery, type ChatRecovery } from '@/lib/chat-recovery'
 import { useChatStore } from '@/stores/chat'
 import { useThemeStore } from '@/stores/theme'
 import { usePaperStore } from '@/stores/paper'
@@ -44,6 +45,10 @@ const messageList = ref<HTMLDivElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
 const modelSelectorRef = ref<{ openDropdown: () => void }>()
 const customEditorSurface = computed(() => Object.values(chatStore.tuiSurfaces).find(surface => surface.kind === 'editor' && !surface.overlay) || null)
+const chatRecovery = computed(() => getChatRecovery(chatStore.messages, chatStore.isStreaming))
+const recoveryForMessage = (messageId: string) => chatRecovery.value?.assistantMessageId === messageId
+  ? chatRecovery.value
+  : null
 
 // Sent-message history (up-arrow recall)
 const sentHistory = ref<string[]>([])
@@ -838,6 +843,20 @@ const beginEdit = (msg: any) => {
   editingMessageId.value = msg.id
   inputText.value = msg.content
 }
+const recoverChat = async (recovery: ChatRecovery) => {
+  if (chatStore.isStreaming) return
+  autoScroll.value = true
+  const content = recovery.action === 'continue' ? 'continue' : recovery.originalContent
+  if (!sentHistory.value.length || sentHistory.value[sentHistory.value.length - 1] !== content) {
+    sentHistory.value.push(content)
+  }
+  const sendPromise = recovery.action === 'continue'
+    ? chatStore.sendMessage(content)
+    : chatStore.sendMessage(content, { retryMessageId: recovery.userMessageId })
+  await nextTick()
+  scrollBottom()
+  await sendPromise
+}
 const cancelEdit = () => { editingMessageId.value = ''; inputText.value = '' }
 const copiedMsgId = ref('')
 let copyTimer = 0
@@ -1462,12 +1481,18 @@ const contextUsageTitle = computed(() => {
             </button>
           </span>
         </div>
-        <!-- Assistant actions: copy (left) -->
-        <div v-else-if="msg.role === 'assistant' && msg.content?.trim()" class="msg-actions">
-          <button class="msg-action-btn" @click="copyMessage(msg)" title="复制">
-            <svg v-if="copiedMsgId !== msg.id" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <!-- Assistant actions: copy + failed-turn recovery -->
+        <div v-else-if="msg.role === 'assistant' && (msg.content?.trim() || recoveryForMessage(msg.id))" class="msg-actions">
+          <button v-if="msg.content?.trim()" class="msg-action-btn" @click="copyMessage(msg)" title="复制">
+            <svg v-if="copiedMsgId !== msg.id" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
           </button>
+          <button
+            v-if="recoveryForMessage(msg.id)"
+            class="msg-recovery-btn"
+            :title="recoveryForMessage(msg.id)?.action === 'continue' ? '发送 continue 继续未完成的回答' : '重新发送原消息，不创建对话分支'"
+            @click="recoverChat(recoveryForMessage(msg.id)!)"
+          >{{ recoveryForMessage(msg.id)?.action === 'continue' ? '继续' : '重试' }}</button>
         </div>
       </div>
 
@@ -1683,6 +1708,8 @@ const contextUsageTitle = computed(() => {
 .msg-action-btn { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--color-border); background: var(--color-bg-card); color: var(--color-text-muted); border-radius: var(--radius-sm); cursor: pointer; }
 .msg-action-btn:hover { color: var(--color-primary); border-color: var(--color-primary); background: var(--color-primary-soft); }
 .msg-action-btn svg { width: 12px; height: 12px; }
+.msg-recovery-btn { min-height: 24px; padding: 3px 9px; border: 1px solid var(--color-primary); background: var(--color-primary-soft); color: var(--color-primary); border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; cursor: pointer; }
+.msg-recovery-btn:hover { background: var(--color-primary); color: white; }
 .branch-switcher { display: flex; align-items: center; gap: 4px; padding: 2px 8px; background: var(--color-bg-muted); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: 11px; color: var(--color-text-muted); }
 .branch-switcher button { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; background: transparent; border: none; color: var(--color-primary); cursor: pointer; font-size: 14px; border-radius: 3px; }
 .branch-switcher button:disabled { color: var(--color-text-muted); cursor: default; opacity: 0.4; }

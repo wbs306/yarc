@@ -35,6 +35,7 @@ export interface RuntimePromptPayload {
   model?: string
   thinkingLevel?: string
   thinkingEnabled?: boolean
+  retryMessageId?: string
 }
 
 export interface RuntimeCompactPayload {

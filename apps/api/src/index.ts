@@ -353,7 +353,8 @@ app.get(
             data.branchId = branchId
 
             const isEditBranch = Boolean(data.editMessageId)
-            const conversationTitle = !isEditBranch && typeof data.content === 'string'
+            const isRetry = Boolean(data.retryMessageId)
+            const conversationTitle = !isEditBranch && !isRetry && typeof data.content === 'string'
               ? await conversationService.updateDefaultTitleFromMessage(conversationId, data.content).catch(() => null)
               : null
             const pendingUserMessage = {
@@ -367,13 +368,15 @@ app.get(
                 pending: true,
                 context: data.context || null,
                 ...(isEditBranch ? { forkFromMessageId: data.editForkMessageId || data.editMessageId || null } : {}),
+                ...(isRetry ? { retryFromMessageId: data.retryMessageId } : {}),
               },
               createdAt: new Date().toISOString(),
             }
-            const [sessionFile, initialLeafId] = await Promise.all([
+            const [sessionFile, storedLeafId] = await Promise.all([
               piConversationService.getSessionFile(conversationId, branchId),
               piConversationService.getLeafEntryId(conversationId, branchId),
             ])
+            const initialLeafId = isRetry ? prepared.piParentEntryId : storedLeafId
             await streamBuffer.start(streamMsgId, conversationId, branchId, pendingUserMessage, {
               source: 'user', initialLeafId, sessionFile: sessionFile || undefined,
             })

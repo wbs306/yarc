@@ -329,6 +329,30 @@ export const useChatStore = defineStore('chat', () => {
 
   const cloneMessages = (msgs: Message[]) => msgs.map(cloneMessage)
 
+  const reconcilePendingUserMessage = (messages: Message[], pendingUser: Message) => {
+    const next = cloneMessage(pendingUser)
+    const retryFromMessageId = typeof next.metadata?.retryFromMessageId === 'string'
+      ? next.metadata.retryFromMessageId
+      : ''
+
+    if (retryFromMessageId) {
+      const retryIndex = messages.findIndex(message => message.id === retryFromMessageId && message.role === 'user')
+      if (retryIndex >= 0) {
+        next.metadata.context = messages[retryIndex].metadata?.context ?? next.metadata.context
+        messages.splice(retryIndex, messages.length - retryIndex, next)
+        return
+      }
+    }
+
+    const existingIndex = messages.findIndex(message =>
+      message.role === 'user'
+      && message.content === next.content
+      && message.id !== next.id
+    )
+    if (existingIndex >= 0) messages[existingIndex] = next
+    else messages.push(next)
+  }
+
   const setBranchMessages = (branchId: string, msgs: Message[]) => {
     branchCache.value.set(branchId, cloneMessages(msgs))
   }
@@ -1140,13 +1164,13 @@ export const useChatStore = defineStore('chat', () => {
 
   // ── Send message ──────────────────────────────────────────────────
 
-  const sendMessage = async (content: string, opts: { editMessageId?: string; editForkMessageId?: string; currentResource?: CurrentChatResource } = {}) => {
+  const sendMessage = async (content: string, opts: { editMessageId?: string; editForkMessageId?: string; retryMessageId?: string; currentResource?: CurrentChatResource } = {}) => {
     chatError.value = ''
     let assistantMsg: Message | null = null
     let convId = ''
     let streamConnectionToken: number | null = null
     let shouldReconnect = false
-    const requestContext = pdfContext.value || opts.currentResource
+    const requestContext = !opts.retryMessageId && (pdfContext.value || opts.currentResource)
       ? {
           ...(pdfContext.value || { pageNumber: 0, selectedText: '' }),
           ...(opts.currentResource ? { currentResource: opts.currentResource } : {}),
@@ -1164,7 +1188,7 @@ export const useChatStore = defineStore('chat', () => {
       // Conversation will have content, remove from empty tracking
       pendingEmptyConvs.delete(convId)
 
-      if (!opts.editMessageId) {
+      if (!opts.editMessageId && !opts.retryMessageId) {
         // Optimistic: add user message to cache
         const um: Message = { id: createClientId(), conversationId: convId, branchId: currentBranchId.value, role: 'user', content, toolCalls: null, metadata: { pending: true, context: requestContext }, createdAt: new Date().toISOString() }
         if (currentBranchId.value) appendToBranch(currentBranchId.value, um)
@@ -1182,6 +1206,7 @@ export const useChatStore = defineStore('chat', () => {
         context: requestContext || undefined, branchId: currentBranchId.value || undefined,
         ...(opts.editMessageId ? { editMessageId: opts.editMessageId } : {}),
         ...(opts.editForkMessageId ? { editForkMessageId: opts.editForkMessageId } : {}),
+        ...(opts.retryMessageId ? { retryMessageId: opts.retryMessageId } : {}),
       }, streamConnectionToken)
     } catch (e) {
       const err = e as Error
@@ -1304,9 +1329,7 @@ export const useChatStore = defineStore('chat', () => {
             // Add/update user message
             if (d.userMessage) {
               const arr = branchCache.value.get(bid)!
-              const idx = arr.findIndex(m => m.role === 'user' && m.content === d.userMessage.content && m.id !== d.userMessage.id)
-              const next = cloneMessage(d.userMessage)
-              if (idx >= 0) arr[idx] = next; else arr.push(next)
+              reconcilePendingUserMessage(arr, d.userMessage)
               branchCache.value.set(bid, [...arr])
             }
 
@@ -1756,10 +1779,7 @@ export const useChatStore = defineStore('chat', () => {
       // The optimistic user message only lived in the old page. Restore it on
       // refresh unless Pi JSONL has already supplied its canonical entry.
       if (recoveredUser?.id && !retained.some(m => m.id === recoveredUserEntryId)) {
-        const userIdx = retained.findIndex(m => m.id === recoveredUser.id)
-        const userMessage = cloneMessage(recoveredUser)
-        if (userIdx >= 0) retained[userIdx] = userMessage
-        else retained.push(userMessage)
+        reconcilePendingUserMessage(retained, recoveredUser)
       }
 
       retained.push(msgRef)

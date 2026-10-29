@@ -90,6 +90,74 @@ describe('PiConversationService branch projection', () => {
     assert.deepEqual(manager.buildSessionContext().messages.map(message => message.role === 'user' ? message.content : undefined), ['model-only replacement'])
   })
 
+  it('prepares an exact in-place retry for the latest failed user turn', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yarc-failed-retry-'))
+    try {
+      const manager = SessionManager.create(directory, directory)
+      const earlierUserId = manager.appendMessage({
+        role: 'user',
+        content: 'earlier',
+        timestamp: 1,
+      } as any)
+      manager.appendMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        stopReason: 'stop',
+        timestamp: 1,
+      } as any)
+      const prompt = '[context]\nfile: notes.md\n[/context]\n\nretry this request'
+      const failedUserId = manager.appendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+        timestamp: 1,
+      } as any)
+      manager.appendMessage({
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: '500 Internal Server Error',
+        timestamp: 1,
+      } as any)
+
+      const service = new PiConversationService()
+      ;(service as any).getSessionFile = async () => manager.getSessionFile()
+
+      const retry = await service.prepareFailedTurnRetry('conversation-1', 'main', failedUserId)
+      assert.equal(retry.parentEntryId, manager.getEntry(failedUserId)?.parentId)
+      assert.equal(retry.prompt, prompt)
+      assert.equal(retry.content, 'retry this request')
+      await assert.rejects(
+        service.prepareFailedTurnRetry('conversation-1', 'main', earlierUserId),
+        /latest user turn/
+      )
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects retrying a successful turn', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yarc-success-retry-'))
+    try {
+      const manager = SessionManager.create(directory, directory)
+      const userId = manager.appendMessage({ role: 'user', content: 'question', timestamp: 1 } as any)
+      manager.appendMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'answer' }],
+        stopReason: 'stop',
+        timestamp: 1,
+      } as any)
+
+      const service = new PiConversationService()
+      ;(service as any).getSessionFile = async () => manager.getSessionFile()
+      await assert.rejects(
+        service.prepareFailedTurnRetry('conversation-1', 'main', userId),
+        /failed turn/
+      )
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('creates an empty child session when editing the root user', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'yarc-root-edit-'))
     try {

@@ -116,6 +116,7 @@ export class PiRuntimeRegistry {
     model?: string
     thinkingLevel?: string
     thinkingEnabled?: boolean
+    retryMessageId?: string
   }): AsyncGenerator<ChatEvent> {
     const record = await this.ensure(input.key, input.model, input.thinkingLevel)
     if (record.activeRun || record.extensionRuns.size > 0) throw new Error('Runtime already has an active run')
@@ -136,6 +137,7 @@ export class PiRuntimeRegistry {
         model: input.model,
         thinkingLevel: input.thinkingLevel,
         thinkingEnabled: input.thinkingEnabled,
+        retryMessageId: input.retryMessageId,
       },
     })
     try {
