@@ -4,6 +4,7 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from '
 import { config } from '../lib/config.js'
 import { assertGlobalFilesPathSafe } from '../lib/global-files-path.js'
 import { projectChangePath } from '../lib/project-change-path.js'
+import { isDefaultIgnoredDataPath } from '../lib/data-sync-policy.js'
 import { sseHub } from '../lib/sse.js'
 import { AppError } from '../lib/errors.js'
 import { normalizeProjectRelativePath, resolveProjectPath, resolveProjectRoot } from '../lib/project-path.js'
@@ -17,7 +18,9 @@ export type ProjectFileNode = FileNode & {
   modifiedAt?: string
 }
 
-const HIDDEN_NAMES = new Set(['.git'])
+const DEFAULT_EAGER_TREE_LIMIT = 500
+class ProjectFileTreeLimitExceeded extends Error {}
+
 const TEXT_EXTENSIONS = new Set([
   '.tex', '.bib', '.sty', '.cls', '.bst', '.txt', '.md', '.markdown', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.csv', '.tsv', '.log',
   '.py', '.r', '.jl', '.m', '.c', '.h', '.cc', '.cpp', '.hpp', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.css', '.scss', '.html', '.xml', '.sh', '.zsh', '.fish', '.sql',
@@ -66,6 +69,8 @@ const isAbsoluteReference = (value: string) => isAbsolute(value)
   || value.startsWith('//')
 
 export class ProjectFileService {
+  constructor(private readonly eagerTreeLimit = DEFAULT_EAGER_TREE_LIMIT) {}
+
   private emit(projectId: string, action: string, path?: string, live = false) {
     sseHub.emit({ type: 'project-files-changed', projectId, action, path, live, at: new Date().toISOString() })
   }
@@ -132,29 +137,80 @@ export class ProjectFileService {
     }
   }
 
+  private isExcludedTreePath(path: string) {
+    return isSensitiveProjectPath(path) || isDefaultIgnoredDataPath(path)
+  }
+
+  private async listDirectory(
+    relativePath: string,
+    fullPath: string,
+    budget?: { remaining: number },
+  ): Promise<ProjectFileNode[]> {
+    const entries = await readdir(fullPath, { withFileTypes: true })
+    const nodes: ProjectFileNode[] = []
+    for (const entry of entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))) {
+      if (entry.name === '.git') continue
+      const relative = normalizeProjectRelativePath([relativePath, entry.name].filter(Boolean).join('/'))
+      if (this.isExcludedTreePath(relative)) continue
+      try {
+        const childPath = resolve(fullPath, entry.name)
+        const childInfo = await lstat(childPath)
+        if (childInfo.isSymbolicLink()) continue
+        if (budget) {
+          if (budget.remaining <= 0) throw new ProjectFileTreeLimitExceeded()
+          budget.remaining -= 1
+        }
+        const node = this.node(relative, childPath, childInfo)
+        if (childInfo.isDirectory() && budget) {
+          node.children = await this.listDirectory(relative, childPath, budget)
+        }
+        nodes.push(node)
+      } catch (error) {
+        if (error instanceof ProjectFileTreeLimitExceeded) throw error
+        // A disappearing entry or broken/unsafe symlink must not break the tree.
+      }
+    }
+    return nodes
+  }
+
   async getFileTree(projectId: string, path = ''): Promise<ProjectFileNode[]> {
     const relativePath = assertProjectExposedPath(path)
+    if (relativePath && this.isExcludedTreePath(relativePath)) return []
     const resolved = await resolveProjectPath(projectId, relativePath)
     const info = await lstat(resolved.fullPath)
     if (info.isSymbolicLink()) throw new AppError('PROJECT_INVALID_DIRECTORY', 'Symlinks are not exposed by Project File API', 400)
     if (info.isFile()) return [this.node(resolved.relativePath, resolved.fullPath, info)]
     if (!info.isDirectory()) return []
-    const entries = await readdir(resolved.fullPath, { withFileTypes: true })
-    const nodes: ProjectFileNode[] = []
-    for (const entry of entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))) {
-      if (HIDDEN_NAMES.has(entry.name)) continue
-      const relative = normalizeProjectRelativePath([resolved.relativePath, entry.name].filter(Boolean).join('/'))
-      if (isSensitiveProjectPath(relative)) continue
-      try {
-        const child = await resolveProjectPath(projectId, relative)
-        const childInfo = await lstat(child.fullPath)
-        if (childInfo.isSymbolicLink()) continue
-        nodes.push(this.node(relative, child.fullPath, childInfo))
-      } catch {
-        // A broken/unsafe symlink must not break the whole tree.
+    try {
+      return await this.listDirectory(resolved.relativePath, resolved.fullPath, { remaining: this.eagerTreeLimit })
+    } catch (error) {
+      if (!(error instanceof ProjectFileTreeLimitExceeded)) throw error
+      return this.listDirectory(resolved.relativePath, resolved.fullPath)
+    }
+  }
+
+  async getFileIndex(projectId: string): Promise<string[]> {
+    const resolved = await resolveProjectPath(projectId, '')
+    const files: string[] = []
+    const walk = async (relativePath: string, fullPath: string): Promise<void> => {
+      const entries = await readdir(fullPath, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.name === '.git') continue
+        const relative = normalizeProjectRelativePath([relativePath, entry.name].filter(Boolean).join('/'))
+        if (this.isExcludedTreePath(relative)) continue
+        try {
+          const childPath = resolve(fullPath, entry.name)
+          const childInfo = await lstat(childPath)
+          if (childInfo.isSymbolicLink()) continue
+          if (childInfo.isDirectory()) await walk(relative, childPath)
+          else if (childInfo.isFile()) files.push(relative)
+        } catch {
+          // Ignore entries that disappear while the index is being built.
+        }
       }
     }
-    return nodes
+    await walk('', resolved.fullPath)
+    return files.sort((a, b) => a.localeCompare(b))
   }
 
   private node(relativePath: string, fullPath: string, info: Awaited<ReturnType<typeof lstat>>): ProjectFileNode {
@@ -175,9 +231,6 @@ export class ProjectFileService {
         legacyOffice: LEGACY_OFFICE_EXTENSIONS.has(extension),
       } : {}),
     }
-    // Directory contents are loaded explicitly by getFileTree(path). Keeping
-    // children undefined distinguishes an unexpanded directory from an
-    // already-loaded empty directory in the client tree.
     return base
   }
 

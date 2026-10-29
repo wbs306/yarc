@@ -34,7 +34,13 @@ files.get('/', async (c) => {
   const path = assertGlobalFilesPath(c.req.query('path') || '')
   const tree = await fileService.getFileTree(path)
   const visible = path ? tree : tree.filter((node: any) => !PROJECT_PRIVATE_ROOTS.has(node.name) && !PROJECT_PRIVATE_ROOTS.has(node.path))
+  c.header('Cache-Control', 'private, no-store')
   return c.json({ files: visible })
+})
+
+files.get('/index', async (c) => {
+  c.header('Cache-Control', 'private, no-store')
+  return c.json({ files: await fileService.getFileIndex() })
 })
 
 files.get('/resolve-reference', async (c) => {

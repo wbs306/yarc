@@ -3,7 +3,7 @@ import { dirname, extname, isAbsolute, relative, resolve, sep, basename } from '
 import { atomicWriteFile, atomicWriteTextFile } from '../lib/atomic-file.js'
 import { config } from '../lib/config.js'
 import { assertGlobalFilesPathSafe, isProjectStoragePath } from '../lib/global-files-path.js'
-import { isPiRuntimeResourcePath } from '../lib/data-sync-policy.js'
+import { isDefaultIgnoredDataPath, isPiRuntimeResourcePath } from '../lib/data-sync-policy.js'
 import { AppError } from '../lib/errors.js'
 import { sseHub } from '../lib/sse.js'
 import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
@@ -21,6 +21,9 @@ const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.sv
 const OFFICE_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx'])
 const LEGACY_OFFICE_EXTENSIONS = new Set(['.doc', '.xls', '.ppt'])
 const MAX_TEXT_FILE_SIZE = 2 * 1024 * 1024 // 2MB
+const DEFAULT_EAGER_TREE_LIMIT = 500
+
+class FileTreeLimitExceeded extends Error {}
 
 // Items hidden from the file tree (internal app resources)
 const EXCLUDED_NAMES = new Set(['backgrounds', 'model-catalog.json', 'temporary-pdfs'])
@@ -30,8 +33,11 @@ export class FileService {
   private changeWatcher: DataChangeWatcher
   private unsubscribeDataChanges: (() => void) | null = null
 
-  constructor() {
-    this.rootDir = resolve(config.filesDir)
+  private eagerTreeLimit: number
+
+  constructor(options: { rootDir?: string; eagerTreeLimit?: number } = {}) {
+    this.rootDir = resolve(options.rootDir || config.filesDir)
+    this.eagerTreeLimit = options.eagerTreeLimit ?? DEFAULT_EAGER_TREE_LIMIT
     this.changeWatcher = getDataChangeWatcher(this.rootDir)
   }
 
@@ -80,7 +86,7 @@ export class FileService {
   private isExcludedPath(filePath: string): boolean {
     const relPath = this.normalizeRelativePath(filePath)
     if (!relPath) return false
-    if (relPath === 'generated/latex' || relPath.startsWith('generated/latex/')) return true
+    if (isDefaultIgnoredDataPath(relPath)) return true
     const name = basename(relPath)
     return EXCLUDED_NAMES.has(name)
   }
@@ -229,10 +235,10 @@ export class FileService {
     this.unsubscribeDataChanges = null
   }
 
-  private async buildNode(fullPath: string): Promise<FileNode | null> {
+  private async buildNode(fullPath: string, budget?: { remaining: number }): Promise<FileNode | null> {
     const relPath = this.toRelativePath(fullPath)
     const name = basename(fullPath)
-    if (this.isHiddenPath(relPath) || this.isSensitivePath(relPath) || this.isExcludedPath(relPath) || name === 'node_modules') return null
+    if (this.isHiddenPath(relPath) || this.isSensitivePath(relPath) || this.isExcludedPath(relPath)) return null
     try {
       await assertGlobalFilesPathSafe(this.rootDir, fullPath)
     } catch (error) {
@@ -240,6 +246,10 @@ export class FileService {
       throw error
     }
     const entryStat = await stat(fullPath)
+    if (budget) {
+      if (budget.remaining <= 0) throw new FileTreeLimitExceeded()
+      budget.remaining -= 1
+    }
     const common = {
       name,
       path: relPath,
@@ -249,10 +259,12 @@ export class FileService {
     }
 
     if (entryStat.isDirectory()) {
-      // Directory contents are loaded explicitly by getFileTree(path). Keeping
-      // children undefined distinguishes an unexpanded directory from an
-      // already-loaded empty directory in the client tree.
-      return { ...common, type: 'directory' }
+      if (!budget) {
+        // `children: undefined` marks a directory that can be loaded on demand.
+        return { ...common, type: 'directory' }
+      }
+      const children = await this.listDirectory(fullPath, budget)
+      return { ...common, type: 'directory', children }
     }
 
     return {
@@ -273,22 +285,64 @@ export class FileService {
     })
   }
 
+  private async listDirectory(fullPath: string, budget?: { remaining: number }): Promise<FileNode[]> {
+    const entries = await readdir(fullPath, { withFileTypes: true })
+    const nodes: FileNode[] = []
+    for (const entry of entries) {
+      try {
+        const node = await this.buildNode(resolve(fullPath, entry.name), budget)
+        if (node) nodes.push(node)
+      } catch (error) {
+        if (error instanceof FileTreeLimitExceeded) throw error
+        // Ignore entries that disappear or become unreadable during traversal.
+      }
+    }
+    return this.sortNodes(nodes)
+  }
+
   async getFileTree(dirPath = ''): Promise<FileNode[]> {
     await this.ensureRootReady()
-    const fullPath = await this.resolvePath(dirPath)
+    const normalizedPath = this.normalizeRelativePath(dirPath)
+    if (normalizedPath && this.isExcludedPath(normalizedPath)) return []
+    const fullPath = await this.resolvePath(normalizedPath)
     const rootStat = await this.assertExists(fullPath)
     if (!rootStat.isDirectory()) {
       throw new AppError('NOT_DIRECTORY', 'Path is not a directory', 400)
     }
 
-    const entries = await readdir(fullPath, { withFileTypes: true })
-    const nodes: FileNode[] = []
-    for (const entry of entries) {
-      const node = await this.buildNode(resolve(fullPath, entry.name))
-      if (node) nodes.push(node)
+    try {
+      return await this.listDirectory(fullPath, { remaining: this.eagerTreeLimit })
+    } catch (error) {
+      if (!(error instanceof FileTreeLimitExceeded)) throw error
+      return this.listDirectory(fullPath)
     }
+  }
 
-    return this.sortNodes(nodes)
+  async getFileIndex(dirPath = ''): Promise<string[]> {
+    await this.ensureRootReady()
+    const normalizedPath = this.normalizeRelativePath(dirPath)
+    if (normalizedPath && this.isExcludedPath(normalizedPath)) return []
+    const fullPath = await this.resolvePath(normalizedPath)
+    const rootStat = await this.assertExists(fullPath)
+    if (!rootStat.isDirectory()) throw new AppError('NOT_DIRECTORY', 'Path is not a directory', 400)
+
+    const files: string[] = []
+    const walk = async (directory: string): Promise<void> => {
+      const entries = await readdir(directory, { withFileTypes: true })
+      for (const entry of entries) {
+        try {
+          const childPath = resolve(directory, entry.name)
+          const node = await this.buildNode(childPath)
+          if (!node) continue
+          if (node.type === 'directory') await walk(childPath)
+          else files.push(node.path)
+        } catch {
+          // Ignore entries that disappear or become unreadable during traversal.
+        }
+      }
+    }
+    await walk(fullPath)
+    return files.sort((a, b) => a.localeCompare(b))
   }
 
   async resolveFileReference(filePath: string): Promise<string | null> {

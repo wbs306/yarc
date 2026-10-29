@@ -277,6 +277,7 @@ let workspaceFilesRefreshTimer: number | null = null
 let workspaceFilesRefreshPath: string | undefined
 let workspaceFilesStale = false
 let workspaceLoadGeneration = 0
+let workspaceFilesRequestController: AbortController | null = null
 const selectedWorkspaceFile = ref<FileNode | null>(null)
 const recentWorkspaceFiles = ref<WorkspaceRecentFile[]>(loadRecentWorkspaceFiles())
 const currentWorkspaceProjectId = computed(() => projectWorkspaceId.value || null)
@@ -294,6 +295,21 @@ const asWorkspaceRecentFile = (file: FileNode): WorkspaceRecentFile => {
 }
 const openWorkspaceTabs = ref<WorkspaceFileTab[]>([])
 const filesLoading = ref(false)
+const workspaceFilesLoadingTokens = new Set<symbol>()
+const beginWorkspaceFilesLoading = () => {
+  const token = Symbol('workspace-files-loading')
+  workspaceFilesLoadingTokens.add(token)
+  filesLoading.value = true
+  return token
+}
+const finishWorkspaceFilesLoading = (token: symbol) => {
+  workspaceFilesLoadingTokens.delete(token)
+  filesLoading.value = workspaceFilesLoadingTokens.size > 0
+}
+const resetWorkspaceFilesLoading = () => {
+  workspaceFilesLoadingTokens.clear()
+  filesLoading.value = false
+}
 const filesError = ref('')
 const workspaceTreeFromCache = ref(false)
 const workspaceContent = ref('')
@@ -1242,6 +1258,8 @@ const clearWorkspaceEditor = () => {
 // next project.
 const resetWorkspaceScope = () => {
   workspaceLoadGeneration += 1
+  workspaceFilesRequestController?.abort()
+  workspaceFilesRequestController = null
   workspaceDirectoryLoads.clear()
   workspaceDirectoryLoading.value = new Set()
   workspaceFilesRefreshPath = undefined
@@ -1257,7 +1275,7 @@ const resetWorkspaceScope = () => {
   openWorkspaceTabs.value = []
   // Recent entries carry their own scope and remain available across projects.
   filesError.value = ''
-  filesLoading.value = false
+  resetWorkspaceFilesLoading()
   workspaceContentLoading.value = false
   workspaceSaving.value = false
   workspaceUploading.value = false
@@ -1290,13 +1308,16 @@ const canCreateInFileContext = () => !isPapersWorkspacePath(fileContextCreatePar
 
 const loadWorkspaceFiles = async (silent = false) => {
   const generation = ++workspaceLoadGeneration
+  workspaceFilesRequestController?.abort()
+  const requestController = new AbortController()
+  workspaceFilesRequestController = requestController
   workspaceDirectoryLoads.clear()
   workspaceDirectoryLoading.value = new Set()
   const cacheKey = isProjectWorkspace.value ? `project:${projectWorkspaceId.value}` : 'global'
-  if (!silent) filesLoading.value = true
+  const loadingToken = silent ? null : beginWorkspaceFilesLoading()
   filesError.value = ''
   try {
-    const res = await api.getFileTree()
+    const res = await api.getFileTree(undefined, { signal: requestController.signal })
     if (generation !== workspaceLoadGeneration) return
     const previousTree = workspaceTreeFromCache.value ? [] : workspaceFiles.value
     workspaceFiles.value = mergeWorkspaceTree(res.files, previousTree)
@@ -1321,7 +1342,8 @@ const loadWorkspaceFiles = async (silent = false) => {
       filesError.value = (err as Error).message || '加载文件失败'
     }
   } finally {
-    if (!silent && generation === workspaceLoadGeneration) filesLoading.value = false
+    if (workspaceFilesRequestController === requestController) workspaceFilesRequestController = null
+    if (loadingToken) finishWorkspaceFilesLoading(loadingToken)
   }
 }
 
@@ -1679,6 +1701,10 @@ const openWorkspaceFileReference = async (rawPath: string) => {
   const path = sharedReference ? referencePath.slice('../../'.length) : referencePath
   const projectId = sharedReference ? null : (projectIdFromCurrentConversation() || projectIdFromRoute())
   filesError.value = ''
+  let loadingToken: symbol | null = null
+  const showTreeLoading = () => {
+    if (!loadingToken) loadingToken = beginWorkspaceFilesLoading()
+  }
 
   try {
     // The API and live-file client derive their scope from the current URL.
@@ -1692,11 +1718,11 @@ const openWorkspaceFileReference = async (rawPath: string) => {
     if (selectedWorkspacePath.value === path && currentScopeMatches) return
 
     const needsInitialTreeLoad = !workspaceFiles.value.length || workspaceFilesStale
-    if (needsInitialTreeLoad) filesLoading.value = true
+    if (needsInitialTreeLoad) showTreeLoading()
     if (needsInitialTreeLoad) await loadWorkspaceFiles(true)
     let node = await ensureWorkspaceNodeLoaded(path)
     if (!node && !needsInitialTreeLoad) {
-      filesLoading.value = true
+      showTreeLoading()
       await loadWorkspaceFiles(true)
       node = await ensureWorkspaceNodeLoaded(path)
     }
@@ -1712,7 +1738,7 @@ const openWorkspaceFileReference = async (rawPath: string) => {
   } catch (err) {
     filesError.value = (err as Error).message || `打开文件失败：${path}`
   } finally {
-    filesLoading.value = false
+    if (loadingToken) finishWorkspaceFilesLoading(loadingToken)
   }
 }
 
@@ -3101,7 +3127,7 @@ const refreshWorkspaceFilesSoon = (changedPath?: string) => {
     } else {
       void loadWorkspaceFiles(true)
     }
-  }, 200)
+  }, 80)
 }
 
 const onRealtimeLibraryChanged = () => refreshLibrarySoon()
@@ -3181,7 +3207,7 @@ const refreshOpenWorkspaceFileContent = async (changedPath?: string) => {
   }
 }
 
-const onRealtimeFilesChanged = (event: Event) => {
+const handleRealtimeWorkspaceFilesChanged = (event: Event) => {
   const detail = (event as CustomEvent)?.detail || {}
   const action = typeof detail.action === 'string' ? detail.action : ''
   const changedPath = typeof detail.path === 'string' ? detail.path : ''
@@ -3200,10 +3226,15 @@ const onRealtimeFilesChanged = (event: Event) => {
   }
 }
 
+const onRealtimeFilesChanged = (event: Event) => {
+  if (isProjectWorkspace.value) return
+  handleRealtimeWorkspaceFilesChanged(event)
+}
+
 const onRealtimeProjectFilesChanged = (event: Event) => {
   const detail = (event as CustomEvent)?.detail || {}
   if (!isProjectWorkspace.value || detail.projectId !== projectWorkspaceId.value) return
-  onRealtimeFilesChanged(event)
+  handleRealtimeWorkspaceFilesChanged(event)
 }
 
 onMounted(() => {

@@ -29,7 +29,14 @@ projects.post('/:id/archive', async (c) => c.json({ project: await projectServic
 projects.post('/:id/unarchive', async (c) => c.json({ project: await projectService.unarchive(id(c)) }))
 projects.delete('/:id', async (c) => c.json(await projectService.delete(id(c))))
 
-projects.get('/:id/files', async (c) => c.json({ files: await projectFileService.getFileTree(id(c), c.req.query('path') || '') }))
+projects.get('/:id/files', async (c) => {
+  c.header('Cache-Control', 'private, no-store')
+  return c.json({ files: await projectFileService.getFileTree(id(c), c.req.query('path') || '') })
+})
+projects.get('/:id/files/index', async (c) => {
+  c.header('Cache-Control', 'private, no-store')
+  return c.json({ files: await projectFileService.getFileIndex(id(c)) })
+})
 projects.get('/:id/files/resolve-reference', async (c) => c.json({ file: await projectFileService.resolveFileReference(id(c), c.req.query('path') || '') }))
 projects.get('/:id/files/content', async (c) => {
   const path = c.req.query('path') || ''

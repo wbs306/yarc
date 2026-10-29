@@ -481,8 +481,15 @@ export function useApi() {
 
     // Files. The same methods are used by the global Files page and by a
     // Project workspace; the URL is scoped from the current /projects/:id route.
-    getFileTree: (path?: string) =>
-      request<{ files: FileNode[] }>(filesEndpoint(), { params: path ? { path } : {} }),
+    getFileTree: (path?: string, options: { signal?: AbortSignal } = {}) =>
+      request<{ files: FileNode[] }>(filesEndpoint(), {
+        params: path ? { path } : {},
+        cache: 'no-store',
+        signal: options.signal,
+      }),
+
+    getFileIndex: () =>
+      request<{ files: string[] }>(filesEndpoint('/index'), { cache: 'no-store' }),
 
     resolveFileReference: (path: string, projectId?: string | null) =>
       request<{ file: ResolvedWorkspaceFileReference | null }>(
@@ -493,7 +500,10 @@ export function useApi() {
       ),
 
     getGlobalFileTree: () =>
-      request<{ files: FileNode[] }>('/files'),
+      request<{ files: FileNode[] }>('/files', { cache: 'no-store' }),
+
+    getGlobalFileIndex: () =>
+      request<{ files: string[] }>('/files/index', { cache: 'no-store' }),
 
     getFileContent: (path: string, options?: { refreshLive?: boolean }) =>
       request<{

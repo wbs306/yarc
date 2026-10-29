@@ -194,36 +194,42 @@ const selectPaper = (paper: { id: string; title: string }) => {
   })
 }
 
-const fileTreeCache = ref<Array<{ path: string; type: 'file' | 'directory'; editable?: boolean }>>([])
-const fileTreeCacheScope = ref('')
-const fileTreeLoaded = ref(false)
-const globalFileTreeCache = ref<Array<{ path: string; type: 'file' | 'directory'; editable?: boolean }>>([])
-const globalFileTreeLoaded = ref(false)
+const fileIndexCache = ref<string[]>([])
+const fileIndexCacheScope = ref('')
+const fileIndexLoaded = ref(false)
+const globalFileIndexCache = ref<string[]>([])
+const globalFileIndexLoaded = ref(false)
 const categoriesCache = ref<Array<{ id: string; name: string }>>([])
 const dismissedSuggestionText = ref('')
+let fileIndexLoadSequence = 0
+let fileIndexLoadScope = ''
+let fileIndexLoadPromise: Promise<void> | null = null
+let globalFileIndexLoadSequence = 0
+let globalFileIndexLoadPromise: Promise<void> | null = null
 
-const flattenFileTree = (nodes: any[]): Array<{ path: string; type: 'file' | 'directory'; editable?: boolean }> => {
-  const items: Array<{ path: string; type: 'file' | 'directory'; editable?: boolean }> = []
-  const walk = (list: any[]) => {
-    for (const node of list || []) {
-      if (!node?.path || (node.type !== 'file' && node.type !== 'directory')) continue
-      items.push({ path: node.path, type: node.type, editable: node.editable })
-      if (node.type === 'directory' && Array.isArray(node.children)) walk(node.children)
+const loadFileIndex = async () => {
+  const scope = projectRouteScope.value
+  if (fileIndexLoaded.value && fileIndexCacheScope.value === scope) return
+  if (fileIndexLoadPromise && fileIndexLoadScope === scope) return fileIndexLoadPromise
+
+  const sequence = ++fileIndexLoadSequence
+  fileIndexLoadScope = scope
+  const request = (async () => {
+    try {
+      const api = (await import('@/composables/useApi')).useApi()
+      const res = await api.getFileIndex()
+      if (sequence !== fileIndexLoadSequence || scope !== projectRouteScope.value) return
+      fileIndexCache.value = (res.files || []).filter((path): path is string => typeof path === 'string' && !!path)
+      fileIndexCacheScope.value = scope
+      fileIndexLoaded.value = true
+    } catch {
+      // Keep autocomplete usable; a later input or file-change event retries.
+    } finally {
+      if (sequence === fileIndexLoadSequence) fileIndexLoadPromise = null
     }
-  }
-  walk(nodes)
-  return items
-}
-
-const loadFileTree = async () => {
-  if (fileTreeLoaded.value && fileTreeCacheScope.value === projectRouteScope.value) return
-  try {
-    const api = (await import('@/composables/useApi')).useApi()
-    const res = await api.getFileTree()
-    fileTreeCache.value = flattenFileTree(res.files || [])
-    fileTreeCacheScope.value = projectRouteScope.value
-    fileTreeLoaded.value = true
-  } catch {}
+  })()
+  fileIndexLoadPromise = request
+  return request
 }
 
 const isPublicGlobalFilePath = (path: string) => {
@@ -232,15 +238,27 @@ const isPublicGlobalFilePath = (path: string) => {
   return segments.every(segment => !segment.startsWith('.') || segment === '.env.example')
 }
 
-const loadGlobalFileTree = async () => {
-  if (globalFileTreeLoaded.value) return
-  try {
-    const api = (await import('@/composables/useApi')).useApi()
-    const res = await api.getGlobalFileTree()
-    globalFileTreeCache.value = flattenFileTree(res.files || [])
-      .filter(item => item.type === 'file' && isPublicGlobalFilePath(item.path))
-    globalFileTreeLoaded.value = true
-  } catch {}
+const loadGlobalFileIndex = async () => {
+  if (globalFileIndexLoaded.value) return
+  if (globalFileIndexLoadPromise) return globalFileIndexLoadPromise
+
+  const sequence = ++globalFileIndexLoadSequence
+  const request = (async () => {
+    try {
+      const api = (await import('@/composables/useApi')).useApi()
+      const res = await api.getGlobalFileIndex()
+      if (sequence !== globalFileIndexLoadSequence) return
+      globalFileIndexCache.value = (res.files || [])
+        .filter((path): path is string => typeof path === 'string' && isPublicGlobalFilePath(path))
+      globalFileIndexLoaded.value = true
+    } catch {
+      // Shared-file suggestions are optional and can be retried on next input.
+    } finally {
+      if (sequence === globalFileIndexLoadSequence) globalFileIndexLoadPromise = null
+    }
+  })()
+  globalFileIndexLoadPromise = request
+  return request
 }
 
 const diversifyGlobalFileSuggestions = <T extends { path: string }>(items: T[]) => {
@@ -326,19 +344,17 @@ const suggestions = computed<SuggestionItem[]>(() => {
     const matchEnd = matchStart + atCommandMatch[0].length
     
     if (command === 'file') {
-      const projectItems = fileTreeCache.value.map(item => ({
-        path: item.path,
-        type: item.type,
-        hint: item.type === 'directory' ? '项目目录' : '项目文件',
+      const workspaceItems = fileIndexCache.value.map(path => ({
+        path,
+        hint: isProjectWorkspaceRoute.value ? '项目文件' : '工作区文件',
       }))
       const sharedItems = isProjectWorkspaceRoute.value && partial.startsWith('..')
-        ? diversifyGlobalFileSuggestions(globalFileTreeCache.value).map(item => ({
+        ? diversifyGlobalFileSuggestions(globalFileIndexCache.value.map(path => ({ path }))).map(item => ({
             path: `../../${item.path}`,
-            type: 'file' as const,
             hint: 'data 公共文件',
           }))
         : []
-      return [...projectItems, ...sharedItems]
+      return [...workspaceItems, ...sharedItems]
         .filter(item => item.path.toLowerCase().includes(partial))
         .slice(0, 8)
         .map(item => ({
@@ -473,38 +489,64 @@ const applySelectedSuggestion = () => {
   return true
 }
 
-// Preload data when @ is typed
+// Preload data when @ is typed.
 watch(inputText, (val) => {
   if (dismissedSuggestionText.value && val !== dismissedSuggestionText.value) dismissedSuggestionText.value = ''
   refreshExtensionAutocomplete(val)
-  if (val.includes('@file')) loadFileTree()
-  if (isProjectWorkspaceRoute.value && /@file\s+\.\./i.test(val)) loadGlobalFileTree()
+  if (val.includes('@file')) void loadFileIndex()
+  if (isProjectWorkspaceRoute.value && /@file\s+\.\./i.test(val)) void loadGlobalFileIndex()
   if (val.includes('@category')) loadCategories()
   if (val.includes('@paper') && !paperStore.papers.length) paperStore.fetchPapers()
 })
 
+const invalidateWorkspaceFileIndex = () => {
+  fileIndexLoadSequence += 1
+  fileIndexLoadPromise = null
+  fileIndexLoadScope = ''
+  fileIndexCache.value = []
+  fileIndexCacheScope.value = ''
+  fileIndexLoaded.value = false
+}
+
+const invalidateGlobalFileIndex = () => {
+  globalFileIndexLoadSequence += 1
+  globalFileIndexLoadPromise = null
+  globalFileIndexCache.value = []
+  globalFileIndexLoaded.value = false
+}
+
+const reloadVisibleFileSuggestions = () => {
+  if (!inputText.value.includes('@file')) return
+  void loadFileIndex()
+  if (isProjectWorkspaceRoute.value && /@file\s+\.\./i.test(inputText.value)) void loadGlobalFileIndex()
+}
+
 watch(projectRouteScope, () => {
-  fileTreeCache.value = []
-  fileTreeCacheScope.value = ''
-  fileTreeLoaded.value = false
-  if (inputText.value.includes('@file')) void loadFileTree()
+  invalidateWorkspaceFileIndex()
+  reloadVisibleFileSuggestions()
 })
 
-// Clear file tree cache when files change
-const onFilesChanged = () => {
-  fileTreeCache.value = []
-  fileTreeCacheScope.value = ''
-  fileTreeLoaded.value = false
-  globalFileTreeCache.value = []
-  globalFileTreeLoaded.value = false
+const onGlobalFilesChanged = () => {
+  invalidateGlobalFileIndex()
+  if (!isProjectWorkspaceRoute.value) invalidateWorkspaceFileIndex()
+  reloadVisibleFileSuggestions()
+}
+
+const onProjectFilesChanged = (event: Event) => {
+  const projectId = projectRouteScope.value.startsWith('project:') ? projectRouteScope.value.slice('project:'.length) : ''
+  if (!projectId || (event as CustomEvent)?.detail?.projectId !== projectId) return
+  invalidateWorkspaceFileIndex()
+  reloadVisibleFileSuggestions()
 }
 
 onMounted(() => {
-  window.addEventListener('yarc-files-changed', onFilesChanged)
+  window.addEventListener('yarc-files-changed', onGlobalFilesChanged)
+  window.addEventListener('yarc-project-files-changed', onProjectFilesChanged)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('yarc-files-changed', onFilesChanged)
+  window.removeEventListener('yarc-files-changed', onGlobalFilesChanged)
+  window.removeEventListener('yarc-project-files-changed', onProjectFilesChanged)
 })
 
 const autoScroll = ref(true)
