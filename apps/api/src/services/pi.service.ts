@@ -379,10 +379,8 @@ export class PiService {
         if (!definition) throw new Error(`Unknown Runtime tool: ${toolName}`)
         this.emitAgentToolEvent('started', toolName, params)
         try {
-          // Runtime-hosted tools are executed outside an AgentSession, so there
-          // is no ExtensionContext/sessionManager to pass to the tool definition.
-          // Passing `{}` makes Pi's bash tool try `ctx.sessionManager.getSessionId()`
-          // and fail before it can spawn the command.
+          // Runtime-hosted custom tools execute outside an AgentSession, so
+          // there is no ExtensionContext/sessionManager to pass to them.
           const result = await skillReadContext.run(resources?.skillFiles || [],
             () => definition.execute(toolCallId, params, signal, onUpdate))
           this.emitAgentToolEvent(result?.isError ? 'failed' : 'completed', toolName, params, result, !!result?.isError)
@@ -3263,9 +3261,7 @@ export class PiService {
   private createWorkspaceToolOverrides(cwd: string, getSkillFiles: () => readonly string[] = () => []): any[] {
     if (!this.piModule) return []
     const {
-      createBashToolDefinition,
       createEditToolDefinition,
-      createLocalBashOperations,
       createReadToolDefinition,
       createWriteToolDefinition,
     } = this.piModule
@@ -3342,15 +3338,10 @@ export class PiService {
       createWriteToolDefinition(cwd, { operations: writeOperations }),
     ]
 
-    if (typeof createBashToolDefinition === 'function' && typeof createLocalBashOperations === 'function') {
-      const localBash = createLocalBashOperations()
-      definitions.push(createBashToolDefinition(cwd, {
-        operations: {
-          exec: (command: string, commandCwd: string, options: any) =>
-            liveFileService.withWorkspaceMutationLock(() => localBash.exec(command, commandCwd, options)),
-        },
-      }))
-    }
+    // Keep Pi's built-in bash tool. It runs in the AgentSession/Runtime Worker
+    // and must not be wrapped in the global live-file mutation lock: arbitrary
+    // shell commands can run for a long time and their target files are not
+    // knowable before execution.
     return definitions
   }
 
