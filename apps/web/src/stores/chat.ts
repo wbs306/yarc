@@ -117,6 +117,9 @@ export const useChatStore = defineStore('chat', () => {
   const abortControllers = new Map<string, AbortController>()
   const streamEventSequences = new Map<string, number>()
   const textQueues = new Map<string, { buf: string; timer: number | null }>()
+  // Reconnect replay maps temporary assistant IDs to canonical Pi entry IDs
+  // mid-stream, but later tool events still reference the temporary ID.
+  const assistantEntryAliases = new Map<string, string>()
   // A detached client socket must not cancel the server-owned producer. Keep a
   // marker so returning to the conversation can reconcile a stream that
   // finished while the conversation was off-screen.
@@ -551,6 +554,7 @@ export const useChatStore = defineStore('chat', () => {
 
   const applyPiAssistantEntry = (event: any, branchId: string | null | undefined, fallback: Message): Message => {
     if (event?.type !== 'pi_assistant_entry' || !event.messageId || !event.entryId || !branchId) return fallback
+    assistantEntryAliases.set(event.messageId, event.entryId)
     const arr = branchCache.value.get(branchId)
     if (!arr) return fallback
     const pendingIndex = arr.findIndex(message => message.id === event.messageId)
@@ -1483,11 +1487,12 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   const resolveEventAssistant = (d: any, fallback: Message, convId: string): Message => {
-    const messageId = typeof d.assistantMessageId === 'string'
+    const rawMessageId = typeof d.assistantMessageId === 'string'
       ? d.assistantMessageId
       : d.type === 'assistant_message_start' && typeof d.messageId === 'string'
         ? d.messageId
         : fallback.id
+    const messageId = assistantEntryAliases.get(rawMessageId) || rawMessageId
     if (!messageId || messageId === fallback.id) return fallback
 
     const branchId = d.branchId || fallback.branchId || currentBranchId.value || ''
@@ -1773,6 +1778,7 @@ export const useChatStore = defineStore('chat', () => {
         const queued = textQueues.get(messageId)
         if (queued && queued.timer !== null) window.clearTimeout(queued.timer)
         textQueues.delete(messageId)
+        assistantEntryAliases.delete(messageId)
       }
       const retained = arr.filter(message => !replayAssistantIds.has(message.id))
 
