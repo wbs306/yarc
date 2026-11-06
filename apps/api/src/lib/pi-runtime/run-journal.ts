@@ -39,6 +39,42 @@ export const deriveRunJournalCommitState = (events: unknown[]): RunJournalCommit
   return { userEntryId, assistantEntryIds, leafEntryId }
 }
 
+const isCommitEvent = (event: unknown) => {
+  const type = (event as any)?.type
+  return type === 'pi_user_entry' || type === 'pi_assistant_entry'
+}
+
+/**
+ * Build the on-disk crash journal for an in-flight run. Recovery only needs
+ * the run identity, the user prompt and the commit barriers, so text/thinking
+ * deltas and the accumulated stream snapshot are deliberately not stored.
+ */
+export const buildStreamingRunJournal = (input: {
+  conversationId: string
+  runId: string
+  branchId?: string
+  source?: RunJournalSnapshot['source']
+  initialLeafId?: string | null
+  sessionFile?: string
+  userMessage?: unknown
+  events: unknown[]
+}): RunJournalSnapshot => {
+  const commitEvents = input.events.filter(isCommitEvent)
+  return {
+    conversationId: input.conversationId,
+    runId: input.runId,
+    branchId: input.branchId,
+    source: input.source,
+    initialLeafId: input.initialLeafId,
+    sessionFile: input.sessionFile,
+    status: 'streaming',
+    events: commitEvents,
+    commitState: deriveRunJournalCommitState(commitEvents),
+    finalData: { status: 'streaming', userMessage: input.userMessage },
+    updatedAt: new Date().toISOString(),
+  }
+}
+
 const safeSegment = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, '_')
 
 export class RunJournalStore {

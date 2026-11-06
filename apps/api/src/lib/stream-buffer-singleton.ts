@@ -6,30 +6,25 @@
  */
 import { config } from './config.js'
 import { StreamBuffer } from './stream-buffer.js'
-import { deriveRunJournalCommitState, runJournalStore } from './pi-runtime/run-journal.js'
+import { buildStreamingRunJournal, runJournalStore } from './pi-runtime/run-journal.js'
 
 export const streamBuffer = new StreamBuffer({
   // Pi JSONL remains authoritative for finalized messages. This journal only
-  // preserves in-flight prompts/deltas across an API or Runtime Worker crash.
+  // preserves the in-flight prompt and commit barriers across an API or
+  // Runtime Worker crash; live replay is served from memory.
   flushFn: async (conversationId, messageId, events, finalData) => {
     if (finalData.status === 'streaming') {
       const entry = streamBuffer.get(messageId)
-      await runJournalStore.write({
+      await runJournalStore.write(buildStreamingRunJournal({
         conversationId,
         runId: messageId,
         branchId: entry?.branchId,
         source: entry?.source,
         initialLeafId: entry?.initialLeafId,
         sessionFile: entry?.sessionFile,
-        status: 'streaming',
+        userMessage: entry?.userMessage,
         events,
-        commitState: deriveRunJournalCommitState(events),
-        finalData: {
-          ...finalData,
-          userMessage: entry?.userMessage,
-        },
-        updatedAt: new Date().toISOString(),
-      })
+      }))
       return
     }
 
@@ -48,7 +43,8 @@ const cleanupTimer = setInterval(() => { streamBuffer.cleanup().catch(() => {}) 
 if (typeof cleanupTimer.unref === 'function') cleanupTimer.unref()
 
 // Runtime journals are crash-recovery artifacts, not permanent conversation
-// data. Active runs refresh their file continuously; abandoned/corrupt/temp
+// data. Active runs rewrite their small file on commits and on a slow
+// heartbeat (StreamBuffer journalRefreshMs); abandoned/corrupt/temp
 // files age out without entering WebDAV synchronization.
 const journalCleanupTimer = setInterval(() => {
   runJournalStore.cleanupStale(config.piRuntimeJournalRetentionMs).catch(() => {})
