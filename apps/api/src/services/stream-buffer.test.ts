@@ -96,6 +96,81 @@ describe('StreamBuffer terminal ordering', () => {
     await buffer.complete('message-3')
   })
 
+  it('coalesces adjacent deltas for replay while live subscribers get every delta', async () => {
+    const buffer = new StreamBuffer({
+      flushFn: async () => {},
+      flushIntervalMs: 60_000,
+    })
+    const live: any[] = []
+
+    await buffer.start('message-6', 'conversation-1', 'main')
+    buffer.subscribe('message-6', event => { live.push(event) })
+    buffer.append('message-6', { type: 'thinking', content: 'ab', assistantMessageId: 'a-1' })
+    buffer.append('message-6', { type: 'thinking', content: 'cd', assistantMessageId: 'a-1' })
+    buffer.append('message-6', { type: 'thinking', content: 'ef', assistantMessageId: 'a-1' })
+    buffer.append('message-6', { type: 'tool_call', toolCallId: 'tool-1', toolName: 'read', input: '{}', assistantMessageId: 'a-1' })
+    buffer.append('message-6', { type: 'text', content: 'x', assistantMessageId: 'a-1' })
+    buffer.append('message-6', { type: 'text', content: 'y', assistantMessageId: 'a-2' })
+    buffer.append('message-6', { type: 'text', content: 'z', assistantMessageId: 'a-2' })
+
+    // Live delivery is unchanged: one event per delta with its own sequence.
+    assert.deepEqual(live.map(event => event.eventSequence), [1, 2, 3, 4, 5, 6, 7])
+    assert.deepEqual(live.slice(0, 3).map(event => event.content), ['ab', 'cd', 'ef'])
+
+    const replay = buffer.getEvents('message-6') as any[]
+    assert.deepEqual(replay.map(event => [event.type, event.content, event.eventSequence]), [
+      ['thinking', 'abcdef', 3],
+      ['tool_call', undefined, 4],
+      ['text', 'x', 5],
+      ['text', 'yz', 7],
+    ])
+
+    // A cursor inside a merged range replays only the unseen suffix.
+    const resumed = buffer.getEvents('message-6', 1) as any[]
+    assert.deepEqual(resumed.map(event => [event.type, event.content, event.eventSequence]), [
+      ['thinking', 'cdef', 3],
+      ['tool_call', undefined, 4],
+      ['text', 'x', 5],
+      ['text', 'yz', 7],
+    ])
+    assert.deepEqual((buffer.getEvents('message-6', 6) as any[]).map(event => [event.content, event.eventSequence]), [['z', 7]])
+    assert.deepEqual(buffer.getEvents('message-6', 7), [])
+
+    // Merging must not mutate events already handed to live subscribers.
+    assert.equal(live[0].content, 'ab')
+    await buffer.complete('message-6')
+  })
+
+  it('persists the streaming journal only when recovery state changes', async () => {
+    const writes: Array<{ events: unknown[] }> = []
+    const buffer = new StreamBuffer({
+      flushFn: async (_conversationId, _messageId, events, finalData) => {
+        if (finalData.status === 'streaming') writes.push({ events: [...events] })
+      },
+      flushIntervalMs: 5,
+    })
+
+    await buffer.start('message-6', 'conversation-1', 'main')
+    assert.equal(writes.length, 1)
+
+    for (let i = 0; i < 50; i++) buffer.append('message-6', { type: 'thinking', content: `t${i}` })
+    buffer.append('message-6', { type: 'tool_call', toolCallId: 'tool-1', toolName: 'read', input: '{}' })
+    buffer.append('message-6', { type: 'tool_result', toolCallId: 'tool-1', result: 'ok' })
+    await new Promise(resolve => setTimeout(resolve, 40))
+    assert.equal(writes.length, 1, 'deltas and tool events must not rewrite the journal')
+
+    buffer.append('message-6', {
+      type: 'pi_assistant_entry', conversationId: 'conversation-1', messageId: 'message-6',
+      entryId: 'entry-6', sessionFile: '/tmp/session-6.jsonl',
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(writes.length, 2, 'a commit mapping must be persisted immediately')
+
+    await new Promise(resolve => setTimeout(resolve, 40))
+    assert.equal(writes.length, 2)
+    await buffer.complete('message-6')
+  })
+
   it('records the canonical Session file when a commit mapping arrives', async () => {
     const buffer = new StreamBuffer({
       flushFn: async () => {},

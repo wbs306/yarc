@@ -161,3 +161,51 @@ test('reconnect keeps tool execution on the assistant entry mapped before the to
   assert.equal(toolCalls[0].inputText, undefined)
   assert.equal(assistants[0]?.metadata.segments?.filter(segment => segment.type === 'tool').length, 1)
 })
+
+test('reconnect replay skips old notifications but live notifications still show', async t => {
+  setupBrowser()
+  MockWebSocket.instances = []
+
+  const notification = (requestId: string, sequence: number) => ({
+    type: 'agent_interaction_request', requestId, kind: 'notification', title: 'Agent 通知', message: requestId,
+    payload: { message: requestId, notifyType: 'info' }, conversationId: 'conversation-a', branchId: 'branch-a',
+    streamMessageId: 'stream-a', createdAt: '2026-01-01T00:00:00.000Z', assistantMessageId: 'stream-a', eventSequence: sequence,
+  })
+
+  t.mock.method(globalThis, 'fetch', async (input) => {
+    const url = String(input)
+    if (url === '/api/conversations/conversation-a/branches') {
+      return json({ branches: [{ id: 'branch-a', branchName: 'main', parentBranchId: null, forkMessageId: null }] })
+    }
+    if (url === '/api/conversations/conversation-a/switch-branch/branch-a') return json({ messages: [] })
+    if (url === '/api/conversations/conversation-a/context-usage?branchId=branch-a') return json({ contextUsage: null })
+    if (url === '/api/agent-interactions/runtime/conversation-a?branchId=branch-a') {
+      return json({ runtime: { commands: [], state: 'running', surfaces: [], uiEvents: [] } })
+    }
+    if (url === '/api/conversations/conversation-a/streaming-message') {
+      return json({
+        message: {
+          id: 'stream-a', conversationId: 'conversation-a', branchId: 'branch-a', role: 'assistant',
+          content: '', toolCalls: null, metadata: { pending: true }, createdAt: '2026-01-01T00:00:00.000Z',
+        },
+        events: [
+          { type: 'assistant_message_start', messageId: 'stream-a', runGroupId: 'run-a', eventSequence: 1 },
+          notification('old-compaction-1', 2),
+          notification('old-compaction-2', 3),
+        ],
+      })
+    }
+    throw new Error(`Unexpected API call: ${url}`)
+  })
+
+  const store = useChatStore(createPinia())
+  await store.selectConversation('conversation-a')
+  assert.deepEqual(store.notificationInteractions.map(item => item.requestId), [])
+
+  const socket = MockWebSocket.instances[0]
+  assert.ok(socket)
+  socket.open()
+  socket.onmessage?.({ data: JSON.stringify(notification('live-notice', 4)) })
+  assert.deepEqual(store.notificationInteractions.map(item => item.requestId), ['live-notice'])
+  store.dismissInteraction('live-notice')
+})

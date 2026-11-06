@@ -904,9 +904,11 @@ export const useChatStore = defineStore('chat', () => {
       currentBranchId.value = target
       await loadBranchMsgs(id, target)
       if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
-      await loadContextUsage(id, target)
-      if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
-      await loadRuntimeSnapshot(id, target)
+      // History is already rendered. Both requests may wait for the same Pi
+      // Runtime to start, so issue them together instead of back to back.
+      // The runtime snapshot still finishes before attachStream because it
+      // resets runtime UI state that the stream replay then fills in.
+      await Promise.all([loadContextUsage(id, target), loadRuntimeSnapshot(id, target)])
     } else {
       currentBranchId.value = null
       currentContextUsage.value = null
@@ -1515,7 +1517,7 @@ export const useChatStore = defineStore('chat', () => {
     return target
   }
 
-  const applyEvent = (d: any, fallbackMessage: Message, c: string, options: { immediateText?: boolean } = {}) => {
+  const applyEvent = (d: any, fallbackMessage: Message, c: string, options: { immediateText?: boolean; replay?: boolean } = {}) => {
     if (d.type !== 'runtime_branch_changed' && !isCurrentRuntimeEvent(d)) return
     const m = resolveEventAssistant(d, fallbackMessage, c)
     switch (d.type) {
@@ -1596,6 +1598,9 @@ export const useChatStore = defineStore('chat', () => {
         }
         break;
       case 'agent_interaction_request':
+        // Notifications are transient toasts. Replaying a buffered run must not
+        // re-show every notice (e.g. one per compaction) already emitted.
+        if (options.replay && d.kind === 'notification') break
         interactions.value[d.requestId] = d;
         if (d.kind === 'notification') {
           window.setTimeout(() => dismissInteraction(d.requestId), 6000)
@@ -1806,7 +1811,7 @@ export const useChatStore = defineStore('chat', () => {
         msgRef = applyPiAssistantEntry(event, bid, msgRef)
       } else {
         if (event?.type === 'error') streamFailed = true
-        applyEvent(event, msgRef, convId, { immediateText: true })
+        applyEvent(event, msgRef, convId, { immediateText: true, replay: true })
       }
     }
     if (replaySequence > 0) streamEventSequences.set(sm.id, replaySequence)
