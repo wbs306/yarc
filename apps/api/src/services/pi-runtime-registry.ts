@@ -14,6 +14,7 @@ import { streamingRegistry } from '../lib/streaming-registry.js'
 import { runJournalStore } from '../lib/pi-runtime/run-journal.js'
 import { ensureAgentWorkspace } from '../lib/agent-workspace.js'
 import { resolveConversationWorkspace } from '../lib/conversation-workspace.js'
+import { llamaCppServiceManager } from '../lib/model-service-manager.js'
 import { AsyncEventQueue } from '../lib/pi-runtime/runtime-events.js'
 import type {
   RuntimeHostMessage,
@@ -118,32 +119,37 @@ export class PiRuntimeRegistry {
     thinkingEnabled?: boolean
     retryMessageId?: string
   }): AsyncGenerator<ChatEvent> {
-    const record = await this.ensure(input.key, input.model, input.thinkingLevel)
-    if (record.activeRun || record.extensionRuns.size > 0) throw new Error('Runtime already has an active run')
-    if (/^\/acm(?:\s|$)/.test(input.prompt.trim()) && record.commands.some(command => command.name === 'acm')) {
-      this.acmEnabled.add(runtimeKey(input.key))
-    }
-    const run: RuntimeRunRecord = { runId: input.runId, queue: new AsyncEventQueue<ChatEvent>(), completed: false }
-    record.activeRun = run
-    record.state = 'running'
-    record.lastUsedAt = Date.now()
-    this.post(record, {
-      type: 'prompt',
-      payload: {
-        runId: input.runId,
-        prompt: input.prompt,
-        userMessageId: input.userMessageId,
-        assistantMessageId: input.assistantMessageId,
-        model: input.model,
-        thinkingLevel: input.thinkingLevel,
-        thinkingEnabled: input.thinkingEnabled,
-        retryMessageId: input.retryMessageId,
-      },
-    })
+    const llamaLease = await llamaCppServiceManager.acquire()
     try {
-      for await (const event of run.queue) yield event
+      const record = await this.ensure(input.key, input.model, input.thinkingLevel)
+      if (record.activeRun || record.extensionRuns.size > 0) throw new Error('Runtime already has an active run')
+      if (/^\/acm(?:\s|$)/.test(input.prompt.trim()) && record.commands.some(command => command.name === 'acm')) {
+        this.acmEnabled.add(runtimeKey(input.key))
+      }
+      const run: RuntimeRunRecord = { runId: input.runId, queue: new AsyncEventQueue<ChatEvent>(), completed: false }
+      record.activeRun = run
+      record.state = 'running'
+      record.lastUsedAt = Date.now()
+      this.post(record, {
+        type: 'prompt',
+        payload: {
+          runId: input.runId,
+          prompt: input.prompt,
+          userMessageId: input.userMessageId,
+          assistantMessageId: input.assistantMessageId,
+          model: input.model,
+          thinkingLevel: input.thinkingLevel,
+          thinkingEnabled: input.thinkingEnabled,
+          retryMessageId: input.retryMessageId,
+        },
+      })
+      try {
+        for await (const event of run.queue) yield event
+      } finally {
+        if (record.activeRun === run && run.completed) record.activeRun = undefined
+      }
     } finally {
-      if (record.activeRun === run && run.completed) record.activeRun = undefined
+      llamaLease.release()
     }
   }
 
@@ -156,17 +162,22 @@ export class PiRuntimeRegistry {
     thinkingLevel?: string
     thinkingEnabled?: boolean
   }): AsyncGenerator<ChatEvent> {
-    const record = await this.ensure(input.key, input.model, input.thinkingLevel)
-    if (record.activeRun || record.extensionRuns.size > 0) throw new Error('Runtime already has an active run')
-    const run: RuntimeRunRecord = { runId: input.runId, queue: new AsyncEventQueue<ChatEvent>(), completed: false }
-    record.activeRun = run
-    record.state = 'running'
-    record.lastUsedAt = Date.now()
-    this.post(record, { type: 'compact', payload: input })
+    const llamaLease = await llamaCppServiceManager.acquire()
     try {
-      for await (const event of run.queue) yield event
+      const record = await this.ensure(input.key, input.model, input.thinkingLevel)
+      if (record.activeRun || record.extensionRuns.size > 0) throw new Error('Runtime already has an active run')
+      const run: RuntimeRunRecord = { runId: input.runId, queue: new AsyncEventQueue<ChatEvent>(), completed: false }
+      record.activeRun = run
+      record.state = 'running'
+      record.lastUsedAt = Date.now()
+      this.post(record, { type: 'compact', payload: input })
+      try {
+        for await (const event of run.queue) yield event
+      } finally {
+        if (record.activeRun === run && run.completed) record.activeRun = undefined
+      }
     } finally {
-      if (record.activeRun === run && run.completed) record.activeRun = undefined
+      llamaLease.release()
     }
   }
 

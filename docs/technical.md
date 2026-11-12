@@ -331,6 +331,23 @@ Web 对话的 Pi Extension 由长生命周期 Runtime Worker 承载。每个活�
 
 浏览器刷新或切换对话只 detach WebSocket subscriber，后台 Runtime 和 StreamBuffer 继续生成。Pi package 安装、更新、启用、禁用或卸载后会重建空闲 Worker；正在生成的 Worker 在 settled 后重建，以清除 Extension module cache。Web 对话的模型和思考级别按 conversation 保存，不会因 `AgentSession.setModel()` 或 `setThinkingLevel()` 改写全局 `settings.json` 默认值；默认值仅由设置页显式修改。`pi-context` 的 `/acm` 启用标记会在同一 API 进程内的 Runtime 重建后自动恢复；API 完全重启后需要重新执行 `/acm`。
 
+### MinerU 与 llama.cpp 生命周期
+
+MinerU 和 llama.cpp 默认由外部进程管理，YARC 只调用其 HTTP API。配置按需启动后，`ModelServiceManager` 会在请求进入 pending queue 时先检查健康地址；健康服务已存在时，若没有显式 `stopCommand` 则视为外部所有，不会由 YARC 停止；配置了 `stopCommand` 则表示明确允许管理器接管该 supervisor-managed 服务。健康检查失败时执行配置的启动命令，等待服务健康后继续请求。只有 pending queue 和活动 lease 都为空，且持续空闲达到 TTL 后，才执行停止命令；没有配置停止命令时，才回收由本进程直接启动的进程组。API 关闭时也会释放由本进程创建或启动命令声明接管的服务。
+
+Docker、systemd 等 supervisor 应配置成对的 `*_START_COMMAND` 和 `*_STOP_COMMAND`，因为启动命令本身通常只是短暂的控制进程，不能通过杀掉它来停止容器或 unit。例如：
+
+```text
+MINERU_START_COMMAND=docker start my-mineru-container
+MINERU_STOP_COMMAND=docker stop -t 30 my-mineru-container
+
+LLAMA_CPP_ON_DEMAND=true
+LLAMA_CPP_START_COMMAND=systemctl --user start llama-server.service
+LLAMA_CPP_STOP_COMMAND=systemctl --user stop llama-server.service
+```
+
+使用 Compose 时只操作目标服务，例如 `docker compose ... up -d mineru` / `docker compose ... stop mineru`，不要使用会影响其他服务的 `docker compose down`。MinerU 设置 `MINERU_START_COMMAND` 后启用托管；如果使用 supervisor，还应设置 `MINERU_STOP_COMMAND`。llama.cpp 还必须同时设置 `LLAMA_CPP_ON_DEMAND=true` 和 `LLAMA_CPP_START_COMMAND`，并在 systemd/Docker 场景设置 `LLAMA_CPP_STOP_COMMAND`。按需管理器不负责修改 llama.cpp 的模型路由策略；如需限制多模型常驻，应另外使用 llama.cpp router 的 `--models-max`，并优先使用其自身的 `--sleep-idle-seconds`。
+
 修改 schema 后执行：
 
 ```bash
@@ -377,9 +394,18 @@ pnpm db:generate
 | `PAPERS_DIR` | PDF 存储目录 | `./data/papers` |
 | `FILES_DIR` | 用户文件目录 | `DATA_DIR` |
 | `MINERU_API_URL` | MinerU PDF 解析服务 | `http://localhost:8000` |
+| `MINERU_START_COMMAND` / `MINERU_STOP_COMMAND` | MinerU 启动 / 停止命令；Docker 等 supervisor 应成对配置 | 空 |
+| `MINERU_START_CWD` | MinerU 启停命令工作目录 | 空 |
+| `MINERU_HEALTH_URL` | MinerU 健康地址；为空时从 API origin 推导 `/health` | 空 |
+| `MINERU_START_TIMEOUT_MS` / `MINERU_IDLE_TTL_MS` | MinerU 启动超时 / 空闲停止 TTL | `120000` / `300000` |
 | `EMBEDDING_API_URL` | Embedding 服务 | `http://localhost:15263/v1/embeddings` |
 | `EMBEDDING_MODEL` | Embedding 模型名 | `Qwen3-Embedding-8B` |
 | `EMBEDDING_DIMENSIONS` | Embedding 维度 | `1536` |
+| `LLAMA_CPP_ON_DEMAND` | 是否启用 llama.cpp 按需托管；还需配置启动命令 | `false` |
+| `LLAMA_CPP_START_COMMAND` / `LLAMA_CPP_STOP_COMMAND` | llama.cpp/router 启动 / 停止命令；systemd 等 supervisor 应成对配置 | 空 |
+| `LLAMA_CPP_START_CWD` | llama.cpp 启停命令工作目录 | 空 |
+| `LLAMA_CPP_HEALTH_URL` | llama.cpp 健康地址；为空时从 Embedding API origin 推导 `/health` | 空 |
+| `LLAMA_CPP_START_TIMEOUT_MS` / `LLAMA_CPP_IDLE_TTL_MS` | llama.cpp 启动超时 / 空闲停止 TTL | `120000` / `300000` |
 | `IEEE_API_KEY` | IEEE Xplore API Key | 空 |
 | `SEMANTIC_SCHOLAR_API_KEY` | Semantic Scholar API Key | 空 |
 | `PI_CLI_COMMAND` | Pi CLI 命令 | `pi` |

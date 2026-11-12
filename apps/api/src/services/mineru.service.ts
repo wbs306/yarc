@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { config } from '../lib/config.js'
 import { AppError } from '../lib/errors.js'
+import { mineruServiceManager } from '../lib/model-service-manager.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -111,11 +112,11 @@ export class MinerUService {
     // pdftotext: downstream embedding/summary require content_list_v2 and
     // images from MinerU artifacts.
     const outputDir = paperId ? join(config.papersDir, paperId, 'mineru') : undefined
-    return this.parseWithMinerU(pdfPath, outputDir)
+    return mineruServiceManager.withService(() => this.parseWithMinerU(pdfPath, outputDir))
   }
 
   async parsePdfToDirectory(pdfPath: string, outputDir: string): Promise<MinerUParseResult> {
-    return this.parseWithMinerU(pdfPath, outputDir)
+    return mineruServiceManager.withService(() => this.parseWithMinerU(pdfPath, outputDir))
   }
 
   private async parseWithMinerU(pdfPath: string, outputDir?: string): Promise<MinerUParseResult> {

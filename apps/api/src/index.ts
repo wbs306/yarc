@@ -37,6 +37,7 @@ import { config } from './lib/config.js'
 import { corsMiddleware } from './lib/cors.js'
 import { authMiddleware } from './lib/auth.js'
 import { errorHandler } from './lib/errors.js'
+import { disposeModelServiceManagers } from './lib/model-service-manager.js'
 
 import authRoutes from './routes/auth.js'
 import papersRoutes from './routes/papers.js'
@@ -647,6 +648,9 @@ const shutdown = async (signal: string) => {
   await projectHistoryService.flushAllPending().catch((err) => console.warn('[Shutdown] Project history flush failed:', err))
   await piService.disposeRuntimes(signal).catch((err) => {
     console.warn('[Shutdown] Pi Runtime disposal failed:', err)
+  })
+  await disposeModelServiceManagers().catch((err) => {
+    console.warn('[Shutdown] Model service disposal failed:', err)
   })
   server.close((err) => {
     if (err && (err as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {

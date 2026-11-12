@@ -9,10 +9,34 @@ DB_PORT=5432
 APP_PORT=3000
 PID_FILE=".yarc.pid"
 
-# 从 .env 读取配置（如果存在）
-if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
-fi
+# 从 .env 读取配置（如果存在）。不要使用 `export $(... | xargs)`：
+# 启停命令通常包含空格，会被错误拆成多个 export 参数。
+load_env() {
+    if [ ! -f .env ]; then
+        return
+    fi
+
+    local line key value
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        if [ -z "$line" ] || [[ "$line" == \#* ]]; then
+            continue
+        fi
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            if [[ ${#value} -ge 2 && ${value:0:1} == '"' && ${value: -1} == '"' ]]; then
+                value="${value:1:${#value}-2}"
+            elif [[ ${#value} -ge 2 && ${value:0:1} == "'" && ${value: -1} == "'" ]]; then
+                value="${value:1:${#value}-2}"
+            fi
+            export "$key=$value"
+        fi
+    done < .env
+}
+
+load_env
 
 POSTGRES_DB="${POSTGRES_DB:-yarc}"
 POSTGRES_USER="${POSTGRES_USER:-yarc}"

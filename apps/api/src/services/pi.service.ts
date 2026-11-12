@@ -16,6 +16,7 @@ import { rankingService } from './ranking.service.js'
 import { chatStreamControl } from '../lib/chat-stream-control.js'
 import { sseHub } from '../lib/sse.js'
 import { config } from '../lib/config.js'
+import { llamaCppServiceManager } from '../lib/model-service-manager.js'
 import { formatPathRelativeToWorkspace } from '../lib/agent-file-path.js'
 import { assertGlobalFilesPathSafe } from '../lib/global-files-path.js'
 import { applyAgentWorkspaceEnv, ensureAgentWorkspace, readAgentSettings } from '../lib/agent-workspace.js'
@@ -2541,7 +2542,9 @@ export class PiService {
     const events: ChatEvent[] = []
     let answer = ''
     let thinking = ''
+    let releaseLlama: (() => void) | null = null
     try {
+      releaseLlama = (await llamaCppServiceManager.acquire()).release
       const queue: ChatEvent[] = []
       let resolve: (() => void) | null = null
 
@@ -2584,6 +2587,7 @@ export class PiService {
     } catch (err) {
       console.warn('[PiService] Side question error:', err)
     } finally {
+      releaseLlama?.()
       // Do NOT save session info — side questions are ephemeral.
       await session.dispose()
     }
@@ -2689,8 +2693,10 @@ export class PiService {
 
     session.setThinkingLevel(resolveSessionThinkingLevel(options))
     let unregisterAbortHandler: (() => void) | null = null
+    let releaseLlama: (() => void) | null = null
 
     try {
+      releaseLlama = (await llamaCppServiceManager.acquire()).release
       if (options._cancelled) {
         unregisterAbortHandler = chatStreamControl.registerAbortHandler(options._cancelled, () => {
           session.abortCompaction?.()
@@ -2729,6 +2735,7 @@ export class PiService {
       if (options.conversationId && options.branchId) {
         await this.savePiSessionInfo(options.conversationId, options.branchId, session)
       }
+      releaseLlama?.()
       unregisterAbortHandler?.()
       agentInteractionRegistry.cancelByStream(options.assistantMessageId || '', 'session_disposed')
       try {
@@ -2953,8 +2960,10 @@ export class PiService {
 
     let unregisterAbortHandler: (() => void) | null = null
     let promptError: string | null = null
+    let releaseLlama: (() => void) | null = null
 
     try {
+      releaseLlama = (await llamaCppServiceManager.acquire()).release
       const queue: ChatEvent[] = []
       let resolve: (() => void) | null = null
 
@@ -3247,6 +3256,7 @@ export class PiService {
       if (options.conversationId && options.branchId) {
         await this.savePiSessionInfo(options.conversationId, options.branchId, session)
       }
+      releaseLlama?.()
       unregisterAbortHandler?.()
       agentInteractionRegistry.cancelByStream(options.assistantMessageId || '', 'session_disposed')
       emitInteractionEvent = null

@@ -128,6 +128,8 @@ pnpm dev
 
 当前 API 不会自动拉取 TeX Live 镜像，请先准备 `LATEX_DOCKER_IMAGE` 指定的镜像。
 
+MinerU 和 llama.cpp 默认视为外部服务，不会被 YARC 启动或停止。若配置了按需启动命令，YARC 会在首次请求且健康检查失败时启动该命令；请求队列和活动 lease 都为空后，再等待空闲 TTL，最后执行对应的停止命令或回收自己启动的进程。已经运行的健康服务在没有显式 `*_STOP_COMMAND` 时不会被停止；配置了停止命令则表示明确允许 YARC 接管该 supervisor-managed 服务，并在空闲后停止它。Docker/systemd 等外部 supervisor 必须同时配置 `*_STOP_COMMAND`。llama.cpp 按需托管还需要同时设置 `LLAMA_CPP_ON_DEMAND=true` 和 `LLAMA_CPP_START_COMMAND`。
+
 也可以用一个命令启动数据库和开发服务：
 
 ```bash
@@ -175,9 +177,18 @@ data/        本地运行数据，默认不纳入 Git
 | `JWT_SECRET` | JWT 密钥 |
 | `PASSWORD_HASH` | 可预置的登录密码哈希；留空时首次登录会设置密码 |
 | `MINERU_API_URL` | MinerU PDF 解析服务 |
+| `MINERU_START_COMMAND` / `MINERU_STOP_COMMAND` | 可选的 MinerU 启动 / 停止命令；Docker 等 supervisor 应成对配置 |
+| `MINERU_START_CWD` | MinerU 启停命令的工作目录 |
+| `MINERU_HEALTH_URL` | MinerU 健康检查地址；留空时从 `MINERU_API_URL` 的 origin 推导 `/health` |
+| `MINERU_START_TIMEOUT_MS` / `MINERU_IDLE_TTL_MS` | MinerU 启动等待超时 / 空闲后停止自有进程的时间 |
 | `EMBEDDING_API_URL` | Embedding 服务 |
 | `EMBEDDING_MODEL` | Embedding 模型名称 |
 | `EMBEDDING_DIMENSIONS` | 向量维度，需与数据库向量列和模型输出一致 |
+| `LLAMA_CPP_ON_DEMAND` | 是否启用 llama.cpp 按需托管；还必须配置 `LLAMA_CPP_START_COMMAND` |
+| `LLAMA_CPP_START_COMMAND` / `LLAMA_CPP_STOP_COMMAND` | llama.cpp/router 启动 / 停止命令；systemd 等 supervisor 应成对配置 |
+| `LLAMA_CPP_START_CWD` | llama.cpp 启停命令的工作目录 |
+| `LLAMA_CPP_HEALTH_URL` | llama.cpp 健康检查地址；留空时从 `EMBEDDING_API_URL` 的 origin 推导 `/health` |
+| `LLAMA_CPP_START_TIMEOUT_MS` / `LLAMA_CPP_IDLE_TTL_MS` | llama.cpp 启动等待超时 / 空闲后停止自有进程的时间 |
 | `PI_CLI_COMMAND` | Pi CLI 命令，默认是 `pi` |
 | `PI_CHAT_TOOLS` | Agent 对话可用工具，默认是 `all` |
 | `IEEE_API_KEY` | IEEE Xplore API Key；启用 IEEE 搜索时需要 |

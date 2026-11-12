@@ -8,6 +8,7 @@ import { metadataService } from './metadata.service.js'
 import { sseHub } from '../lib/sse.js'
 import { piService } from './pi.service.js'
 import { config } from '../lib/config.js'
+import { mineruServiceManager, llamaCppServiceManager } from '../lib/model-service-manager.js'
 import { DEFAULT_SUMMARY_PROMPT, hasPlaceholders, renderTemplate } from '../lib/prompts.js'
 import { ensureAgentWorkspace, readAgentSettings, readAgentSummaryPrompt } from '../lib/agent-workspace.js'
 import { insertPaperChunkWithEmbedding } from '../lib/pgvector.js'
@@ -36,6 +37,11 @@ interface Job {
   paperId: string
   status: 'pending' | 'running' | 'completed' | 'failed'
   error?: string
+}
+
+const notifyModelServiceQueues = () => {
+  mineruServiceManager.notifyQueueChanged()
+  llamaCppServiceManager.notifyQueueChanged()
 }
 
 class JobQueue {
@@ -74,6 +80,7 @@ class JobQueue {
     this.queue.push(job)
     this.knownJobKeys.add(jobKey)
     if (taskId) this.knownTaskIds.add(taskId)
+    notifyModelServiceQueues()
     sseHub.emit({ type: 'paper-status', paperId, jobType: type, status: 'queued', jobId: taskId || job.id, at: new Date().toISOString() })
 
     if (persistTask) {
@@ -90,6 +97,7 @@ class JobQueue {
         if (taskId) this.knownTaskIds.delete(taskId)
         console.error(err)
         this.process()
+        notifyModelServiceQueues()
       })
       return job
     }
@@ -110,6 +118,7 @@ class JobQueue {
     await this.markPaperJobFailed(job).catch(console.error)
     sseHub.emit({ type: 'paper-status', paperId: job.paperId, jobType: job.type, status: 'failed', error: reason })
     this.process()
+    notifyModelServiceQueues()
     return job
   }
 
@@ -142,7 +151,12 @@ class JobQueue {
     this.maxConcurrentSummaries = clamp(input.maxConcurrentSummaries, current.maxConcurrentSummaries, 1, 20)
     this.maxConcurrentEmbeddings = clamp(input.maxConcurrentEmbeddings, current.maxConcurrentEmbeddings, 1, 20)
     this.maxConcurrentParses = clamp(input.maxConcurrentParses, current.maxConcurrentParses, 1, 20)
+    // Formal parse jobs and temporary previews share the same MinerU lease
+    // capacity. The job queue remains responsible for durable paper tasks;
+    // the model manager provides the cross-entry-point resource gate.
+    mineruServiceManager.setMaxConcurrent(this.maxConcurrentParses)
     for (let i = 0; i < this.maxConcurrent; i++) this.process()
+    notifyModelServiceQueues()
     return this.getConcurrency()
   }
 
@@ -212,6 +226,7 @@ class JobQueue {
       this.knownJobKeys.delete(`${job.type}:${job.paperId}`)
       if (job.taskId) this.knownTaskIds.delete(job.taskId)
       this.process()
+      notifyModelServiceQueues()
     }
   }
 
@@ -718,6 +733,14 @@ class JobQueue {
     cache.invalidatePrefix('papers:list')
   }
 
+  getModelServiceQueueDepth(service: 'mineru' | 'llama-cpp'): number {
+    const pending = this.queue.filter(job => service === 'mineru'
+      ? job.type === 'parse_pdf'
+      : job.type === 'generate_embedding').length
+    const running = service === 'mineru' ? this.runningParses : this.runningEmbeddings
+    return pending + running
+  }
+
   getStats() {
     return {
       pending: this.queue.length,
@@ -733,6 +756,9 @@ class JobQueue {
 }
 
 export const jobQueue = new JobQueue()
+
+mineruServiceManager.setQueueDepthProvider(() => jobQueue.getModelServiceQueueDepth('mineru'))
+llamaCppServiceManager.setQueueDepthProvider(() => jobQueue.getModelServiceQueueDepth('llama-cpp'))
 
 export const JOB_QUEUE_CONCURRENCY_SETTING_KEY = 'job_queue_concurrency'
 
