@@ -21,6 +21,7 @@ import { formatPathRelativeToWorkspace } from '../lib/agent-file-path.js'
 import { assertGlobalFilesPathSafe } from '../lib/global-files-path.js'
 import { applyAgentWorkspaceEnv, ensureAgentWorkspace, readAgentSettings } from '../lib/agent-workspace.js'
 import { getPiSessionMetadata, savePiSessionMetadata } from '../lib/pi-metadata.js'
+import { restoreSessionLeaf } from '../lib/pi-session-leaf.js'
 import { DEFAULT_CHAT_SYSTEM_PROMPT } from '../lib/prompts.js'
 import { agentInteractionRegistry } from '../lib/agent-interaction-registry.js'
 import { liveFileService } from './live-file.service.js'
@@ -256,7 +257,9 @@ export class PiService {
       const sessionFile = info?.sessionFile
       if (sessionFile && await this.fileExists(sessionFile)) {
         console.log(`[PiService] Reopening Pi session: ${sessionFile}`)
-        return SessionManager.open(sessionFile, sessionDir, cwd)
+        const sessionManager = SessionManager.open(sessionFile, sessionDir, cwd)
+        restoreSessionLeaf(sessionManager, info?.leafEntryId)
+        return sessionManager
       }
     } catch (err) {
       console.warn('[PiService] Failed to open existing session, creating new:', err)
@@ -558,6 +561,7 @@ export class PiService {
       await resourceLoader.reload()
 
       const sessionManager = SessionManager.open(sessionFile, sessionDir, agentWorkspace.cwd)
+      restoreSessionLeaf(sessionManager, info?.leafEntryId)
       const result = await createAgentSession({
         sessionManager,
         settingsManager: createSessionSettings(agentWorkspace.cwd, agentWorkspace.agentDir),

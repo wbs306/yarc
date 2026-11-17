@@ -21,6 +21,7 @@ import type {
   RuntimeWorkerMessage,
 } from '../lib/pi-runtime/protocol.js'
 import { SessionDurabilityCoordinator } from '../lib/pi-runtime/session-durability.js'
+import { restoreSessionLeaf } from '../lib/pi-session-leaf.js'
 import { createSessionSettings } from '../lib/pi-runtime/session-settings.js'
 import { AssistantAbortCoalescer } from '../lib/pi-runtime/assistant-abort-coalescer.js'
 import { isQuiescent, waitForRuntimeQuiescence } from '../lib/pi-runtime/quiescence.js'
@@ -1266,6 +1267,7 @@ const initialize = async (payload: RuntimeInitPayload) => {
   const sessionManager = payload.sessionFile
     ? SessionManager.open(payload.sessionFile, payload.sessionDir, payload.cwd)
     : SessionManager.create(payload.cwd, payload.sessionDir)
+  restoreSessionLeaf(sessionManager, payload.leafEntryId)
   runtime = await createAgentSessionRuntime(createRuntime, {
     cwd: payload.cwd,
     agentDir: payload.agentDir,

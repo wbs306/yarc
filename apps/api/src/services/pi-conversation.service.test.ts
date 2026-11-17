@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
+import { getSessionBranch, restoreSessionLeaf } from '../lib/pi-session-leaf.js'
 import { PiConversationService, type ConversationMessage } from './pi-conversation.service.js'
 
 const timestamp = '2026-01-01T00:00:00.000Z'
@@ -88,6 +89,25 @@ describe('PiConversationService branch projection', () => {
     const displayed = (service as any).entriesToMessages(manager.getBranch())
     assert.deepEqual(displayed.map((message: ConversationMessage) => message.content), ['original first', 'original second'])
     assert.deepEqual(manager.buildSessionContext().messages.map(message => message.role === 'user' ? message.content : undefined), ['model-only replacement'])
+  })
+
+  it('restores the persisted active leaf after a tree navigation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yarc-session-leaf-'))
+    try {
+      const manager = SessionManager.create(directory, directory)
+      const root = manager.appendMessage({ role: 'user', content: 'root', timestamp: 1 } as any)
+      const active = manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'active' }], stopReason: 'stop', timestamp: 1 } as any)
+      manager.branch(root)
+      manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'off path' }], stopReason: 'stop', timestamp: 1 } as any)
+
+      const reopened = SessionManager.open(manager.getSessionFile()!, directory, directory)
+      assert.notEqual(reopened.getLeafId(), active)
+      assert.equal(restoreSessionLeaf(reopened, active), true)
+      assert.deepEqual(getSessionBranch(reopened, active).map(entry => entry.id), [root, active])
+      assert.equal(getSessionBranch(reopened, undefined).at(-1)?.id, reopened.getLeafId())
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 
   it('prepares an exact in-place retry for the latest failed user turn', async () => {

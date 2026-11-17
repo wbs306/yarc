@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { prisma } from '@yarc/db'
-import { conversationService } from '../services/conversation.service.js'
+import { conversationService, getConversationModelSettings, parseConversationModelSettings } from '../services/conversation.service.js'
 import { piConversationService } from '../services/pi-conversation.service.js'
 import { piService } from '../services/pi.service.js'
 import { streamBuffer } from '../lib/stream-buffer-singleton.js'
@@ -22,6 +22,9 @@ conversations.get('/', async (c) => {
 
 conversations.post('/', async (c) => {
   const body = await c.req.json()
+  if (body.modelSettings !== undefined && !parseConversationModelSettings(body.modelSettings)) {
+    throw new AppError('INVALID_REQUEST', 'Invalid model settings', 400)
+  }
   const conv = await conversationService.create(body)
   return c.json({ conversation: conv }, 201)
 })
@@ -30,6 +33,18 @@ conversations.get('/:id', async (c) => {
   const id = c.req.param('id')
   const conv = await conversationService.getById(id)
   return c.json({ conversation: conv })
+})
+
+conversations.get('/:id/model-settings', async (c) => {
+  const conv = await conversationService.getById(c.req.param('id'))
+  return c.json({ model: conv.model, modelSettings: getConversationModelSettings(conv.metadata) })
+})
+
+conversations.put('/:id/model-settings', async (c) => {
+  const settings = parseConversationModelSettings(await c.req.json())
+  if (!settings) throw new AppError('INVALID_REQUEST', 'Invalid model settings', 400)
+  await conversationService.updateModelSettings(c.req.param('id'), settings)
+  return c.json({ modelSettings: settings })
 })
 
 conversations.delete('/:id', async (c) => {

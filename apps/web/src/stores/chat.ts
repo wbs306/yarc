@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useApi } from '@/composables/useApi'
 import { createClientId } from '@/lib/id'
-import type { ChatThinkingLevel, CurrentChatResource, PiExtensionCommandInfo, PiTuiSurfaceState, ThinkingLevel } from '@yarc/shared'
+import type { ChatThinkingLevel, ConversationModelSettings, CurrentChatResource, PiExtensionCommandInfo, PiTuiSurfaceState, ThinkingLevel } from '@yarc/shared'
 
 export interface ChatSegment { type: 'text' | 'thinking' | 'tool' | 'error' | 'compaction' | 'branch_summary'; text?: string; toolCallId?: string }
 export interface Message {
@@ -10,9 +10,9 @@ export interface Message {
   role: 'user' | 'assistant' | 'system'; content: string; toolCalls: any[] | null
   metadata: Record<string, any> & { segments?: ChatSegment[] }; createdAt: string
 }
-export interface Conversation { id: string; paperId: string | null; projectId: string | null; title: string; model: string | null; createdAt: string; updatedAt: string }
+export interface Conversation { id: string; paperId: string | null; projectId: string | null; title: string; model: string | null; modelSettings?: ConversationModelSettings | null; createdAt: string; updatedAt: string }
 export interface ModelInfo { id: string; name: string; provider: string; model?: string; reasoning?: boolean; images?: boolean; contextWindow?: string; maxTokens?: string; thinkingLevels?: string[]; source?: string }
-export interface BranchInfo { id: string; branchName: string; parentBranchId: string | null; forkMessageId: string | null }
+export interface BranchInfo { id: string; branchName: string; parentBranchId: string | null; forkMessageId: string | null; thinkingLevel?: string | null }
 export type AgentInteractionKind = 'confirm' | 'select' | 'input' | 'editor' | 'questionnaire' | 'notification'
 export interface AgentInteractionRequest {
   type: 'agent_interaction_request'
@@ -48,8 +48,6 @@ export interface BtwItem {
 }
 export interface ContextUsageInfo { tokens: number | null; contextWindow: number; percent: number | null; model?: string }
 
-const MODEL_KEY = 'yarc-current-model'
-const EFFORT_KEY = 'yarc-reasoning-effort'
 const BRANCH_KEY = 'yarc-conv-branches'
 const CONVERSATION_KEY = 'yarc-current-conversations'
 const GLOBAL_CONVERSATION_SCOPE = '__global__'
@@ -93,9 +91,8 @@ export const useChatStore = defineStore('chat', () => {
   // Keep this alongside the list so background refreshes can preserve the same scope.
   const conversationScope = ref<string | null>(null)
   const models = ref<ModelInfo[]>([])
-  const currentModel = ref(localStorage.getItem(MODEL_KEY) || '')
-  const storedReasoningEffort = localStorage.getItem(EFFORT_KEY) as ChatThinkingLevel | null
-  const reasoningEffort = ref<ChatThinkingLevel>(storedReasoningEffort || 'off')
+  const currentModel = ref('')
+  const reasoningEffort = ref<ChatThinkingLevel>('off')
   const modelsError = ref('')
   const chatError = ref('')
   const pendingPrompt = ref('')
@@ -398,15 +395,40 @@ export const useChatStore = defineStore('chat', () => {
   loadPrefs()
   loadConversationPrefs()
 
-  const setCurrentModel = (m: string) => { currentModel.value = m; if (m) localStorage.setItem(MODEL_KEY, m) }
+  const settingsWrites = new Map<string, Promise<void>>()
+  let settingsRevision = 0
+  let settingsLoad: Promise<void> = Promise.resolve()
+  let settingsLoadError = ''
+  const saveModelPrefs = () => {
+    const id = currentConvId.value
+    if (!id || !currentModel.value) return
+    settingsRevision++
+    const settings: ConversationModelSettings = { model: currentModel.value, reasoningEffort: reasoningEffort.value }
+    const conversation = conversations.value.find(c => c.id === id)
+    if (conversation) { conversation.model = settings.model; conversation.modelSettings = settings }
+    const previous = settingsWrites.get(id) || Promise.resolve()
+    const write = previous.catch(() => {}).then(async () => {
+      await api.updateConversationModelSettings(id, settings)
+    })
+    settingsWrites.set(id, write)
+    void write.catch((error: Error) => {
+      if (currentConvId.value === id && settingsWrites.get(id) === write) chatError.value = `保存模型设置失败：${error.message}`
+    })
+  }
+  const setCurrentModel = (m: string) => {
+    currentModel.value = m
+    saveModelPrefs()
+  }
   const setReasoningEffort = (e: string) => {
     reasoningEffort.value = e as ChatThinkingLevel
-    localStorage.setItem(EFFORT_KEY, e)
+    saveModelPrefs()
   }
   const ensureModel = () => {
     if (!models.value.length) return
-    if (!currentModel.value || !models.value.some(m => m.id === currentModel.value)) {
-      setCurrentModel(models.value.find(m => m.id.endsWith('/' + currentModel.value))?.id || models.value[0].id)
+    if (!currentModel.value) setCurrentModel(models.value[0].id)
+    else if (!models.value.some(m => m.id === currentModel.value)) {
+      const legacyMatch = models.value.find(m => m.id.endsWith('/' + currentModel.value))
+      if (legacyMatch) setCurrentModel(legacyMatch.id)
     }
   }
 
@@ -892,6 +914,30 @@ export const useChatStore = defineStore('chat', () => {
 
     currentConvId.value = id
     chatError.value = ''
+    const conversation = conversations.value.find(c => c.id === id)
+    if (previousConversationId !== id) {
+      currentModel.value = conversation?.modelSettings?.model || conversation?.model || ''
+      reasoningEffort.value = conversation?.modelSettings?.reasoningEffort || 'off'
+    }
+    const revision = settingsRevision
+    settingsLoadError = ''
+    settingsLoad = (async () => {
+      try {
+        await settingsWrites.get(id)
+        const result = await api.getConversationModelSettings(id)
+        if (selection !== conversationSelectionSeq || currentConvId.value !== id || revision !== settingsRevision) return
+        currentModel.value = result.modelSettings?.model || result.model || ''
+        reasoningEffort.value = result.modelSettings?.reasoningEffort || 'off'
+        if (conversation) { conversation.model = result.model; conversation.modelSettings = result.modelSettings }
+      } catch (error) {
+        if (selection === conversationSelectionSeq && currentConvId.value === id) {
+          settingsLoadError = `加载模型设置失败：${(error as Error).message}`
+          chatError.value = settingsLoadError
+        }
+      }
+    })()
+    await settingsLoad
+    if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
 
     const loadedBranches = await loadBranches(id)
     if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
@@ -901,6 +947,12 @@ export const useChatStore = defineStore('chat', () => {
     const target = (pref && loadedBranches.find(b => b.id === pref)?.id) || main?.id || loadedBranches[0]?.id
 
     if (target) {
+      if (!conversation?.modelSettings && revision === settingsRevision) {
+        const level = loadedBranches.find(b => b.id === target)?.thinkingLevel
+        if (level && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level)) {
+          reasoningEffort.value = level as ChatThinkingLevel
+        }
+      }
       currentBranchId.value = target
       await loadBranchMsgs(id, target)
       if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
@@ -951,7 +1003,9 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     ensureModel()
-    const r = await api.createConversation({ paperId, projectId, model: currentModel.value || undefined })
+    const modelSettings = currentModel.value ? { model: currentModel.value, reasoningEffort: reasoningEffort.value } : undefined
+    const r = await api.createConversation({ paperId, projectId, model: currentModel.value || undefined, modelSettings })
+    r.conversation.modelSettings = modelSettings || null
     conversationScope.value = projectId || null
     const previousConversationId = currentConvId.value
     if (previousConversationId && previousConversationId !== r.conversation.id) {
@@ -961,6 +1015,8 @@ export const useChatStore = defineStore('chat', () => {
     branchSelectionSeq++
     conversations.value.unshift(r.conversation)
     currentConvId.value = r.conversation.id
+    settingsLoadError = ''
+    settingsLoad = Promise.resolve()
     conversationPrefs.set(conversationScopeKey(conversationScope.value), r.conversation.id)
     saveConversationPrefs()
     chatError.value = ''
@@ -1162,8 +1218,9 @@ export const useChatStore = defineStore('chat', () => {
     refreshActiveInteraction()
     branchCache.value.clear()
     if (currentConvId.value === id) {
-      currentConvId.value = conversations.value[0]?.id || null
-      if (currentConvId.value) await selectConversation(currentConvId.value)
+      const nextId = conversations.value[0]?.id
+      currentConvId.value = null
+      if (nextId) await selectConversation(nextId)
       else { branches.value = []; currentBranchId.value = null }
     }
   }
@@ -1187,9 +1244,18 @@ export const useChatStore = defineStore('chat', () => {
       const conversationPaperId = requestContext?.paperId
         || (requestContext?.currentResource?.type === 'paper' ? requestContext.currentResource.paperId : undefined)
       if (!currentConvId.value) await createConversation(conversationPaperId)
-      ensureModel()
       convId = currentConvId.value || ''
+      await settingsLoad
+      if (currentConvId.value !== convId) throw new Error('对话已切换，请重新发送')
+      if (settingsLoadError) throw new Error(settingsLoadError)
+      if (!currentBranchId.value) throw new Error('会话正在加载，请稍后重试')
+      ensureModel()
       if (!convId) throw new Error('没有可用对话')
+      if (currentModel.value && models.value.length && !models.value.some(m => m.id === currentModel.value)) {
+        throw new Error(`会话模型 ${currentModel.value} 不可用，请重新选择模型`)
+      }
+      await settingsWrites.get(convId)
+      if (currentConvId.value !== convId) throw new Error('对话已切换，请重新发送')
 
       // Conversation will have content, remove from empty tracking
       pendingEmptyConvs.delete(convId)

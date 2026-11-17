@@ -37,6 +37,12 @@ const isProjectWorkspaceRoute = computed(() => route.name === 'project-workspace
 const paperStore = usePaperStore()
 const currentModelReasoning = computed(() => chatStore.models.find(m => m.id === chatStore.currentModel)?.reasoning)
 const currentModelLevels = computed(() => chatStore.models.find(m => m.id === chatStore.currentModel)?.thinkingLevels)
+const formatMessageTime = (value: string) => {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(undefined, {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+}
 
 const inputText = ref('')
 const editingMessageId = ref('')
@@ -1529,6 +1535,7 @@ const contextUsageTitle = computed(() => {
             <svg v-if="copiedMsgId !== msg.id" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
           </button>
+          <time v-if="msg.content?.trim() && formatMessageTime(msg.createdAt)" class="msg-time" :datetime="msg.createdAt">{{ formatMessageTime(msg.createdAt) }}</time>
           <button
             v-if="recoveryForMessage(msg.id)"
             class="msg-recovery-btn"
@@ -1730,6 +1737,9 @@ const contextUsageTitle = computed(() => {
 .chat-empty .empty-icon { opacity: 0.4; }
 .chat-empty p { font-size: 14px; color: var(--color-text-secondary); }
 .msg { width: 88%; max-width: 88%; position: relative; min-width: 0; }
+.msg-time { color: var(--color-text-muted); font-size: 11px; opacity: 0; transition: opacity 0.15s; }
+.msg:hover .msg-time, .msg:focus-within .msg-time { opacity: 1; }
+@media (hover: none) { .msg-time { opacity: 1; } }
 .msg > .msg-body, .msg > .msg-tool, .msg > .msg-thinking { margin-top: 6px; }
 .msg > .msg-body:first-child, .msg > .msg-tool:first-child { margin-top: 0; }
 .msg-body { width: fit-content; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-wrap: anywhere; word-break: break-word; white-space: normal; }

@@ -361,9 +361,12 @@ export class PiRuntimeRegistry {
       ensureAgentWorkspace(),
       resolveConversationWorkspace(key.conversationId),
     ])
-    let sessionFile = await piConversationService.getSessionFile(key.conversationId, key.branchId)
+    let [sessionFile, leafEntryId] = await Promise.all([
+      piConversationService.getSessionFile(key.conversationId, key.branchId),
+      piConversationService.getLeafEntryId(key.conversationId, key.branchId),
+    ])
     if (sessionFile) {
-      try { await access(sessionFile) } catch { sessionFile = null }
+      try { await access(sessionFile) } catch { sessionFile = null; leafEntryId = null }
     }
     let emitFromTool = (_event: ChatEvent) => {}
     let recordRef: RuntimeRecord | undefined
@@ -435,6 +438,7 @@ export class PiRuntimeRegistry {
         agentDir: agentWorkspace.agentDir,
         sessionDir,
         sessionFile,
+        leafEntryId,
         globalAgentsFile: resolve(config.dataDir, 'AGENTS.md'),
         model: model || conversation?.model || undefined,
         thinkingLevel,

@@ -40,25 +40,27 @@ export async function savePiSessionMetadata(
   branchId: string,
   metadata: PiSessionMetadata
 ): Promise<void> {
-  const conv = await prisma.conversation.findUnique({
-    where: { id: conversationId },
-    select: { metadata: true },
-  })
-  const existingMeta = (conv?.metadata || {}) as any
-  const sessions = existingMeta?.pi?.sessions || {}
-  sessions[branchId] = { ...sessions[branchId], ...metadata }
+  await prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<Array<{ metadata: unknown }>>`
+      SELECT metadata FROM conversations WHERE id = ${conversationId}::uuid FOR UPDATE
+    `
+    if (!rows[0]) return
+    const existingMeta = (rows[0].metadata || {}) as any
+    const sessions = existingMeta?.pi?.sessions || {}
+    sessions[branchId] = { ...sessions[branchId], ...metadata }
 
-  await prisma.conversation.update({
-    where: { id: conversationId },
-    data: {
-      metadata: {
-        ...existingMeta,
-        pi: {
-          ...(existingMeta?.pi || {}),
-          sessions,
+    await tx.conversation.update({
+      where: { id: conversationId },
+      data: {
+        metadata: {
+          ...existingMeta,
+          pi: {
+            ...(existingMeta?.pi || {}),
+            sessions,
+          },
         },
       },
-    },
+    })
   })
 }
 

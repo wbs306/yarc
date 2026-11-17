@@ -340,6 +340,7 @@ export type CurrentChatResource =
 
 export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ChatThinkingLevel = 'off' | ThinkingLevel
+export interface ConversationModelSettings { model: string; reasoningEffort: ChatThinkingLevel }
 
 export interface ChatRequest {
   type: 'chat'

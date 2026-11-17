@@ -1,5 +1,6 @@
 import type {
   FileNode,
+  ConversationModelSettings,
   IeeeJournalBrowserPreferences,
   LatexBuild,
   LatexBuildLog,
@@ -264,7 +265,15 @@ export function useApi() {
         params: projectId === undefined ? undefined : { projectId: projectId || '' },
       }),
 
-    createConversation: (data?: { paperId?: string; projectId?: string; title?: string; model?: string }) =>
+    getConversationModelSettings: (id: string) =>
+      request<{ model: string | null; modelSettings: ConversationModelSettings | null }>(`/conversations/${id}/model-settings`),
+
+    updateConversationModelSettings: (id: string, settings: ConversationModelSettings) =>
+      request<{ modelSettings: ConversationModelSettings }>(`/conversations/${id}/model-settings`, {
+        method: 'PUT', body: JSON.stringify(settings),
+      }),
+
+    createConversation: (data?: { paperId?: string; projectId?: string; title?: string; model?: string; modelSettings?: ConversationModelSettings }) =>
       request<{ conversation: any }>('/conversations', {
         method: 'POST',
         body: JSON.stringify(data || {}),

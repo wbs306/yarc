@@ -15,6 +15,7 @@ import {
   SessionManager,
 } from '@earendil-works/pi-coding-agent'
 import { getAllPiSessionMetadata } from '../lib/pi-metadata.js'
+import { getSessionBranch } from '../lib/pi-session-leaf.js'
 
 // Types from pi-ai (re-defined locally to avoid import issues)
 type StopReason = 'stop' | 'length' | 'toolUse' | 'error' | 'aborted' | 'pending'
@@ -90,6 +91,7 @@ export interface BranchInfo {
   forkMessageId: string | null
   sessionFile?: string
   leafEntryId?: string
+  thinkingLevel?: string | null
 }
 
 // ── Service ──────────────────────────────────────────────────────────────────
@@ -149,6 +151,7 @@ export class PiConversationService {
       forkMessageId: null,
       sessionFile: sessions.main?.sessionFile,
       leafEntryId: sessions.main?.leafEntryId || undefined,
+      thinkingLevel: sessions.main?.thinkingLevel,
     })
 
     // Add other branches (edit branches)
@@ -161,6 +164,7 @@ export class PiConversationService {
         forkMessageId: info.forkMessageId || null,
         sessionFile: info.sessionFile,
         leafEntryId: info.leafEntryId || undefined,
+        thinkingLevel: info.thinkingLevel,
       })
     }
 
@@ -176,8 +180,8 @@ export class PiConversationService {
 
     try {
       const sm = SessionManager.open(sessionFile)
-      const branch = sm.getBranch()
       const branchMeta = await this.getBranchMeta(conversationId, branchId)
+      const branch = getSessionBranch(sm, branchMeta?.leafEntryId)
       return this.entriesToMessages(branch, branchMeta)
     } catch (err) {
       console.error('[PiConversationService] Failed to read branch messages:', err)
@@ -201,17 +205,7 @@ export class PiConversationService {
    * Get messages for the main branch.
    */
   async getMainBranchMessages(conversationId: string): Promise<ConversationMessage[]> {
-    const mainSessionFile = await this.getMainBranchSessionFile(conversationId)
-    if (!mainSessionFile) return []
-    
-    try {
-      const sm = SessionManager.open(mainSessionFile)
-      const branch = sm.getBranch()
-      return this.entriesToMessages(branch)
-    } catch (err) {
-      console.error('[PiConversationService] Failed to read main branch messages:', err)
-      return []
-    }
+    return this.getBranchMessages(conversationId, 'main')
   }
 
   /**
@@ -353,36 +347,37 @@ export class PiConversationService {
     branchMeta: { parentBranchId?: string | null; forkMessageId?: string | null; forkParentEntryId?: string | null } = {},
     runtimeMeta: { sessionId?: string; model?: string; thinkingLevel?: string } = {}
   ): Promise<void> {
-    const conv = await prisma.conversation.findUnique({
-      where: { id: conversationId },
-      select: { metadata: true },
-    })
-    // A conversation can be deleted while a Runtime Worker is draining its
-    // final event. Treat that as a successful no-op instead of attempting an
-    // update that necessarily fails with Prisma P2025.
-    if (!conv) return
+    await prisma.$transaction(async (tx) => {
+      // Serialize metadata read-modify-write with model-setting and other session writes.
+      const rows = await tx.$queryRaw<Array<{ metadata: unknown }>>`
+        SELECT metadata FROM conversations WHERE id = ${conversationId}::uuid FOR UPDATE
+      `
+      const conv = rows[0]
+      // A conversation may have been deleted while the worker was draining.
+      if (!conv) return
 
-    const meta = { ...((conv.metadata || {}) as Record<string, unknown>) } as any
-    if (!meta.pi) meta.pi = {}
-    if (!meta.pi.sessions) meta.pi.sessions = {}
-    const previous = meta.pi.sessions[branchId] || {}
+      const meta = { ...((conv.metadata || {}) as Record<string, unknown>) } as any
+      if (!meta.pi) meta.pi = {}
+      if (!meta.pi.sessions) meta.pi.sessions = {}
+      const previous = meta.pi.sessions[branchId] || {}
 
-    meta.pi.sessions[branchId] = {
-      ...previous,
-      sessionFile,
-      leafEntryId,
-      ...(runtimeMeta.sessionId !== undefined ? { sessionId: runtimeMeta.sessionId } : {}),
-      ...(runtimeMeta.model !== undefined ? { model: runtimeMeta.model } : {}),
-      ...(runtimeMeta.thinkingLevel !== undefined ? { thinkingLevel: runtimeMeta.thinkingLevel } : {}),
-      parentBranchId: branchMeta.parentBranchId ?? previous.parentBranchId ?? null,
-      forkMessageId: branchMeta.forkMessageId ?? previous.forkMessageId ?? null,
-      forkParentEntryId: branchMeta.forkParentEntryId ?? previous.forkParentEntryId ?? null,
-      updatedAt: new Date().toISOString(),
-    }
+      meta.pi.sessions[branchId] = {
+        ...previous,
+        sessionFile,
+        leafEntryId,
+        ...(runtimeMeta.sessionId !== undefined ? { sessionId: runtimeMeta.sessionId } : {}),
+        ...(runtimeMeta.model !== undefined ? { model: runtimeMeta.model } : {}),
+        ...(runtimeMeta.thinkingLevel !== undefined ? { thinkingLevel: runtimeMeta.thinkingLevel } : {}),
+        parentBranchId: branchMeta.parentBranchId ?? previous.parentBranchId ?? null,
+        forkMessageId: branchMeta.forkMessageId ?? previous.forkMessageId ?? null,
+        forkParentEntryId: branchMeta.forkParentEntryId ?? previous.forkParentEntryId ?? null,
+        updatedAt: new Date().toISOString(),
+      }
 
-    await prisma.conversation.update({
-      where: { id: conversationId },
-      data: { metadata: meta as any },
+      await tx.conversation.update({
+        where: { id: conversationId },
+        data: { metadata: meta as any },
+      })
     })
   }
 

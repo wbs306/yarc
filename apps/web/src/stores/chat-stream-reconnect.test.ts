@@ -209,3 +209,79 @@ test('reconnect replay skips old notifications but live notifications still show
   assert.deepEqual(store.notificationInteractions.map(item => item.requestId), ['live-notice'])
   store.dismissInteraction('live-notice')
 })
+
+test('switching conversations restores their model and reasoning preferences across reloads', async t => {
+  setupBrowser()
+  const storage = new Map<string, string>()
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
+  })
+  const server = new Map<string, { model: string; reasoningEffort: string }>([
+    ['a', { model: 'provider/a', reasoningEffort: 'medium' }],
+    ['b', { model: 'provider/b', reasoningEffort: 'medium' }],
+  ])
+  t.mock.method(globalThis, 'fetch', async (input, init) => {
+    const url = String(input)
+    const settingsMatch = url.match(/\/conversations\/([^/]+)\/model-settings$/)
+    if (settingsMatch) {
+      const id = settingsMatch[1]
+      if (init?.method === 'PUT') server.set(id, JSON.parse(String(init.body)))
+      const settings = server.get(id)!
+      return json({ model: settings.model, modelSettings: settings })
+    }
+    if (url.endsWith('/branches')) return json({ branches: [{ id: 'main', branchName: 'main', parentBranchId: null, forkMessageId: null, thinkingLevel: 'medium' }] })
+    if (url.includes('/switch-branch/')) return json({ messages: [] })
+    if (url.includes('/context-usage?')) return json({ contextUsage: null })
+    if (url.includes('/agent-interactions/runtime/')) return json({ runtime: { commands: [], state: 'idle', surfaces: [], uiEvents: [] } })
+    if (url.endsWith('/streaming-message')) return json({ message: null })
+    throw new Error(`Unexpected API call: ${url}`)
+  })
+  const conversations = [
+    { id: 'a', paperId: null, projectId: null, title: 'A', model: 'provider/a', createdAt: '', updatedAt: '' },
+    { id: 'b', paperId: null, projectId: null, title: 'B', model: 'provider/b', createdAt: '', updatedAt: '' },
+  ]
+  const store = useChatStore(createPinia())
+  store.conversations = conversations
+  await store.selectConversation('a')
+  assert.equal(store.currentModel, 'provider/a')
+  assert.equal(store.reasoningEffort, 'medium')
+  store.setReasoningEffort('high')
+  await store.selectConversation('b')
+  assert.equal(store.currentModel, 'provider/b')
+  store.setReasoningEffort('off')
+  await store.selectConversation('a')
+  assert.equal(store.currentModel, 'provider/a')
+  assert.equal(store.reasoningEffort, 'high')
+  // A fresh browser has no local storage but reads the saved server settings.
+  storage.clear()
+  const reloaded = useChatStore(createPinia())
+  reloaded.conversations = conversations.map(c => ({ ...c, modelSettings: null }))
+  await reloaded.selectConversation('b')
+  assert.equal(reloaded.currentModel, 'provider/b')
+  assert.equal(reloaded.reasoningEffort, 'off')
+  await reloaded.selectConversation('a')
+  assert.equal(reloaded.reasoningEffort, 'high')
+  assert.equal(storage.has('yarc-conversation-model-prefs'), false)
+})
+
+test('a model-settings load failure prevents sending with another conversation’s settings', async t => {
+  setupBrowser()
+  MockWebSocket.instances = []
+  t.mock.method(globalThis, 'fetch', async input => {
+    const url = String(input)
+    if (url.endsWith('/model-settings')) return new Response(JSON.stringify({ error: { message: 'unavailable' } }), { status: 503 })
+    if (url.endsWith('/branches')) return json({ branches: [{ id: 'main', branchName: 'main', parentBranchId: null, forkMessageId: null }] })
+    if (url.includes('/switch-branch/')) return json({ messages: [] })
+    if (url.includes('/context-usage?')) return json({ contextUsage: null })
+    if (url.includes('/agent-interactions/runtime/')) return json({ runtime: { commands: [], state: 'idle', surfaces: [], uiEvents: [] } })
+    if (url.endsWith('/streaming-message')) return json({ message: null })
+    throw new Error(`Unexpected API call: ${url}`)
+  })
+  const store = useChatStore(createPinia())
+  store.conversations = [{ id: 'a', paperId: null, projectId: null, title: 'A', model: 'provider/a', createdAt: '', updatedAt: '' }]
+  await store.selectConversation('a')
+  await store.sendMessage('hello')
+  assert.match(store.chatError, /加载模型设置失败/)
+  assert.equal(MockWebSocket.instances.length, 0)
+})

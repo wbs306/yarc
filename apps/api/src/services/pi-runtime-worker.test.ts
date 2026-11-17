@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
+import { SessionManager } from '@earendil-works/pi-coding-agent'
 import test from 'node:test'
 
 const waitForMessage = <T = any>(worker: Worker, predicate: (message: any) => boolean, timeoutMs = 15_000) => new Promise<T>((resolvePromise, reject) => {
@@ -27,6 +28,52 @@ const waitForMessage = <T = any>(worker: Worker, predicate: (message: any) => bo
   }
   worker.on('message', onMessage)
   worker.on('error', onError)
+})
+
+test('Runtime Worker restores the persisted active leaf when reopening a session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'yarc-pi-runtime-leaf-'))
+  const agentDir = join(root, 'agent')
+  const sessionDir = join(agentDir, 'sessions')
+  await mkdir(sessionDir, { recursive: true })
+
+  const manager = SessionManager.create(root, sessionDir)
+  const rootEntryId = manager.appendMessage({ role: 'user', content: 'root', timestamp: 1 } as any)
+  const activeLeafId = manager.appendMessage({
+    role: 'assistant', content: [{ type: 'text', text: 'active' }], stopReason: 'stop', timestamp: 1,
+  } as any)
+  manager.branch(rootEntryId)
+  const offPathEntryId = manager.appendMessage({
+    role: 'assistant', content: [{ type: 'text', text: 'off path' }], stopReason: 'stop', timestamp: 1,
+  } as any)
+  const sessionFile = manager.getSessionFile()
+  assert.ok(sessionFile)
+
+  const worker = new Worker(new URL('../workers/pi-session.worker.ts', import.meta.url), {
+    execArgv: ['--import', createRequire(import.meta.url).resolve('tsx')],
+  })
+  try {
+    worker.postMessage({
+      type: 'init',
+      payload: {
+        key: { conversationId: 'leaf-test', branchId: 'main' },
+        generation: 1,
+        cwd: root,
+        agentDir,
+        sessionDir,
+        sessionFile,
+        leafEntryId: activeLeafId,
+        tools: [],
+      },
+    })
+    const ready: any = await waitForMessage(worker, message => message.type === 'ready')
+    const reopened = SessionManager.open(sessionFile, sessionDir, root)
+    const activeBranch = reopened.getBranch(ready.metadata.leafEntryId)
+    assert.ok(activeBranch.some(entry => entry.id === activeLeafId))
+    assert.ok(!activeBranch.some(entry => entry.id === offPathEntryId))
+  } finally {
+    await worker.terminate()
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('Runtime Worker keeps an extension command alive through a Web TUI interaction', async () => {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { prisma } from '@yarc/db'
-import { conversationService } from './conversation.service.js'
+import { conversationService, parseConversationModelSettings } from './conversation.service.js'
 import { piConversationService } from './pi-conversation.service.js'
 import { searchService } from './search.service.js'
 import { embeddingService } from './embedding.service.js'
@@ -47,7 +47,12 @@ export class ChatService {
     const { model, context, editMessageId, retryMessageId } = preparedRequest
 
     if (editMessageId && retryMessageId) throw new Error('A message cannot be edited and retried at the same time')
-    if (model) await conversationService.updateModel(conversationId, model)
+    const settings = parseConversationModelSettings({
+      model,
+      reasoningEffort: preparedRequest.thinking_enabled === false ? 'off' : preparedRequest.reasoning_effort,
+    })
+    if (settings) await conversationService.updateModelSettings(conversationId, settings)
+    else if (model) await conversationService.updateModel(conversationId, model)
 
     if (editMessageId) {
       // For edit messages, create a new branch via PiConversationService
