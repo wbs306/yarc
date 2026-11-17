@@ -22,6 +22,7 @@ import type {
 } from '../lib/pi-runtime/protocol.js'
 import { SessionDurabilityCoordinator } from '../lib/pi-runtime/session-durability.js'
 import { restoreSessionLeaf } from '../lib/pi-session-leaf.js'
+import { modelRefOf, resolveModelRef, sameModel } from '../lib/model-ref.js'
 import { createSessionSettings } from '../lib/pi-runtime/session-settings.js'
 import { AssistantAbortCoalescer } from '../lib/pi-runtime/assistant-abort-coalescer.js'
 import { isQuiescent, waitForRuntimeQuiescence } from '../lib/pi-runtime/quiescence.js'
@@ -152,7 +153,7 @@ const metadata = (): RuntimeMetadata => {
         tokens: usage?.tokens ?? 0,
         contextWindow,
         percent: usage?.percent ?? (contextWindow > 0 ? 0 : null),
-        model: session?.model?.id,
+        model: modelRefOf(session?.model),
       }
     : undefined
   return {
@@ -161,7 +162,7 @@ const metadata = (): RuntimeMetadata => {
     sessionFile: session?.sessionFile,
     sessionId: session?.sessionId,
     leafEntryId: session?.sessionManager?.getLeafId?.() || null,
-    model: session?.model?.id,
+    model: modelRefOf(session?.model),
     thinkingLevel: session?.thinkingLevel,
     ...(contextUsage ? { contextUsage } : {}),
     updatedAt: new Date().toISOString(),
@@ -178,7 +179,7 @@ const emitContextUsage = () => {
     tokens: usage.tokens,
     contextWindow: usage.contextWindow,
     percent: usage.percent,
-    model: session.model?.id,
+    model: modelRefOf(session.model),
     conversationId: key?.conversationId,
     branchId: key?.branchId,
   })
@@ -189,16 +190,7 @@ const thinkingLevel = (value?: string, enabled?: boolean): any => {
   return value || 'medium'
 }
 
-const resolveModel = async (modelRuntime: any, modelId?: string) => {
-  if (!modelId) return undefined
-  const [provider, id] = modelId.split('/')
-  let model = provider && id ? modelRuntime.getModel(provider, id) : undefined
-  if (!model) {
-    const available = await modelRuntime.getAvailable()
-    model = available.find((candidate: any) => candidate.id === modelId)
-  }
-  return model
-}
+const resolveModel = (modelRuntime: any, modelId?: string): Promise<any> => resolveModelRef(modelRuntime, modelId)
 
 const cloneSchema = (schema: Record<string, unknown>) => Unsafe(schema as any)
 
@@ -1061,10 +1053,11 @@ const waitForCommandIdle = async () => {
 const configureSession = async (payload: { model?: string; thinkingLevel?: string; thinkingEnabled?: boolean }) => {
   if (payload.model) requestedModelId = payload.model
   if (payload.thinkingLevel) requestedThinkingLevel = payload.thinkingLevel
-  if (payload.model && session?.model?.id !== payload.model) {
+  // Compare provider and id: the same bare id may belong to several providers.
+  if (payload.model && modelRefOf(session?.model) !== payload.model) {
     const model = await resolveModel(runtime.services.modelRuntime, payload.model)
     if (!model) throw new Error(`Model not found: ${payload.model}`)
-    await session.setModel(model)
+    if (!sameModel(session?.model, model)) await session.setModel(model)
   }
   session.setThinkingLevel(thinkingLevel(payload.thinkingLevel || requestedThinkingLevel, payload.thinkingEnabled))
 }
@@ -1126,7 +1119,7 @@ const runPrompt = async (payload: Extract<RuntimeHostMessage, { type: 'prompt' }
     await configureSession(payload)
     emit({
       type: 'session_state',
-      model: session.model?.id || '',
+      model: modelRefOf(session.model) || '',
       thinkingLevel: session.thinkingLevel || 'off',
       models: [],
       ...(key ? { conversationId: key.conversationId, branchId: key.branchId } : {}),

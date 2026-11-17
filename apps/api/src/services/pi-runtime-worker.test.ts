@@ -356,7 +356,7 @@ export default function (pi) {
         assert.ok(after.tokens > before.tokens, 'usage should include the newly appended tool result')
         assert.equal(after.contextWindow, 10000)
         assert.equal(after.percent, after.tokens / 10000 * 100)
-        assert.equal(after.model, 'mock')
+        assert.equal(after.model, 'acm-mock/mock')
         assert.equal(after.conversationId, 'auto-acm')
         assert.equal(after.branchId, 'main')
       }
@@ -441,6 +441,60 @@ export default function (pi) {
     assert.equal(settings.defaultProvider, 'test')
     assert.equal(settings.defaultModel, 'one')
     assert.equal(settings.defaultThinkingLevel, 'low')
+  } finally {
+    await worker.terminate()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Runtime Worker distinguishes same-id models from different providers', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'yarc-pi-runtime-model-ref-'))
+  const agentDir = join(root, 'agent')
+  const sessionDir = join(agentDir, 'sessions')
+  const extensionsDir = join(agentDir, 'extensions')
+  await mkdir(sessionDir, { recursive: true })
+  await mkdir(extensionsDir, { recursive: true })
+  const sharedModel = { id: 'shared', name: 'Shared', reasoning: false, contextWindow: 1_000, maxTokens: 100 }
+  await writeFile(join(agentDir, 'models.json'), JSON.stringify({
+    providers: {
+      alpha: { api: 'openai-completions', baseUrl: 'http://127.0.0.1:1/v1', models: [sharedModel] },
+      beta: { api: 'openai-completions', baseUrl: 'http://127.0.0.1:2/v1', models: [sharedModel] },
+    },
+  }) + '\n')
+  await writeFile(join(agentDir, 'auth.json'), JSON.stringify({
+    alpha: { type: 'api_key', key: 'test-only' },
+    beta: { type: 'api_key', key: 'test-only' },
+  }) + '\n')
+  await writeFile(join(extensionsDir, 'noop.js'), `
+export default function (pi) {
+  pi.registerCommand('noop', { handler: async () => {} })
+}
+`, 'utf8')
+
+  const worker = new Worker(new URL('../workers/pi-session.worker.ts', import.meta.url), {
+    execArgv: ['--import', createRequire(import.meta.url).resolve('tsx')],
+  })
+  const run = async (runId: string, model: string) => {
+    const completed = waitForMessage(worker, message => message.type === 'run_complete' && message.runId === runId)
+    worker.postMessage({
+      type: 'prompt',
+      payload: { runId, prompt: '/noop', assistantMessageId: 'assistant-' + runId, model, thinkingEnabled: false },
+    })
+    return (await completed).metadata
+  }
+
+  try {
+    worker.postMessage({
+      type: 'init',
+      payload: {
+        key: { conversationId: 'model-ref-conversation', branchId: 'main' },
+        generation: 1, cwd: root, agentDir, sessionDir, model: 'alpha/shared', tools: [],
+      },
+    })
+    const ready = await waitForMessage(worker, message => message.type === 'ready')
+    assert.equal(ready.metadata.model, 'alpha/shared')
+    assert.equal((await run('to-beta', 'beta/shared')).model, 'beta/shared')
+    assert.equal((await run('back-to-alpha', 'alpha/shared')).model, 'alpha/shared')
   } finally {
     await worker.terminate()
     await rm(root, { recursive: true, force: true })

@@ -22,6 +22,7 @@ import { assertGlobalFilesPathSafe } from '../lib/global-files-path.js'
 import { applyAgentWorkspaceEnv, ensureAgentWorkspace, readAgentSettings } from '../lib/agent-workspace.js'
 import { getPiSessionMetadata, savePiSessionMetadata } from '../lib/pi-metadata.js'
 import { restoreSessionLeaf } from '../lib/pi-session-leaf.js'
+import { modelRefOf, resolveModelRef, toModelRef } from '../lib/model-ref.js'
 import { DEFAULT_CHAT_SYSTEM_PROMPT } from '../lib/prompts.js'
 import { agentInteractionRegistry } from '../lib/agent-interaction-registry.js'
 import { liveFileService } from './live-file.service.js'
@@ -200,7 +201,7 @@ export class PiService {
         sessionFile,
         sessionId: session.sessionId,
         leafEntryId: session.sessionManager?.getLeafId?.() || null,
-        model: session.model?.id || null,
+        model: modelRefOf(session.model) || null,
         thinkingLevel: session.thinkingLevel || null,
         updatedAt: new Date().toISOString(),
       })
@@ -307,18 +308,20 @@ export class PiService {
   }
 
   /** Filter models by enabledModels patterns from Pi settings. Returns all models if no patterns configured. */
-  private async filterByEnabledModels<T extends { id: string; model?: string }>(models: T[]): Promise<T[]> {
+  private async filterByEnabledModels<T extends { id: string; model?: string; provider?: string }>(models: T[]): Promise<T[]> {
     try {
       const settings = await readAgentSettings()
       const patterns: string[] = settings.enabledModels
       if (!Array.isArray(patterns) || patterns.length === 0) return models
-      const matches = (modelId: string, modelModel: string) =>
+      // Like Pi's own enabledModels scope, a pattern may target the bare model
+      // id or the canonical `provider/modelId` reference.
+      const matches = (candidates: string[]) =>
         patterns.some((pattern: string) => {
-          if (pattern === modelId) return true
+          if (candidates.includes(pattern)) return true
           const regex = new RegExp('^' + pattern.replace(/\*/g, '.*').replace(/\?/g, '.') + '$')
-          return regex.test(modelId) || regex.test(modelModel)
+          return candidates.some(candidate => regex.test(candidate))
         })
-      return models.filter(m => matches(m.id, m.model || m.id))
+      return models.filter(m => matches([m.id, m.model || m.id, ...(m.provider ? [`${m.provider}/${m.id}`] : [])]))
     } catch {
       return models
     }
@@ -529,15 +532,7 @@ export class PiService {
     if (!conv) return null
 
     const modelId = conv.model || info?.model || undefined
-    let model: any = undefined
-    if (modelId) {
-      const parts = modelId.split('/')
-      if (parts.length === 2) model = this.modelRuntime?.getModel(parts[0], parts[1])
-      if (!model) {
-        const available = await this.modelRuntime?.getAvailable()
-        model = available?.find((m: any) => m.id === modelId)
-      }
-    }
+    const model: any = await resolveModelRef(this.modelRuntime, modelId)
 
     const sessionFile = info?.sessionFile
     if (!sessionFile || !(await this.fileExists(sessionFile))) {
@@ -546,7 +541,7 @@ export class PiService {
         tokens: 0,
         contextWindow,
         percent: contextWindow > 0 ? 0 : null,
-        model: model?.id || modelId,
+        model: modelRefOf(model) || modelId,
       }
     }
 
@@ -579,7 +574,7 @@ export class PiService {
         tokens,
         contextWindow,
         percent: usage?.percent ?? (contextWindow > 0 && tokens !== null ? (tokens / contextWindow) * 100 : null),
-        model: session.model?.id || model?.id || modelId,
+        model: modelRefOf(session.model) || modelRefOf(model) || modelId,
       }
     } catch (err) {
       console.warn('[PiService] getConversationContextUsage failed:', err)
@@ -2479,15 +2474,7 @@ export class PiService {
     const agentWorkspace = await ensureAgentWorkspace()
 
     // Resolve model
-    let model: any = undefined
-    if (options.model) {
-      const parts = options.model.split('/')
-      if (parts.length === 2) model = this.modelRuntime?.getModel(parts[0], parts[1])
-      if (!model) {
-        const available = await this.modelRuntime?.getAvailable()
-        model = available?.find((m: any) => m.id === options.model)
-      }
-    }
+    const model: any = await resolveModelRef(this.modelRuntime, options.model)
 
     // Build resource loader
     let resourceLoader: any
@@ -2645,15 +2632,7 @@ export class PiService {
     const { createAgentSession, DefaultResourceLoader } = this.piModule
     const agentWorkspace = await ensureAgentWorkspace()
 
-    let model: any = undefined
-    if (options.model) {
-      const parts = options.model.split('/')
-      if (parts.length === 2) model = this.modelRuntime?.getModel(parts[0], parts[1])
-      if (!model) {
-        const available = await this.modelRuntime?.getAvailable()
-        model = available?.find((item: any) => item.id === options.model)
-      }
-    }
+    const model: any = await resolveModelRef(this.modelRuntime, options.model)
 
     let resourceLoader: any
     try {
@@ -2727,7 +2706,7 @@ export class PiService {
         tokens,
         contextWindow,
         percent: contextWindow > 0 && tokens !== null ? (tokens / contextWindow) * 100 : null,
-        model: session.model?.id,
+        model: modelRefOf(session.model),
       }
       yield { type: 'done' }
     } catch (err) {
@@ -2789,12 +2768,7 @@ export class PiService {
       let assistantModel = options.assistantModel
       try {
         if (!assistantModel && options.model) {
-          const [provider, modelId] = options.model.split('/')
-          if (provider && modelId) assistantModel = this.modelRuntime?.getModel(provider, modelId)
-          if (!assistantModel) {
-            const available = await this.modelRuntime?.getAvailable?.() || []
-            assistantModel = available.find((candidate: any) => candidate.id === options.model)
-          }
+          assistantModel = await resolveModelRef(this.modelRuntime, options.model)
         }
         if (!assistantModel) {
           const available = await this.modelRuntime?.getAvailable?.() || []
@@ -2892,17 +2866,7 @@ export class PiService {
     const enabledTools = this.filterChatTools(yarcTools)
 
     // Resolve model: use requested model or fall back to first available
-    let model: any = undefined
-    if (options.model) {
-      const parts = options.model.split('/')
-      if (parts.length === 2) {
-        model = this.modelRuntime?.getModel(parts[0], parts[1])
-      }
-      if (!model) {
-        const available = await this.modelRuntime?.getAvailable()
-        model = available?.find((m: any) => m.id === options.model)
-      }
-    }
+    const model: any = await resolveModelRef(this.modelRuntime, options.model)
 
     // Resolve the persistent session before fallible resource/session setup so
     // a setup error can still be represented by canonical user/error entries.
@@ -3037,9 +3001,9 @@ export class PiService {
         const available = await this.filterByEnabledModels(await this.modelRuntime?.getAvailable() || [])
         push({
           type: 'session_state',
-          model: session.model?.id || '',
+          model: modelRefOf(session.model) || '',
           thinkingLevel: session.thinkingLevel || 'off',
-          models: (available || []).map((m: any) => ({ id: m.id, name: m.name, reasoning: m.reasoning })),
+          models: (available || []).map((m: any) => ({ id: toModelRef(m), model: m.id, name: m.name, provider: m.provider, reasoning: m.reasoning })),
         })
       } catch { /* ignore */ }
 
@@ -3054,7 +3018,7 @@ export class PiService {
             tokens,
             contextWindow,
             percent: usage?.percent ?? (contextWindow > 0 && tokens !== null ? (tokens / contextWindow) * 100 : null),
-            model: session.model?.id,
+            model: modelRefOf(session.model),
           })
         } catch { /* non-fatal */ }
       }
@@ -3569,7 +3533,9 @@ export class PiService {
       const enabledModels = await this.filterByEnabledModels(allModels)
       const models = enabledModels
         .map((m: any) => ({
-          id: m.id,
+          // Canonical `provider/modelId`: bare ids collide across providers.
+          id: toModelRef(m),
+          model: m.id,
           name: m.name || m.id,
           provider: m.provider,
           reasoning: m.reasoning ?? false,

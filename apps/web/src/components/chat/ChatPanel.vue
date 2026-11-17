@@ -778,10 +778,13 @@ const handleWebSlashCommand = async (text: string): Promise<boolean> => {
     }
 
     const normalized = query.toLowerCase()
-    const exact = chatStore.models.find(model =>
-      model.id.toLowerCase() === normalized || model.name.toLowerCase() === normalized
+    // Ids are canonical `provider/modelId`; a bare id or name shared by several
+    // providers is ambiguous and must not silently pick the first provider.
+    const byRef = chatStore.models.filter(model => model.id.toLowerCase() === normalized)
+    const exact = byRef.length ? byRef : chatStore.models.filter(model =>
+      [model.model, model.name].some(value => value?.toLowerCase() === normalized)
     )
-    const matches = exact ? [exact] : chatStore.models.filter(model =>
+    const matches = exact.length ? exact : chatStore.models.filter(model =>
       model.id.toLowerCase().includes(normalized) || model.name.toLowerCase().includes(normalized)
     )
     if (matches.length === 1) {

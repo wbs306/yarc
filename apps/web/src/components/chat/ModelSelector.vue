@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { buildModelLabels, modelDisplayName } from '@/lib/model-label'
 
 interface Model {
   id: string
   name: string
+  provider?: string
+  model?: string
   reasoning?: boolean
 }
 
@@ -18,9 +21,20 @@ const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 const open = ref(false)
 const container = ref<HTMLElement | null>(null)
 
-const options = computed(() =>
-  props.models.map(m => ({ value: m.id, label: m.name || m.id, reasoning: !!m.reasoning }))
-)
+const options = computed(() => {
+  // Same display name from different providers gets a provider tag.
+  const labels = buildModelLabels(props.models)
+  return props.models.map(m => {
+    const label = labels.get(m.id)
+    return {
+      value: m.id,
+      label: label?.name || modelDisplayName(m),
+      tag: label?.tag || '',
+      title: m.provider ? `${m.provider} · ${m.model || m.id}` : m.id,
+      reasoning: !!m.reasoning,
+    }
+  })
+})
 const selected = computed(() => options.value.find(o => o.value === props.modelValue))
 
 const select = (value: string) => {
@@ -44,8 +58,9 @@ onUnmounted(() => document.removeEventListener('mousedown', onDocClick))
 
 <template>
   <div ref="container" class="model-selector">
-    <button class="model-trigger" :class="{ open }" :disabled="disabled" @click="open = !open">
+    <button class="model-trigger" :class="{ open }" :disabled="disabled" :title="selected?.title" @click="open = !open">
       <span class="model-trigger-label">{{ selected?.label || '选择模型' }}</span>
+      <span v-if="selected?.tag" class="model-provider-tag">{{ selected.tag }}</span>
       <svg class="model-chevron" :class="{ rotated: open }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
     </button>
 
@@ -56,9 +71,11 @@ onUnmounted(() => document.removeEventListener('mousedown', onDocClick))
           :key="opt.value"
           class="model-option"
           :class="{ active: opt.value === modelValue }"
+          :title="opt.title"
           @click="select(opt.value)"
         >
           <span class="model-option-name">{{ opt.label }}</span>
+          <span v-if="opt.tag" class="model-provider-tag">{{ opt.tag }}</span>
           <svg v-if="opt.value === modelValue" class="model-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
         </button>
       </div>
@@ -144,6 +161,22 @@ onUnmounted(() => document.removeEventListener('mousedown', onDocClick))
 .model-option.active { background: var(--color-primary-soft); color: var(--color-primary); font-weight: 500; }
 
 .model-option-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-provider-tag {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-bg-muted);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+.model-trigger .model-provider-tag,
+.model-option:hover .model-provider-tag { background: var(--color-bg-card); }
 .model-check { flex-shrink: 0; color: var(--color-primary); }
 
 .model-drop-enter-active, .model-drop-leave-active { transition: opacity 0.15s ease, transform 0.15s ease; }

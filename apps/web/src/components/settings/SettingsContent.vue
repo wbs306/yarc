@@ -972,7 +972,13 @@ const isModelEnabled = (m: any): boolean => {
 const toggleModel = (m: any) => {
   const id = m.id || `${m.provider}/${m.model}`
   if (isModelEnabled(m)) {
-    enabledModels.value = enabledModels.value.filter(p => p !== id)
+    // A bare-id pattern (e.g. `gpt-4o`) also enables same-id models of other
+    // providers; keep those enabled via their canonical `provider/modelId`.
+    const othersEnabled = models.value.filter((other: any) => other !== m && isModelEnabled(other))
+    enabledModels.value = enabledModels.value.filter(p => p !== id && (!m.model || p !== m.model))
+    for (const other of othersEnabled) {
+      if (!isModelEnabled(other)) enabledModels.value.push(other.id || `${other.provider}/${other.model}`)
+    }
   } else {
     enabledModels.value.push(id)
   }

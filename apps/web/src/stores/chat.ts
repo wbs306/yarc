@@ -427,7 +427,10 @@ export const useChatStore = defineStore('chat', () => {
     if (!models.value.length) return
     if (!currentModel.value) setCurrentModel(models.value[0].id)
     else if (!models.value.some(m => m.id === currentModel.value)) {
-      const legacyMatch = models.value.find(m => m.id.endsWith('/' + currentModel.value))
+      // Model ids are canonical `provider/modelId`; older conversations stored
+      // the bare model id, which resolves to its first provider as before.
+      const legacyMatch = models.value.find(m => m.model === currentModel.value)
+        || models.value.find(m => m.id.endsWith('/' + currentModel.value))
       if (legacyMatch) setCurrentModel(legacyMatch.id)
     }
   }
