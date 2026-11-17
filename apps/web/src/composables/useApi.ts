@@ -497,14 +497,26 @@ export function useApi() {
         signal: options.signal,
       }),
 
-    getFileIndex: () =>
-      request<{ files: string[] }>(filesEndpoint('/index'), { cache: 'no-store' }),
+    // projectId: undefined follows the current URL; null forces the global
+    // workspace. The chat passes its own scope because it is not tied to the page.
+    getFileIndex: (projectId?: string | null) =>
+      request<{ files: string[] }>(
+        projectId === undefined
+          ? filesEndpoint('/index')
+          : projectId
+            ? `/projects/${encodeURIComponent(projectId)}/files/index`
+            : '/files/index',
+        { cache: 'no-store' },
+      ),
 
+    // projectId: undefined follows the current URL; null forces the global workspace.
     resolveFileReference: (path: string, projectId?: string | null) =>
       request<{ file: ResolvedWorkspaceFileReference | null }>(
-        projectId
-          ? `/projects/${encodeURIComponent(projectId)}/files/resolve-reference`
-          : filesEndpoint('/resolve-reference'),
+        projectId === undefined
+          ? filesEndpoint('/resolve-reference')
+          : projectId
+            ? `/projects/${encodeURIComponent(projectId)}/files/resolve-reference`
+            : '/files/resolve-reference',
         { params: { path } },
       ),
 

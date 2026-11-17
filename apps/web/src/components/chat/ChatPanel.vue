@@ -11,14 +11,16 @@ import ReasoningEffort from './ReasoningEffort.vue'
 import AgentInteractionHost from '@/components/agent/AgentInteractionHost.vue'
 import ExtensionTuiSurface from '@/components/agent/ExtensionTuiSurface.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
-import type { CurrentChatResource } from '@yarc/shared'
+import type { CurrentChatResource, Project } from '@yarc/shared'
+import { requestJson } from '@/lib/api-request'
+import { isPublicSharedFilePath } from '@/lib/chat-scope'
+import { useProjectsStore } from '@/stores/projects'
 import { useRoute } from 'vue-router'
 
 const props = defineProps<{
   currentResource?: CurrentChatResource | null
   currentResourceNotice?: string
   showCurrentResourceNotice?: boolean
-  createConversation?: () => Promise<unknown>
   resolveFileReference?: (path: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
@@ -26,14 +28,78 @@ const emit = defineEmits<{
   openFile: [path: string]
 }>()
 const chatStore = useChatStore()
+const projectsStore = useProjectsStore()
 const route = useRoute()
-const createConversation = () => props.createConversation ? props.createConversation() : chatStore.createConversation()
+// New conversations follow the chat's own scope (see chatStore.conversationScope),
+// not the page that is currently visible.
+const createConversation = () => chatStore.createConversation()
 const theme = useThemeStore()
-const projectRouteScope = computed(() => {
-  const id = typeof route.params.id === 'string' ? route.params.id : ''
-  return id && (route.name === 'project-workspace' || route.name === 'project-settings') ? `project:${id}` : 'global'
+// @file suggestions and file-change invalidation follow the chat scope, because
+// message paths are resolved relative to the conversation's workspace.
+const chatScopeKey = computed(() => chatStore.conversationScope ? `project:${chatStore.conversationScope}` : 'global')
+const isProjectChat = computed(() => !!chatStore.conversationScope)
+
+// ── Chat scope switcher (global / one project) ──────────────────────────────────
+// Uses its own active-project list so it never replaces the projects store's
+// list (which may be showing archived projects on the projects page).
+const scopeMenuOpen = ref(false)
+const scopeMenuRef = ref<HTMLElement>()
+const scopeProjects = ref<Project[]>([])
+const scopeProjectsLoading = ref(false)
+const scopeProjectsError = ref('')
+let scopeProjectsRequest = 0
+const loadScopeProjects = async () => {
+  const request = ++scopeProjectsRequest
+  scopeProjectsLoading.value = true
+  scopeProjectsError.value = ''
+  try {
+    const data = await requestJson<{ projects: Project[] }>('/api/projects')
+    if (request !== scopeProjectsRequest) return
+    scopeProjects.value = data.projects.filter(project => !project.archivedAt)
+    // A persisted scope may point at a project archived or deleted elsewhere.
+    // Keep it while that project's own page is open (e.g. an archived project
+    // opened by URL); the page, not this list, decides whether it exists.
+    const scope = chatStore.conversationScope
+    const routeProjectId = (route.name === 'project-workspace' || route.name === 'project-settings') && typeof route.params.id === 'string'
+      ? route.params.id
+      : null
+    if (scope && scope !== routeProjectId && !scopeProjects.value.some(project => project.id === scope)) {
+      void chatStore.setConversationScope(null)
+    }
+  } catch (err) {
+    if (request === scopeProjectsRequest) scopeProjectsError.value = (err as Error).message || '无法加载项目列表'
+  } finally {
+    if (request === scopeProjectsRequest) scopeProjectsLoading.value = false
+  }
+}
+const chatScopeLabel = computed(() => {
+  const scope = chatStore.conversationScope
+  if (!scope) return '通用'
+  return scopeProjects.value.find(project => project.id === scope)?.name
+    || (projectsStore.currentProject?.id === scope ? projectsStore.currentProject.name : '')
+    || projectsStore.projects.find(project => project.id === scope)?.name
+    || '科研项目'
 })
-const isProjectWorkspaceRoute = computed(() => route.name === 'project-workspace' && typeof route.params.id === 'string')
+const toggleScopeMenu = () => {
+  scopeMenuOpen.value = !scopeMenuOpen.value
+  if (scopeMenuOpen.value) {
+    convMenuOpen.value = false
+    void loadScopeProjects()
+  }
+}
+const selectChatScope = (projectId: string | null) => {
+  scopeMenuOpen.value = false
+  void chatStore.setConversationScope(projectId)
+}
+const onScopeMenuDocClick = (e: MouseEvent) => {
+  if (!scopeMenuRef.value?.contains(e.target as Node)) scopeMenuOpen.value = false
+}
+watch(scopeMenuOpen, (open) => {
+  if (open) document.addEventListener('mousedown', onScopeMenuDocClick)
+  else document.removeEventListener('mousedown', onScopeMenuDocClick)
+})
+onMounted(() => { void loadScopeProjects() })
+onBeforeUnmount(() => document.removeEventListener('mousedown', onScopeMenuDocClick))
 const paperStore = usePaperStore()
 const currentModelReasoning = computed(() => chatStore.models.find(m => m.id === chatStore.currentModel)?.reasoning)
 const currentModelLevels = computed(() => chatStore.models.find(m => m.id === chatStore.currentModel)?.thinkingLevels)
@@ -214,7 +280,8 @@ let globalFileIndexLoadSequence = 0
 let globalFileIndexLoadPromise: Promise<void> | null = null
 
 const loadFileIndex = async () => {
-  const scope = projectRouteScope.value
+  const scope = chatScopeKey.value
+  const projectId = chatStore.conversationScope
   if (fileIndexLoaded.value && fileIndexCacheScope.value === scope) return
   if (fileIndexLoadPromise && fileIndexLoadScope === scope) return fileIndexLoadPromise
 
@@ -223,8 +290,8 @@ const loadFileIndex = async () => {
   const request = (async () => {
     try {
       const api = (await import('@/composables/useApi')).useApi()
-      const res = await api.getFileIndex()
-      if (sequence !== fileIndexLoadSequence || scope !== projectRouteScope.value) return
+      const res = await api.getFileIndex(projectId)
+      if (sequence !== fileIndexLoadSequence || scope !== chatScopeKey.value) return
       fileIndexCache.value = (res.files || []).filter((path): path is string => typeof path === 'string' && !!path)
       fileIndexCacheScope.value = scope
       fileIndexLoaded.value = true
@@ -238,12 +305,6 @@ const loadFileIndex = async () => {
   return request
 }
 
-const isPublicGlobalFilePath = (path: string) => {
-  const segments = path.split('/').filter(Boolean)
-  if (!segments.length || ['papers', 'projects', '.pi', '.project-history'].includes(segments[0])) return false
-  return segments.every(segment => !segment.startsWith('.') || segment === '.env.example')
-}
-
 const loadGlobalFileIndex = async () => {
   if (globalFileIndexLoaded.value) return
   if (globalFileIndexLoadPromise) return globalFileIndexLoadPromise
@@ -255,7 +316,7 @@ const loadGlobalFileIndex = async () => {
       const res = await api.getGlobalFileIndex()
       if (sequence !== globalFileIndexLoadSequence) return
       globalFileIndexCache.value = (res.files || [])
-        .filter((path): path is string => typeof path === 'string' && isPublicGlobalFilePath(path))
+        .filter((path): path is string => typeof path === 'string' && isPublicSharedFilePath(path))
       globalFileIndexLoaded.value = true
     } catch {
       // Shared-file suggestions are optional and can be retried on next input.
@@ -352,9 +413,9 @@ const suggestions = computed<SuggestionItem[]>(() => {
     if (command === 'file') {
       const workspaceItems = fileIndexCache.value.map(path => ({
         path,
-        hint: isProjectWorkspaceRoute.value ? '项目文件' : '工作区文件',
+        hint: isProjectChat.value ? '项目文件' : '工作区文件',
       }))
-      const sharedItems = isProjectWorkspaceRoute.value && partial.startsWith('..')
+      const sharedItems = isProjectChat.value && partial.startsWith('..')
         ? diversifyGlobalFileSuggestions(globalFileIndexCache.value.map(path => ({ path }))).map(item => ({
             path: `../../${item.path}`,
             hint: 'data 公共文件',
@@ -500,7 +561,7 @@ watch(inputText, (val) => {
   if (dismissedSuggestionText.value && val !== dismissedSuggestionText.value) dismissedSuggestionText.value = ''
   refreshExtensionAutocomplete(val)
   if (val.includes('@file')) void loadFileIndex()
-  if (isProjectWorkspaceRoute.value && /@file\s+\.\./i.test(val)) void loadGlobalFileIndex()
+  if (isProjectChat.value && /@file\s+\.\./i.test(val)) void loadGlobalFileIndex()
   if (val.includes('@category')) loadCategories()
   if (val.includes('@paper') && !paperStore.papers.length) paperStore.fetchPapers()
 })
@@ -524,22 +585,22 @@ const invalidateGlobalFileIndex = () => {
 const reloadVisibleFileSuggestions = () => {
   if (!inputText.value.includes('@file')) return
   void loadFileIndex()
-  if (isProjectWorkspaceRoute.value && /@file\s+\.\./i.test(inputText.value)) void loadGlobalFileIndex()
+  if (isProjectChat.value && /@file\s+\.\./i.test(inputText.value)) void loadGlobalFileIndex()
 }
 
-watch(projectRouteScope, () => {
+watch(chatScopeKey, () => {
   invalidateWorkspaceFileIndex()
   reloadVisibleFileSuggestions()
 })
 
 const onGlobalFilesChanged = () => {
   invalidateGlobalFileIndex()
-  if (!isProjectWorkspaceRoute.value) invalidateWorkspaceFileIndex()
+  if (!isProjectChat.value) invalidateWorkspaceFileIndex()
   reloadVisibleFileSuggestions()
 }
 
 const onProjectFilesChanged = (event: Event) => {
-  const projectId = projectRouteScope.value.startsWith('project:') ? projectRouteScope.value.slice('project:'.length) : ''
+  const projectId = chatStore.conversationScope
   if (!projectId || (event as CustomEvent)?.detail?.projectId !== projectId) return
   invalidateWorkspaceFileIndex()
   reloadVisibleFileSuggestions()
@@ -1325,6 +1386,45 @@ const contextUsageTitle = computed(() => {
     </aside>
     <!-- Header -->
     <div ref="headerRef" class="chat-header">
+      <div ref="scopeMenuRef" class="chat-scope">
+        <button
+          class="chat-scope-trigger"
+          :class="{ project: isProjectChat, open: scopeMenuOpen }"
+          :title="isProjectChat ? `当前为项目对话：${chatScopeLabel}（点击切换）` : '当前为通用对话（点击切换）'"
+          @click="toggleScopeMenu"
+        >
+          <svg v-if="isProjectChat" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          <span class="chat-scope-label">{{ chatScopeLabel }}</span>
+          <svg class="conv-trigger-chevron" :class="{ open: scopeMenuOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <Transition name="dropdown">
+          <div v-if="scopeMenuOpen" class="scope-dropdown">
+            <div class="conv-dropdown-header">
+              <span class="conv-dropdown-title">对话作用域</span>
+            </div>
+            <div class="scope-list">
+              <button class="scope-item" :class="{ active: !chatStore.conversationScope }" @click="selectChatScope(null)">
+                <span class="scope-item-name">通用对话</span>
+                <span class="scope-item-hint">data/</span>
+              </button>
+              <button
+                v-for="project in scopeProjects"
+                :key="project.id"
+                class="scope-item"
+                :class="{ active: chatStore.conversationScope === project.id }"
+                @click="selectChatScope(project.id)"
+              >
+                <span class="scope-item-name">{{ project.name }}</span>
+                <span class="scope-item-hint">{{ project.directoryName }}/</span>
+              </button>
+              <div v-if="scopeProjectsError" class="conv-list-empty">{{ scopeProjectsError }}</div>
+              <div v-else-if="scopeProjectsLoading && !scopeProjects.length" class="conv-list-empty">加载项目…</div>
+              <div v-else-if="!scopeProjects.length" class="conv-list-empty">暂无科研项目</div>
+            </div>
+          </div>
+        </Transition>
+      </div>
       <div class="conv-selector">
         <ExtensionTuiSurface
           v-if="chatStore.uiHeaderSurfaceId && chatStore.tuiSurfaces[chatStore.uiHeaderSurfaceId]"
@@ -1334,14 +1434,14 @@ const contextUsageTitle = computed(() => {
         <div v-if="chatStore.uiHeaderLines.length" class="ui-header-banner">
           <span v-for="(line, i) in chatStore.uiHeaderLines" :key="i">{{ line }}</span>
         </div>
-        <button class="conv-trigger" @click="convMenuOpen = !convMenuOpen">
+        <button class="conv-trigger" @click="convMenuOpen = !convMenuOpen; scopeMenuOpen = false">
           <span class="conv-trigger-title">{{ currentConvTitle }}</span>
           <svg class="conv-trigger-chevron" :class="{ open: convMenuOpen }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
         <Transition name="dropdown">
           <div v-if="convMenuOpen" class="conv-dropdown">
             <div class="conv-dropdown-header">
-              <span class="conv-dropdown-title">对话列表</span>
+              <span class="conv-dropdown-title">{{ isProjectChat ? `${chatScopeLabel} · 对话列表` : '通用对话列表' }}</span>
               <button class="conv-new-btn" @click="createConversation(); convMenuOpen = false">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               </button>
@@ -1687,6 +1787,19 @@ const contextUsageTitle = computed(() => {
 .btw-answer :deep(p:last-child) { margin-bottom: 0; }
 .chat-header { height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 8px; border-bottom: 1px solid var(--color-border); flex-shrink: 0; position: relative; z-index: 20; }
 .chat-header-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.chat-scope { position: relative; flex: 0 1 auto; min-width: 0; max-width: 42%; }
+.chat-scope-trigger { display: flex; align-items: center; gap: 5px; max-width: 100%; height: 26px; padding: 0 7px; border: 1px solid var(--color-border); background: var(--color-bg); color: var(--color-text-secondary); border-radius: 999px; cursor: pointer; font-size: 12px; }
+.chat-scope-trigger:hover, .chat-scope-trigger.open { border-color: var(--color-primary); color: var(--color-text); }
+.chat-scope-trigger.project { background: var(--color-primary-soft); border-color: transparent; color: var(--color-primary); }
+.chat-scope-trigger svg { flex-shrink: 0; }
+.chat-scope-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.scope-dropdown { position: absolute; top: calc(100% + 9px); left: 0; width: 240px; max-height: 420px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,0.12); display: flex; flex-direction: column; overflow: hidden; z-index: 50; }
+.scope-list { overflow-y: auto; padding: 4px; display: flex; flex-direction: column; gap: 1px; }
+.scope-item { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; padding: 7px 10px; border: none; background: transparent; color: var(--color-text); border-radius: var(--radius-sm); cursor: pointer; text-align: left; }
+.scope-item:hover { background: var(--color-bg-muted); }
+.scope-item.active { background: var(--color-primary-soft); }
+.scope-item-name { max-width: 100%; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-item-hint { max-width: 100%; font-size: 11px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conv-selector { flex: 1; min-width: 0; }
 .conv-trigger { display: flex; align-items: center; gap: 6px; padding: 7px 8px; border: none; background: transparent; color: var(--color-text); cursor: pointer; border-radius: var(--radius-sm); width: 100%; }
 .conv-trigger:hover { background: var(--color-bg-muted); }

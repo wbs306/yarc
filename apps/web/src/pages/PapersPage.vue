@@ -11,6 +11,7 @@ import { requestJson } from '@/lib/api-request'
 import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
 import { normalizeFileReferencePath } from '@/lib/workspace-file-reference'
+import { scopeChatResource } from '@/lib/chat-scope'
 import {
   WORKSPACE_RECENT_FILES_KEY,
   WORKSPACE_RECENT_FILES_LIMIT,
@@ -1514,11 +1515,15 @@ const projectIdFromRoute = () => conversationProjectIdForRoute(
   typeof route.params.id === 'string' ? route.params.id : undefined,
 )
 
-const projectIdFromCurrentConversation = () => {
+// Workspace of the chat panel. It is chosen in the chat header and may differ
+// from the visible page, so file references in messages must use it rather
+// than the route.
+const chatWorkspaceProjectId = () => {
   const conversationId = chatStore.currentConvId
-  return conversationId
-    ? chatStore.conversations.find(conversation => conversation.id === conversationId)?.projectId || null
-    : null
+  const conversation = conversationId
+    ? chatStore.conversations.find(item => item.id === conversationId)
+    : undefined
+  return conversation ? conversation.projectId || null : chatStore.conversationScope
 }
 
 const navigateToWorkspace = async (projectId: string | null) => {
@@ -1663,7 +1668,7 @@ const selectWorkspaceFile = async (node: FileNode) => {
 
 const resolveWorkspaceFileReference = async (rawPath: string): Promise<string | null> => {
   try {
-    const result = await api.resolveFileReference(rawPath, projectIdFromCurrentConversation() || projectIdFromRoute())
+    const result = await api.resolveFileReference(rawPath, chatWorkspaceProjectId())
     if (!result.file) return null
     return result.file.scope === 'global' ? `../../${result.file.path}` : result.file.path
   } catch {
@@ -1699,7 +1704,7 @@ const openWorkspaceFileReference = async (rawPath: string) => {
 
   const sharedReference = referencePath.startsWith('../../')
   const path = sharedReference ? referencePath.slice('../../'.length) : referencePath
-  const projectId = sharedReference ? null : (projectIdFromCurrentConversation() || projectIdFromRoute())
+  const projectId = sharedReference ? null : chatWorkspaceProjectId()
   filesError.value = ''
   let loadingToken: symbol | null = null
   const showTreeLoading = () => {
@@ -2204,12 +2209,18 @@ watch(
       && (!isProjectWorkspaceRoute || previousProjectId !== projectId)
     if (enteringProjectWorkspace || leavingProjectWorkspace) resetWorkspaceScope()
 
-    const nextConversationProjectId = conversationProjectIdForRoute(name, projectId)
-    const previousConversationProjectId = previous
+    // The chat scope is independent of the visible page: opening a paper, the
+    // library, global files or settings keeps the current conversation. Only
+    // entering a project workspace from elsewhere selects that project's chat;
+    // the user can switch scope at any time from the chat header.
+    const routeProjectId = conversationProjectIdForRoute(name, projectId)
+    const previousRouteProjectId = previous
       ? conversationProjectIdForRoute(previousName, previousProjectId)
       : undefined
-    if (previousConversationProjectId === undefined || nextConversationProjectId !== previousConversationProjectId) {
-      void chatStore.fetchConversations(nextConversationProjectId)
+    if (previousRouteProjectId === undefined) {
+      void chatStore.setConversationScope(routeProjectId ?? chatStore.conversationScope)
+    } else if (routeProjectId && routeProjectId !== previousRouteProjectId) {
+      void chatStore.setConversationScope(routeProjectId)
     }
 
     if (isProjectWorkspaceRoute) {
@@ -2339,20 +2350,38 @@ const activePaper = computed(() => {
   if (paperStore.currentPaper?.id === id) return paperStore.currentPaper
   return readerTabs.value.find((tab) => tab.paper.id === id)?.paper || null
 })
-const currentChatResource = computed<CurrentChatResource | null>(() => {
+// Resource visible in the main view, with the workspace that owns file paths
+// (null = shared data root).
+const visibleChatResource = computed<{ resource: CurrentChatResource; projectId: string | null } | null>(() => {
   if (hasPaper.value && activePaper.value && !isTemporaryReader.value) {
-    return { type: 'paper', paperId: activePaper.value.id, title: activePaper.value.title }
+    return { resource: { type: 'paper', paperId: activePaper.value.id, title: activePaper.value.title }, projectId: null }
   }
   if (isTemporaryReader.value && activeReaderTab.value?.temporaryPdfStatus === 'ready' && activeReaderTab.value.temporaryPdfPath) {
-    return { type: 'file', path: activeReaderTab.value.temporaryPdfPath, name: `${activeReaderTab.value.paper.title}.md` }
+    // Temporary PDF Markdown is stored relative to the shared data root.
+    return {
+      resource: { type: 'file', path: activeReaderTab.value.temporaryPdfPath, name: `${activeReaderTab.value.paper.title}.md` },
+      projectId: null,
+    }
   }
   if (!hasPaper.value && sidebarMode.value === 'files' && selectedWorkspaceFile.value?.type === 'file') {
-    return { type: 'file', path: selectedWorkspaceFile.value.path, name: selectedWorkspaceFile.value.name }
+    return {
+      resource: { type: 'file', path: selectedWorkspaceFile.value.path, name: selectedWorkspaceFile.value.name },
+      projectId: currentWorkspaceProjectId.value,
+    }
   }
-  if (isProjectMode.value) return projectResource.value
+  if (isProjectMode.value && projectResource.value) return { resource: projectResource.value, projectId: projectWorkspaceId.value || null }
   return null
 })
+// The chat may be scoped to a different workspace than the page, so @current
+// paths are rewritten for (or rejected by) the chat's workspace.
+const scopedChatResource = computed(() => {
+  const visible = visibleChatResource.value
+  return visible ? scopeChatResource(visible.resource, visible.projectId, chatWorkspaceProjectId()) : null
+})
+const currentChatResource = computed<CurrentChatResource | null>(() => scopedChatResource.value?.resource ?? null)
+const showCurrentChatResourceNotice = computed(() => !isProjectMode.value && !scopedChatResource.value?.notice)
 const currentChatResourceNotice = computed(() => {
+  if (scopedChatResource.value?.notice) return scopedChatResource.value.notice
   if (isProjectWorkspace.value && !selectedWorkspaceFile.value) return '请先在项目文件中选择一个文件'
   if (isProjectMode.value && !projectResource.value && !isProjectWorkspace.value) return '请先在 Project Files 中选择一个文件'
   if (!isTemporaryReader.value || !activeReaderTab.value) return ''
@@ -5262,8 +5291,7 @@ const showSearchPaperPopup = (paper: any) => {
           :current-resource="currentChatResource"
           :current-resource-notice="currentChatResourceNotice"
           :resolve-file-reference="resolveWorkspaceFileReference"
-          :show-current-resource-notice="!isProjectMode"
-          :create-conversation="isProjectMode && route.params.id ? () => chatStore.createConversation(undefined, String(route.params.id)) : undefined"
+          :show-current-resource-notice="showCurrentChatResourceNotice"
           @close="isMobile ? (mobileChat = false) : (chatOpen = false)"
           @open-file="openWorkspaceFileReference"
         />

@@ -50,7 +50,21 @@ export interface ContextUsageInfo { tokens: number | null; contextWindow: number
 
 const BRANCH_KEY = 'yarc-conv-branches'
 const CONVERSATION_KEY = 'yarc-current-conversations'
+const CONVERSATION_SCOPE_KEY = 'yarc-chat-scope'
 const GLOBAL_CONVERSATION_SCOPE = '__global__'
+
+const loadConversationScope = (): string | null => {
+  try {
+    const value = localStorage.getItem(CONVERSATION_SCOPE_KEY)
+    return value && value !== GLOBAL_CONVERSATION_SCOPE ? value : null
+  } catch {
+    return null
+  }
+}
+
+const saveConversationScope = (scope: string | null) => {
+  try { localStorage.setItem(CONVERSATION_SCOPE_KEY, scope || GLOBAL_CONVERSATION_SCOPE) } catch {}
+}
 
 /** Keep one thinking card per interval bounded by tool calls. */
 const mergeThinkingSegmentsByToolPhase = (segments: ChatSegment[]): ChatSegment[] => {
@@ -88,8 +102,11 @@ export const useChatStore = defineStore('chat', () => {
   const conversations = ref<Conversation[]>([])
   const currentConvId = ref<string | null>(null)
   // The chat list is scoped to either the global workspace (null) or one project.
-  // Keep this alongside the list so background refreshes can preserve the same scope.
-  const conversationScope = ref<string | null>(null)
+  // The scope is independent of the visible page (library, files, settings or a
+  // project workspace) and is persisted so reloading keeps the selected chat.
+  const conversationScope = ref<string | null>(loadConversationScope())
+  // Scope whose list is loaded or currently loading; undefined before the first fetch.
+  let conversationListScope: string | null | undefined
   const models = ref<ModelInfo[]>([])
   const currentModel = ref('')
   const reasoningEffort = ref<ChatThinkingLevel>('off')
@@ -641,6 +658,12 @@ export const useChatStore = defineStore('chat', () => {
   // Register beforeunload handler once
   if (typeof window !== 'undefined') {
     window.addEventListener('beforeunload', cleanupEmptyConvs)
+    // An archived or deleted project can no longer host conversations; fall
+    // back to global chat instead of keeping a stale project scope.
+    window.addEventListener('yarc-project-removed', ((e: CustomEvent) => {
+      const projectId = e.detail?.projectId
+      if (projectId && conversationScope.value === projectId) void setConversationScope(null)
+    }) as EventListener)
     window.addEventListener('online', () => {
       if (currentConvId.value) scheduleStreamReconnect(currentConvId.value, 0)
     })
@@ -703,12 +726,20 @@ export const useChatStore = defineStore('chat', () => {
 
   // ── API calls ──────────────────────────────────────────────────────
 
-  const fetchConversations = async (projectId: string | null = null) => {
+  const fetchConversations = async (projectId: string | null = conversationScope.value) => {
     const fetchSeq = ++conversationFetchSeq
     // Publish the requested scope before awaiting the network so late runtime
-    // events cannot start a refresh for the route we just left.
+    // events cannot start a refresh for the scope we just left.
     conversationScope.value = projectId
-    const res = await api.getConversations(projectId)
+    conversationListScope = projectId
+    saveConversationScope(projectId)
+    let res: { conversations: any[] }
+    try {
+      res = await api.getConversations(projectId)
+    } catch (err) {
+      if (fetchSeq === conversationFetchSeq) conversationListScope = undefined
+      throw err
+    }
     if (fetchSeq !== conversationFetchSeq) return
 
     const nextConversations = (res.conversations || []) as Conversation[]
@@ -747,6 +778,20 @@ export const useChatStore = defineStore('chat', () => {
     } else if (!conversations.value.length) {
       conversationPrefs.delete(conversationScopeKey(projectId))
       saveConversationPrefs()
+    }
+  }
+
+  /**
+   * Switch the chat between global conversations (null) and one project's
+   * conversations. Page navigation never calls this implicitly except when the
+   * user enters a project workspace; see PapersPage's route watcher.
+   */
+  const setConversationScope = async (projectId: string | null) => {
+    if (conversationListScope === projectId && conversationScope.value === projectId) return
+    try {
+      await fetchConversations(projectId)
+    } catch (err) {
+      chatError.value = (err as Error).message || '加载对话列表失败'
     }
   }
 
@@ -996,7 +1041,9 @@ export const useChatStore = defineStore('chat', () => {
     await loadRuntimeSnapshot(convId, branchId)
   }
 
-  const createConversation = async (paperId?: string, projectId?: string) => {
+  // New conversations belong to the selected chat scope unless a caller asks
+  // for a specific workspace explicitly.
+  const createConversation = async (paperId?: string, projectId: string | null = conversationScope.value) => {
     // If current conversation is empty, delete it first
     if (currentConvId.value && pendingEmptyConvs.has(currentConvId.value)) {
       const emptyId = currentConvId.value
@@ -1007,9 +1054,10 @@ export const useChatStore = defineStore('chat', () => {
 
     ensureModel()
     const modelSettings = currentModel.value ? { model: currentModel.value, reasoningEffort: reasoningEffort.value } : undefined
-    const r = await api.createConversation({ paperId, projectId, model: currentModel.value || undefined, modelSettings })
+    const r = await api.createConversation({ paperId, projectId: projectId || undefined, model: currentModel.value || undefined, modelSettings })
     r.conversation.modelSettings = modelSettings || null
     conversationScope.value = projectId || null
+    saveConversationScope(conversationScope.value)
     const previousConversationId = currentConvId.value
     if (previousConversationId && previousConversationId !== r.conversation.id) {
       detachConversationStream(previousConversationId)
@@ -2018,7 +2066,8 @@ export const useChatStore = defineStore('chat', () => {
     uiStatus, uiWidgets, uiFooterText, uiFooterSurfaceId, uiHeaderLines, uiHeaderSurfaceId, uiTitle, uiWorking, toolsExpanded,
     runtimeCommands, runtimeState, tuiSurfaces,
     activeSubagentRuns,
-    setCurrentModel, setReasoningEffort, fetchConversations, fetchModels,
+    conversationScope,
+    setCurrentModel, setReasoningEffort, fetchConversations, setConversationScope, fetchModels,
     createConversation, renameConversation, deleteConversation, selectConversation,
     sendMessage, stopStreaming, switchBranch, respondInteraction, dismissInteraction,
     hideInteraction, openInteraction, questionnaireForTool,

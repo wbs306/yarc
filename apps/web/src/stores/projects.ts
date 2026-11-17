@@ -3,6 +3,11 @@ import { defineStore } from 'pinia'
 import type { Project, ProjectGitStatus, ProjectLatexTarget } from '@yarc/shared'
 import { requestJson } from '../lib/api-request'
 
+// Lets the chat drop a project scope that can no longer host conversations.
+const notifyProjectRemoved = (projectId: string) => {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('yarc-project-removed', { detail: { projectId } }))
+}
+
 export const useProjectsStore = defineStore('projects', () => {
   const projects = ref<Project[]>([])
   const currentProject = ref<Project | null>(null)
@@ -52,6 +57,7 @@ export const useProjectsStore = defineStore('projects', () => {
   async function archiveProject(id: string) {
     const data = await requestJson<{ project: Project }>(`/api/projects/${id}/archive`, { method: 'POST' })
     projects.value = projects.value.filter(project => project.id !== id)
+    notifyProjectRemoved(id)
     return data.project
   }
 
@@ -63,6 +69,7 @@ export const useProjectsStore = defineStore('projects', () => {
     await requestJson(`/api/projects/${id}`, { method: 'DELETE' })
     projects.value = projects.value.filter(project => project.id !== id)
     if (currentProject.value?.id === id) currentProject.value = null
+    notifyProjectRemoved(id)
   }
 
   async function fetchGitStatus(id: string) {
