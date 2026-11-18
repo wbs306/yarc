@@ -232,7 +232,7 @@ const flattenedCategories = computed(() => {
   return result
 })
 
-type MarkdownViewMode = 'edit' | 'preview' | 'split'
+type MarkdownViewMode = 'edit' | 'preview' | 'split' | 'live'
 
 type MarkdownScrollPane = 'editor' | 'preview'
 
@@ -409,7 +409,7 @@ const markdownPreviewContent = ref('')
 const markdownPreviewPending = computed(() => !!currentLiveClient.value
   && !currentLiveClient.value.ready.value
   && !markdownPreviewContent.value)
-const markdownPreviewVisible = computed(() => workspaceIsMarkdown.value && markdownViewMode.value !== 'edit')
+const markdownPreviewVisible = computed(() => workspaceIsMarkdown.value && (markdownViewMode.value === 'preview' || markdownViewMode.value === 'split'))
 const markdownEditorVisible = computed(() => !workspaceIsMarkdown.value || markdownViewMode.value !== 'preview')
 const markdownIsSplit = computed(() => workspaceIsMarkdown.value && markdownViewMode.value === 'split')
 const markdownScrollLine = ref(1)
@@ -424,6 +424,10 @@ const latexSplitResizeActive = ref(false)
 const pendingMarkdownScroll = new Map<MarkdownScrollPane, number>()
 let markdownScrollRestoreTimer: number | null = null
 let markdownPreviewContentTimer: number | null = null
+let markdownPreviewScrollFrame: number | null = null
+let markdownAnchorCache: MarkdownPreviewSourceAnchor[] | null = null
+let markdownPreviewResizeObserver: ResizeObserver | null = null
+const invalidateMarkdownAnchors = () => { markdownAnchorCache = null }
 const markdownLineCount = computed(() => Math.max(1, workspaceContent.value.split(/\r?\n/).length))
 const markdownSplitLayoutStyle = computed<Record<string, string>>(() => ({
   '--markdown-editor-flex': String(markdownSplitRatio.value),
@@ -446,8 +450,9 @@ const consumePendingMarkdownScroll = (pane: MarkdownScrollPane, line: number) =>
 const getMarkdownPreviewSourceAnchors = (): MarkdownPreviewSourceAnchor[] => {
   const root = markdownPreviewRef.value
   if (!root) return []
+  if (markdownAnchorCache) return markdownAnchorCache
   const rootRect = root.getBoundingClientRect()
-  return Array.from(root.querySelectorAll<HTMLElement>('[data-md-source-line]'))
+  markdownAnchorCache = Array.from(root.querySelectorAll<HTMLElement>('[data-md-source-line]'))
     .map((element) => {
       const startLine = Number.parseInt(element.dataset.mdSourceLine || '', 10)
       const endLine = Number.parseInt(element.dataset.mdSourceLineEnd || '', 10)
@@ -462,7 +467,29 @@ const getMarkdownPreviewSourceAnchors = (): MarkdownPreviewSourceAnchor[] => {
     })
     .filter((anchor) => Number.isFinite(anchor.startLine))
     .sort((a, b) => a.top - b.top || a.startLine - b.startLine)
+  return markdownAnchorCache
 }
+
+watch(markdownPreviewRef, (root, previous) => {
+  previous?.removeEventListener('load', invalidateMarkdownAnchors, true)
+  markdownPreviewResizeObserver?.disconnect()
+  invalidateMarkdownAnchors()
+  if (!root) return
+  root.addEventListener('load', invalidateMarkdownAnchors, true)
+  markdownPreviewResizeObserver = new ResizeObserver(invalidateMarkdownAnchors)
+  markdownPreviewResizeObserver.observe(root)
+  if (root.firstElementChild) markdownPreviewResizeObserver.observe(root.firstElementChild)
+}, { flush: 'post' })
+
+watch([markdownPreviewContent, markdownPreviewVisible], () => {
+  invalidateMarkdownAnchors()
+  void nextTick(() => {
+    const root = markdownPreviewRef.value
+    markdownPreviewResizeObserver?.disconnect()
+    if (root) markdownPreviewResizeObserver?.observe(root)
+    if (root?.firstElementChild) markdownPreviewResizeObserver?.observe(root.firstElementChild)
+  })
+}, { flush: 'post' })
 
 const readMarkdownPreviewScrollLine = () => {
   const root = markdownPreviewRef.value
@@ -533,6 +560,14 @@ const scrollMarkdownPreviewToLine = (line: number, behavior: ScrollBehavior = 's
 }
 
 const updateMarkdownPreviewScroll = () => {
+  if (markdownPreviewScrollFrame !== null) return
+  markdownPreviewScrollFrame = window.requestAnimationFrame(() => {
+    markdownPreviewScrollFrame = null
+    flushMarkdownPreviewScroll()
+  })
+}
+
+const flushMarkdownPreviewScroll = () => {
   const root = markdownPreviewRef.value
   if (!root) return
   const maxScroll = root.scrollHeight - root.clientHeight
@@ -674,8 +709,10 @@ const swapMarkdownSplitPanes = () => {
 
 const syncMarkdownPreviewContent = (content: string, immediate = false) => {
   if (markdownPreviewContentTimer !== null) window.clearTimeout(markdownPreviewContentTimer)
-  if (immediate || !markdownPreviewVisible.value) {
-    markdownPreviewContentTimer = null
+  markdownPreviewContentTimer = null
+  // The hidden pane must not parse or render on every editor transaction.
+  if (!markdownPreviewVisible.value) return
+  if (immediate) {
     markdownPreviewContent.value = content
     return
   }
@@ -698,15 +735,15 @@ const scheduleMarkdownScrollRestore = () => {
 
 watch(workspaceContent, (content) => {
   syncMarkdownPreviewContent(content)
-  scheduleMarkdownScrollRestore()
 })
+watch(markdownPreviewContent, scheduleMarkdownScrollRestore, { flush: 'post' })
 watch(markdownPreviewVisible, (visible) => {
   syncMarkdownPreviewContent(workspaceContent.value, true)
   if (visible) void nextTick(() => restoreMarkdownScrollPosition(markdownScrollLine.value))
 })
 
 const markdownPreviewHeadings = computed(() => {
-  const lines = workspaceContent.value.split(/\r?\n/)
+  const lines = markdownPreviewContent.value.split(/\r?\n/)
   const lastLine = Math.max(1, lines.length - 1)
 
   return lines.flatMap((line, index) => {
@@ -722,8 +759,21 @@ const markdownPreviewHeadings = computed(() => {
 })
 
 // ── Editor / preview status bar ──
+const workspaceStatsContent = ref('')
+let workspaceStatsTimer: number | null = null
+watch([workspaceContent, selectedWorkspacePath], ([content, path], [, previousPath]) => {
+  if (workspaceStatsTimer !== null) window.clearTimeout(workspaceStatsTimer)
+  if (path !== previousPath) {
+    workspaceStatsContent.value = content
+    return
+  }
+  workspaceStatsTimer = window.setTimeout(() => {
+    workspaceStatsTimer = null
+    workspaceStatsContent.value = content
+  }, 200)
+})
 const workspaceDocStats = computed(() => {
-  const text = workspaceContent.value
+  const text = workspaceStatsContent.value
   // CJK has no spaces, so count CJK codepoints individually and latin runs as words.
   const cjk = text.match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/g)?.length || 0
   const words = text.replace(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/g, ' ').match(/[A-Za-z0-9_'\u2019-]+/g)?.length || 0
@@ -830,7 +880,7 @@ const setMarkdownViewMode = (mode: MarkdownViewMode) => {
   const currentLine = getActiveMarkdownScrollLine()
   markdownScrollLine.value = currentLine
   pendingMarkdownScroll.clear()
-  if (mode === 'edit') closeMarkdownSearch()
+  if (mode === 'edit' || mode === 'live') closeMarkdownSearch()
   if (mode === 'split' && markdownViewMode.value !== 'split') {
     markdownSplitEditorOnLeft.value = defaultMarkdownSplitEditorOnLeft()
   }
@@ -839,13 +889,13 @@ const setMarkdownViewMode = (mode: MarkdownViewMode) => {
 }
 
 // Re-mark after the rendered HTML is replaced, otherwise old marks are lost silently.
-watch([workspaceContent, markdownPreviewVisible], () => {
+watch([markdownPreviewContent, markdownPreviewVisible], () => {
   if (!mdSearchOpen.value || !mdSearchQuery.value) return
   void nextTick(applyMarkdownSearchMarks)
 })
 
 watch([selectedWorkspacePath, markdownViewMode], ([path, mode], [previousPath]) => {
-  if (mdSearchOpen.value && (path !== previousPath || mode === 'edit')) closeMarkdownSearch()
+  if (mdSearchOpen.value && (path !== previousPath || mode === 'edit' || mode === 'live')) closeMarkdownSearch()
 })
 
 watch(() => currentLiveClient.value?.content.value, (content) => {
@@ -2885,7 +2935,7 @@ const onDocumentKeydown = (event: KeyboardEvent) => {
 
     const wantsReplace = isReplaceShortcut(event)
     event.preventDefault()
-    if (workspaceIsMarkdown.value && markdownViewMode.value !== 'edit') {
+    if (markdownPreviewVisible.value) {
       // The rendered preview cannot replace; Ctrl+H switches back to the editor.
       if (wantsReplace && markdownViewMode.value === 'preview') {
         setMarkdownViewMode('edit')
@@ -2965,6 +3015,10 @@ onBeforeUnmount(() => {
   if (markdownPreviewContentTimer !== null) window.clearTimeout(markdownPreviewContentTimer)
   markdownScrollRestoreTimer = null
   markdownPreviewContentTimer = null
+  if (workspaceStatsTimer !== null) window.clearTimeout(workspaceStatsTimer)
+  if (markdownPreviewScrollFrame !== null) window.cancelAnimationFrame(markdownPreviewScrollFrame)
+  markdownPreviewResizeObserver?.disconnect()
+  markdownPreviewRef.value?.removeEventListener('load', invalidateMarkdownAnchors, true)
   void liveFiles.releaseAll()
   for (const paperId of temporaryPdfPollTimers.keys()) clearTemporaryPdfPoll(paperId)
   window.removeEventListener('resize', onResize)
@@ -4882,6 +4936,14 @@ const showSearchPaperPopup = (paper: any) => {
                         :aria-selected="markdownViewMode === 'split'"
                         @click="setMarkdownViewMode('split')"
                       >双栏</button>
+                      <button
+                        type="button"
+                        role="tab"
+                        :class="{ active: markdownViewMode === 'live' }"
+                        :aria-selected="markdownViewMode === 'live'"
+                        title="实验模式：点击内容块显示源码，移开光标后恢复渲染；HTML 块等复杂内容保留源码"
+                        @click="setMarkdownViewMode('live')"
+                      >即时（实验）</button>
                     </div>
                     <button
                       v-if="markdownIsSplit"
@@ -5022,10 +5084,11 @@ const showSearchPaperPopup = (paper: any) => {
                     <div ref="markdownPreviewRef" class="workspace-md-preview" @scroll="updateMarkdownPreviewScroll">
                       <div v-if="markdownPreviewPending" class="workspace-md-preview-loading">正在同步文件内容…</div>
                       <MarkdownContent
-                        v-else
+                        v-else-if="markdownPreviewVisible"
                         :style="{ fontSize: `${theme.editor.markdownFontSize}px` }"
                         :content="markdownPreviewContent"
                         :source-map="true"
+                        :incremental="true"
                       />
                     </div>
                     <footer class="workspace-status-bar">
@@ -5099,6 +5162,7 @@ const showSearchPaperPopup = (paper: any) => {
                 v-show="markdownEditorVisible"
                 v-model="workspaceContent"
                 :language="workspaceLanguage"
+                :markdown-live="workspaceIsMarkdown && markdownViewMode === 'live'"
                 :readonly="!workspaceCanEdit"
                 :font-size="theme.editor.fontSize"
                 :tab-size="theme.editor.tabSize"

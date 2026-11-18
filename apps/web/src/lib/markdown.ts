@@ -541,6 +541,74 @@ export function renderMarkdown(text: string, options: MarkdownRenderOptions = {}
   }
 }
 
+export interface MarkdownRenderBlock {
+  key: number
+  source: string
+  context: string
+  html: string
+  startLine: number
+}
+
+function containsRawHtml(tokens: Token[]): boolean {
+  // Marked's walkTokens accumulates callback return values with repeated concat.
+  // A plain work list keeps this safety check linear even for long documents.
+  const pending = [...tokens]
+  for (let token = pending.pop(); token; token = pending.pop()) {
+    if (token.type === 'html') return true
+    const nested = token as TokenWithChildren
+    if (nested.tokens) pending.push(...nested.tokens)
+    if (nested.items) pending.push(...nested.items)
+    if (token.type === 'table') {
+      for (const cell of token.header) pending.push(...cell.tokens)
+      for (const row of token.rows) {
+        for (const cell of row) pending.push(...cell.tokens)
+      }
+    }
+  }
+  return false
+}
+
+/** Keep unaffected blocks (especially KaTeX DOM) across workspace edits. Lexing
+ * still sees the whole document so reference links and block boundaries agree
+ * with the normal renderer. Raw HTML uses one block to preserve cross-token DOM. */
+export function renderMarkdownBlocks(text: string, previous: MarkdownRenderBlock[] = [], options: MarkdownRenderOptions = {}): MarkdownRenderBlock[] {
+  if (!text) return []
+  configureMarked()
+  let nextKey = previous.reduce((max, block) => Math.max(max, block.key + 1), 0)
+  try {
+    const source = prepareMarkdownSource(text, options)
+    const tokens = marked.lexer(source)
+    if (containsRawHtml(tokens)) {
+      const html = renderMarkdownWithSourceMap(text, options)
+      const old = previous.find(block => block.source === source && block.context === 'html')
+      return [{ key: old?.key ?? nextKey, source, context: 'html', html, startLine: 1 }]
+    }
+    const context = JSON.stringify([tokens.links, options.fileReferences ?? false])
+    const reusable = new Map<string, MarkdownRenderBlock[]>()
+    for (const block of previous) {
+      if (block.context !== context) continue
+      const matches = reusable.get(block.source) ?? []
+      matches.push(block)
+      reusable.set(block.source, matches)
+    }
+    const ranges = buildMarkdownSourceRanges(tokens, source)
+    const renderer = new MarkdownSourceMapRenderer(ranges)
+    return tokens.filter(token => token.type !== 'space').map(token => {
+      const signature = `${token.type}:${token.raw}`
+      const old = reusable.get(signature)?.shift()
+      const startLine = ranges.get(token)?.startLine ?? 1
+      const delta = startLine - (old?.startLine ?? startLine)
+      const html = old
+        ? (delta ? old.html.replace(/(data-md-source-line(?:-end)?=")(\d+)"/g,
+          (_, prefix: string, line: string) => `${prefix}${Number(line) + delta}"`) : old.html)
+        : marked.parser([token], { ...marked.defaults, renderer }) as string
+      return { key: old?.key ?? nextKey++, source: signature, context, html, startLine }
+    })
+  } catch {
+    return [{ key: nextKey, source: text, context: 'fallback', html: renderMarkdownWithSourceMap(text, options), startLine: 1 }]
+  }
+}
+
 export function renderMarkdownWithSourceMap(text: string, options: MarkdownRenderOptions = {}): string {
   if (!text) return ''
   configureMarked()

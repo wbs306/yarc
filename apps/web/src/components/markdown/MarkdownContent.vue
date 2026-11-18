@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { renderMarkdown, renderMarkdownWithSourceMap } from '@/lib/markdown'
+import { renderMarkdown, renderMarkdownWithSourceMap, renderMarkdownBlocks, type MarkdownRenderBlock } from '@/lib/markdown'
+import { markdownBlockDom as vMarkdownBlocks } from '@/lib/markdown-block-dom'
 import { isPaperReferenceUrl, parsePaperReference } from '@/lib/paper-reference'
 import { parseMarkdownFileReferenceHref, parseWorkspaceFileReferenceHref } from '@/lib/workspace-file-reference'
 import { usePaperReferenceStore } from '@/stores/paperReference'
@@ -9,11 +10,13 @@ const props = withDefaults(defineProps<{
   content: string
   inline?: boolean
   sourceMap?: boolean
+  incremental?: boolean
   fileReferences?: boolean
   resolveFileReference?: (path: string) => Promise<string | null>
 }>(), {
   inline: false,
   sourceMap: false,
+  incremental: false,
   fileReferences: false,
 })
 
@@ -22,6 +25,11 @@ const emit = defineEmits<{
 }>()
 
 const paperReferences = usePaperReferenceStore()
+let previousBlocks: MarkdownRenderBlock[] = []
+const blocks = computed(() => {
+  previousBlocks = renderMarkdownBlocks(props.content || '', previousBlocks, { fileReferences: props.fileReferences })
+  return previousBlocks
+})
 const html = computed(() => {
   const options = { fileReferences: props.fileReferences }
   return props.sourceMap
@@ -90,5 +98,6 @@ const onClick = (event: MouseEvent) => {
 </script>
 
 <template>
-  <component :is="inline ? 'span' : 'div'" class="md markdown-content" v-html="html" @click="onClick" />
+  <div v-if="incremental && !inline" v-markdown-blocks="blocks" class="md markdown-content" @click="onClick" />
+  <component v-else :is="inline ? 'span' : 'div'" class="md markdown-content" v-html="html" @click="onClick" />
 </template>

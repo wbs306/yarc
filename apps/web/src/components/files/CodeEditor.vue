@@ -25,6 +25,7 @@ import { yaml } from '@codemirror/lang-yaml'
 import { sql } from '@codemirror/lang-sql'
 import { vue } from '@codemirror/lang-vue'
 import { pairedStrongRule } from '@/lib/markdown-strong'
+import { markdownLivePreview } from '@/lib/markdown-live-preview'
 import { latexKeymap } from '@/lib/latex-keymap'
 import { deleteEditorPair, insertEditorPair } from '@/lib/editor-pairs'
 import { blockLatexMathPreview, focusLatexMathPreview, hideLatexMathPreview, latexMathPreview, markdownMathPreview } from '@/lib/latex-math-preview'
@@ -44,6 +45,7 @@ const props = withDefaults(defineProps<{
   tabSize?: number
   lineWrap?: boolean
   lineNumbers?: boolean
+  markdownLive?: boolean
   collabYText?: Y.Text | null
 }>(), {
   language: 'plaintext',
@@ -52,6 +54,7 @@ const props = withDefaults(defineProps<{
   tabSize: 2,
   lineWrap: true,
   lineNumbers: true,
+  markdownLive: false,
 })
 
 const emit = defineEmits<{
@@ -92,6 +95,10 @@ const tabConf = new Compartment()
 const wrapConf = new Compartment()
 const gutterConf = new Compartment()
 const collabConf = new Compartment()
+const markdownLiveConf = new Compartment()
+const markdownLiveExtension = () => props.language === 'markdown' && props.markdownLive
+  ? [markdownLivePreview, EditorView.theme({ '&': { '--editor-markdown-font-size': `${themeStore.editor.markdownFontSize}px` } })]
+  : []
 
 const fontTheme = (size: number) => EditorView.theme({ '&': { fontSize: `${size}px` } })
 const tabExtension = (n: number) => [EditorState.tabSize.of(n), indentUnit.of(' '.repeat(n))]
@@ -734,6 +741,7 @@ function buildExtensions() {
       EditorState.readOnly.of(props.readonly),
     ]),
     collabConf.of(collabExtension()),
+    markdownLiveConf.of(markdownLiveExtension()),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         const value = update.state.doc.toString()
@@ -779,13 +787,13 @@ const cssVar = (name: string, fallback: string) => {
   return value || fallback
 }
 
-const minimapLineColor = (line: string) => {
+const minimapLineColor = (line: string, colors: string[]) => {
   const trimmed = line.trim()
-  if (!trimmed) return cssVar('--color-border', '#e4e4e7')
-  if (/^(\/\/|#|<!--|\*)/.test(trimmed)) return cssVar('--color-text-muted', '#a1a1aa')
-  if (/^([<{]|[-*]\s|\d+\.)/.test(trimmed)) return cssVar('--color-primary', '#6366f1')
-  if (/["'`].*["'`]$/.test(trimmed)) return cssVar('--color-success', '#22c55e')
-  return cssVar('--color-text-secondary', '#71717a')
+  if (!trimmed) return colors[0]
+  if (/^(\/\/|#|<!--|\*)/.test(trimmed)) return colors[1]
+  if (/^([<{]|[-*]\s|\d+\.)/.test(trimmed)) return colors[2]
+  if (/["'`].*["'`]$/.test(trimmed)) return colors[3]
+  return colors[4]
 }
 
 let minimapFrame: number | undefined
@@ -822,8 +830,12 @@ function drawMinimap() {
   ctx.clearRect(0, 0, width, height)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-  const lines = props.modelValue.split(/\r?\n/)
-  const total = Math.max(lines.length, 1)
+  // Read the palette once per draw, not once per sampled line.
+  const colors = [cssVar('--color-border', '#e4e4e7'), cssVar('--color-text-muted', '#a1a1aa'),
+    cssVar('--color-primary', '#6366f1'), cssVar('--color-success', '#22c55e'), cssVar('--color-text-secondary', '#71717a')]
+  const doc = view.value?.state.doc
+  if (!doc) return
+  const total = doc.lines
   const maxMarks = Math.max(1, Math.floor(rect.height * 1.8))
   const step = Math.max(1, Math.ceil(total / maxMarks))
   const minPitch = 4
@@ -839,7 +851,7 @@ function drawMinimap() {
   const usableWidth = Math.max(12, rect.width - 14)
 
   for (let i = 0; i < total; i += step) {
-    const line = lines[i] || ''
+    const line = doc.line(i + 1).text
     const trimmedLength = line.trim().length
     const y = isShortFile
       ? topPadding + i * linePitch
@@ -847,7 +859,7 @@ function drawMinimap() {
     if (y > rect.height - lineHeight) break
     const w = Math.max(4, Math.min(usableWidth, 4 + Math.sqrt(trimmedLength) * 5.8))
     ctx.globalAlpha = trimmedLength ? 0.34 : 0.10
-    ctx.fillStyle = minimapLineColor(line)
+    ctx.fillStyle = minimapLineColor(line, colors)
     ctx.fillRect(7, y, w, lineHeight)
   }
   ctx.globalAlpha = 1
@@ -888,10 +900,15 @@ function scrollToLine(line: number, behavior: ScrollBehavior = 'auto') {
   updateMinimapViewport()
 }
 
+let scrollFrame: number | undefined
 function handleEditorScroll() {
-  updateMinimapViewport()
-  if (latexCompletionVisible.value) positionLatexCompletion()
-  emit('scroll', getScrollLine())
+  if (scrollFrame !== undefined) return
+  scrollFrame = window.requestAnimationFrame(() => {
+    scrollFrame = undefined
+    updateMinimapViewport()
+    if (latexCompletionVisible.value) positionLatexCompletion()
+    emit('scroll', getScrollLine())
+  })
 }
 
 function scrollFromMinimap(clientY: number) {
@@ -969,11 +986,15 @@ watch(latexCompletionVisible, (visible) => {
 
 watch(() => props.language, (lang) => {
   const editor = view.value
-  editor?.dispatch({ effects: languageConf.reconfigure(languageExtension(lang)) })
+  editor?.dispatch({ effects: [languageConf.reconfigure(languageExtension(lang)), markdownLiveConf.reconfigure(markdownLiveExtension())] })
   if (lang !== 'latex') hideLatexCompletion()
   if (editor && (lang === 'latex' || lang === 'markdown')) {
     editor.dispatch({ effects: focusLatexMathPreview.of(editor.hasFocus) })
   }
+})
+
+watch([() => props.markdownLive, () => themeStore.editor.markdownFontSize], () => {
+  view.value?.dispatch({ effects: markdownLiveConf.reconfigure(markdownLiveExtension()) })
 })
 
 watch(() => props.readonly, (ro) => {
@@ -1027,6 +1048,7 @@ onBeforeUnmount(() => {
   themeObserver?.disconnect()
   minimapResizeObserver?.disconnect()
   if (minimapFrame !== undefined) window.cancelAnimationFrame(minimapFrame)
+  if (scrollFrame !== undefined) window.cancelAnimationFrame(scrollFrame)
   window.removeEventListener('pointermove', onMinimapPointerMove)
   window.removeEventListener('pointerup', onMinimapPointerUp)
   view.value?.scrollDOM.removeEventListener('scroll', handleEditorScroll)

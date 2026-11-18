@@ -13,13 +13,14 @@ const previewDialect = Facet.define<'latex' | 'markdown', 'latex' | 'markdown'>(
 
 interface PreviewState {
   ranges: LatexMathRange[]
+  tree: ReturnType<typeof scanEditorMath>['tree']
   focused: boolean
   blocked: boolean
   dismissed: boolean
 }
 
 export const latexMathPreviewState = StateField.define<PreviewState>({
-  create: state => ({ ranges: scanEditorMath(state.doc.toString(), state.facet(previewDialect)).ranges, focused: false, blocked: false, dismissed: false }),
+  create: state => ({ ...scanEditorMath(state.doc.toString(), state.facet(previewDialect)), focused: false, blocked: false, dismissed: false }),
   update(value, transaction) {
     let next = value
     const dialect = transaction.state.facet(previewDialect)
@@ -27,8 +28,9 @@ export const latexMathPreviewState = StateField.define<PreviewState>({
     if (transaction.docChanged || transaction.selection || dialectChanged) {
       next = {
         ...value,
-        ranges: transaction.docChanged || dialectChanged
-          ? scanEditorMath(transaction.newDoc.toString(), dialect).ranges : value.ranges,
+        ...(transaction.docChanged || dialectChanged
+          ? scanEditorMath(transaction.newDoc.toString(), dialect, dialectChanged ? null : value.tree, transaction.changes)
+          : {}),
         blocked: dialectChanged ? false : value.blocked,
         dismissed: false,
       }
