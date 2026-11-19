@@ -93,23 +93,23 @@ function collectBlocks(state: EditorState) {
   // The math extension already maintains a full incremental Markdown tree.
   // Sharing it avoids a second synchronous parse just for Live Preview.
   const math = state.field(latexMathPreviewState, false)
-  const displayMath = math?.ranges.filter(range => range.display).map(range => ({
-    from: range.from - 2, to: range.to + (range.complete ? 2 : 0),
-  })) ?? []
+  const displayMath = math?.ranges.filter(range => range.display) ?? []
   let mathIndex = 0
   const blocks: PreviewBlock[] = []
   const references: string[] = []
   for (let node = math?.tree?.topNode.firstChild; node; node = node.nextSibling) {
     const source = state.sliceDoc(node.from, node.to)
-    while (mathIndex < displayMath.length && displayMath[mathIndex].to <= node.from) mathIndex++
-    let partialMath = false
-    for (let index = mathIndex; index < displayMath.length && displayMath[index].from < node.to; index++) {
-      if (displayMath[index].from < node.from || displayMath[index].to > node.to) partialMath = true
+    while (mathIndex < displayMath.length && displayMath[mathIndex].delimiterTo <= node.from) mathIndex++
+    let needsSource = false
+    for (let index = mathIndex; index < displayMath.length && displayMath[index].delimiterFrom < node.to; index++) {
+      const range = displayMath[index]
+      // The Markdown renderer handles dollar blocks, not raw TeX environments.
+      if (range.environment || range.delimiterFrom < node.from || range.delimiterTo > node.to) needsSource = true
     }
+    // Keep raw HTML and math fragments that cannot be rendered independently as source.
+    if (needsSource || node.name === 'HTMLBlock') continue
     if (node.name === 'LinkReference') references.push(source)
-    // Preserve source if HTML or a formula crosses CommonMark block boundaries;
-    // rendering either fragment in isolation would change its interpretation.
-    else if (node.name !== 'HTMLBlock' && !partialMath) blocks.push({ from: node.from, to: node.to, source })
+    else blocks.push({ from: node.from, to: node.to, source })
   }
   return { blocks, references: references.join('\n') }
 }

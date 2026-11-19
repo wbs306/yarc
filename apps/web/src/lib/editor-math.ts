@@ -43,8 +43,8 @@ export function scanEditorMath(text: string, language: string, previousTree?: Ma
   const ranges = scanLatexMath(parts.join(''), language === 'markdown' ? 'markdown' : 'latex')
     // Both lists are ordered: avoid comparing every formula with every code block.
     .filter(range => {
-      while (codeIndex < code.length && code[codeIndex].to <= range.from) codeIndex++
-      return codeIndex === code.length || range.to < code[codeIndex].from
+      while (codeIndex < code.length && code[codeIndex].to <= range.delimiterFrom) codeIndex++
+      return codeIndex === code.length || range.delimiterTo <= code[codeIndex].from
     })
   return { ranges, code, tree }
 }

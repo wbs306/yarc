@@ -36,6 +36,12 @@ test('lists and GFM tables render as whole blocks; formulas spanning CommonMark 
   assert.ok(sources.every(source => !source.includes('$$')))
 })
 
+test('leaves equation environments editable instead of rendering them as Markdown prose', () => {
+  const doc = '# Title\n\n\\begin{equation}\nx+1\n\\label{eq:test}\n\\end{equation}\n\ntail'
+  const state = create(doc)
+  assert.deepEqual(widgets(state).map(widget => widget.source), ['tail'])
+})
+
 test('multi-selection reveals every intersecting block; selecting all reveals all source', () => {
   const doc = '# Title\n\nfirst paragraph\n\nsecond paragraph\n'
   let state = EditorState.create({ doc, extensions: [EditorState.allowMultipleSelections.of(true), markdownMathPreview, markdownLivePreview],

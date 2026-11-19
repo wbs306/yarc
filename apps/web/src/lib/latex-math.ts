@@ -1,6 +1,9 @@
 export interface LatexMathRange {
   from: number
   to: number
+  delimiterFrom: number
+  delimiterTo: number
+  environment?: string
   source: string
   display: boolean
   complete: boolean
@@ -23,12 +26,10 @@ function environmentSource(source: string, environment?: string) {
 // delimiter cannot turn the rest of a document into a preview.
 export function scanLatexMath(text: string, dialect: 'latex' | 'markdown' = 'latex'): LatexMathRange[] {
   const ranges: LatexMathRange[] = []
-  // Markdown callers mask code regions first; percent signs and TeX commands
-  // outside dollar math are ordinary prose, not comments or math openers.
-  const tokens = dialect === 'markdown'
-    ? /\\.|\${1,2}/g
-    : /%[^\n]*|\\(?:begin|end)\{([A-Za-z*]+)\}|\\verb\*?(?![A-Za-z])|\\[()[\]]|\\.|\${1,2}/g
-  let active: { from: number; close: string; display: boolean; environment?: string; limit: number } | undefined
+  // Markdown callers mask code regions first. Outside explicit equation
+  // environments, Markdown keeps its existing dollar-only math and literal %.
+  const tokens = /%|\\(?:begin|end)\{([A-Za-z*]+)\}|\\verb\*?(?![A-Za-z])|\\[()[\]]|\\.|\${1,2}/g
+  let active: { from: number; delimiterFrom: number; close: string; display: boolean; environment?: string; limit: number } | undefined
   let match: RegExpExecArray | null
 
   const finish = (to: number, complete: boolean) => {
@@ -36,6 +37,9 @@ export function scanLatexMath(text: string, dialect: 'latex' | 'markdown' = 'lat
     ranges.push({
       from: active.from,
       to,
+      delimiterFrom: active.delimiterFrom,
+      delimiterTo: complete ? to + active.close.length : to,
+      environment: active.environment,
       source: environmentSource(text.slice(active.from, to), active.environment),
       display: active.display,
       complete,
@@ -47,8 +51,13 @@ export function scanLatexMath(text: string, dialect: 'latex' | 'markdown' = 'lat
     const token = match[0]
     const start = match.index
     if (active && start >= active.limit) finish(active.limit, false)
-    if (token.startsWith('%')) continue
-    if (token === '\\verb' || token === '\\verb*') {
+    const tex = dialect === 'latex' || active?.environment !== undefined
+    if (token === '%' && tex) {
+      const lineEnd = text.indexOf('\n', tokens.lastIndex)
+      tokens.lastIndex = lineEnd < 0 ? text.length : lineEnd
+      continue
+    }
+    if (tex && (token === '\\verb' || token === '\\verb*')) {
       const delimiter = text[tokens.lastIndex]
       if (delimiter && !/\s/.test(delimiter)) {
         const end = text.indexOf(delimiter, tokens.lastIndex + 1)
@@ -58,7 +67,7 @@ export function scanLatexMath(text: string, dialect: 'latex' | 'markdown' = 'lat
       continue
     }
     const environment = match[1]
-    if (environment && token.startsWith('\\begin') && verbatimEnvironments.has(environment)) {
+    if (tex && environment && token.startsWith('\\begin') && verbatimEnvironments.has(environment)) {
       const closing = `\\end{${environment}}`
       const end = text.indexOf(closing, tokens.lastIndex)
       tokens.lastIndex = end < 0 ? text.length : end + closing.length
@@ -86,7 +95,8 @@ export function scanLatexMath(text: string, dialect: 'latex' | 'markdown' = 'lat
       display = false
     } else if (dialect === 'latex' && token === '\\[') {
       close = '\\]'
-    } else if (environment && token.startsWith('\\begin') && mathEnvironments.has(environment)) {
+    } else if (environment && token.startsWith('\\begin') && (dialect === 'latex'
+      ? mathEnvironments.has(environment) : environment === 'equation' || environment === 'equation*')) {
       close = `\\end{${environment}}`
       display = environment !== 'math'
     }
@@ -96,7 +106,7 @@ export function scanLatexMath(text: string, dialect: 'latex' | 'markdown' = 'lat
     // Blank lines are not valid inside standard math environments.
     const blank = /\n[\t \r]*\n/.exec(text.slice(from, limit))
     if (blank) limit = from + blank.index
-    active = { from, close, display, environment, limit }
+    active = { from, delimiterFrom: start, close, display, environment, limit }
   }
   if (active) finish(active.limit, false)
   return ranges

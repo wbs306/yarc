@@ -1,4 +1,4 @@
-import katex from 'katex'
+import katex, { type KatexOptions } from 'katex'
 import { Facet, StateEffect, StateField, type Extension } from '@codemirror/state'
 import { EditorView, showTooltip, type Tooltip } from '@codemirror/view'
 import { mathAtPosition, type LatexMathRange } from './latex-math'
@@ -44,18 +44,57 @@ export const latexMathPreviewState = StateField.define<PreviewState>({
   },
 })
 
-// CodeMirror reuses a tooltip view by its `create` function identity. Keep
-// that identity for a scanned formula while allowing the anchor to follow
-// the caret. Weak keys release old entries after edits or editor disposal.
+export function mathPreviewOptions(range: LatexMathRange): KatexOptions {
+  return {
+    displayMode: range.display,
+    throwOnError: true,
+    trust: false,
+    strict: 'ignore',
+    maxExpand: 200,
+    maxSize: 20,
+    // Consume labels without numbering or mutating the source. Keep macros local to each render.
+    macros: { '\\label': { tokens: [], numArgs: 1 } },
+  }
+}
+
+function blockTooltipCoords(view: EditorView, range: LatexMathRange, dom: HTMLElement) {
+  const start = view.coordsAtPos(range.delimiterFrom, 1)
+  const end = view.coordsAtPos(range.delimiterTo, -1)
+  // Fall back to the height map when a delimiter is outside the drawn viewport.
+  const top = start?.top ?? view.documentTop + view.lineBlockAt(range.delimiterFrom).top * view.scaleY
+  const bottom = end?.bottom ?? view.documentTop + view.lineBlockAt(range.delimiterTo).bottom * view.scaleY
+  const editor = view.scrollDOM.getBoundingClientRect()
+  const page = view.dom.ownerDocument.documentElement
+  const visibleTop = Math.max(editor.top, 0)
+  const visibleBottom = Math.min(editor.bottom, page.clientHeight)
+  const height = dom.getBoundingClientRect().height
+  const gap = 7
+  const above = top - height - gap
+  const below = bottom + gap
+  // Re-evaluate the preferred side on every measure, including after scrolling
+  // or when KaTeX replaces the placeholder. If neither side fits, clip it.
+  const y = bottom <= visibleTop || top >= visibleBottom ? visibleTop
+    : above > visibleTop ? above
+    : below + height <= visibleBottom ? below : visibleTop
+  const left = Math.max(editor.left, Math.min(editor.right, start?.left ?? end?.left ?? editor.left))
+  return { left, right: left, top: y, bottom: y }
+}
+
+// Preserve the renderer for a scanned formula as the caret moves. Block
+// anchors are fixed, while inline previews continue to follow the caret.
 const formulaTooltips = new WeakMap<LatexMathRange, Tooltip>()
 
 function previewTooltip(range: LatexMathRange, position: number): Tooltip {
+  const pos = range.display ? range.delimiterFrom : position
   const cached = formulaTooltips.get(range)
-  if (cached) return { ...cached, pos: position }
+  if (cached) return range.display ? cached : { ...cached, pos }
   const tooltip: Tooltip = {
-    pos: position,
-    above: true,
-    arrow: true,
+    pos,
+    // For display math getCoords supplies the final top edge. CodeMirror
+    // still handles horizontal positioning and scroll/resize measurements.
+    above: !range.display,
+    strictSide: range.display,
+    arrow: !range.display,
     create(view) {
       const dom = document.createElement('div')
       dom.className = 'latex-math-preview'
@@ -80,14 +119,7 @@ function previewTooltip(range: LatexMathRange, position: number): Tooltip {
           body.textContent = '输入公式后将在此预览'
         } else {
           try {
-            katex.render(range.source, body, {
-              displayMode: range.display,
-              throwOnError: true,
-              trust: false,
-              strict: 'ignore',
-              maxExpand: 200,
-              maxSize: 20,
-            })
+            katex.render(range.source, body, mathPreviewOptions(range))
             if (!range.complete) note.textContent = '公式分隔符尚未闭合 · 临时预览'
           } catch {
             body.textContent = '公式尚未完整，或含有预览不支持的命令'
@@ -95,7 +127,12 @@ function previewTooltip(range: LatexMathRange, position: number): Tooltip {
         }
         view.requestMeasure()
       }, 150)
-      return { dom, destroy: () => window.clearTimeout(timer) }
+      return {
+        dom,
+        getCoords: range.display ? () => blockTooltipCoords(view, range, dom) : undefined,
+        resize: !range.display,
+        destroy: () => window.clearTimeout(timer),
+      }
     },
   }
   formulaTooltips.set(range, tooltip)

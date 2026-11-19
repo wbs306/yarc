@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import katex from 'katex'
 import { Compartment, EditorState } from '@codemirror/state'
 import { showTooltip } from '@codemirror/view'
-import { blockLatexMathPreview, focusLatexMathPreview, hideLatexMathPreview, latexMathPreview, latexMathPreviewState, markdownMathPreview } from './latex-math-preview'
+import { blockLatexMathPreview, focusLatexMathPreview, hideLatexMathPreview, latexMathPreview, latexMathPreviewState, markdownMathPreview, mathPreviewOptions } from './latex-math-preview'
 import type { EditorView } from '@codemirror/view'
 
 function focusedState() {
@@ -85,6 +86,8 @@ test('Markdown excludes code and escaped dollars, without treating TeX prose as 
     ['    $x$', 6],
     ['\\$x', 3],
     ['\\(x\\)', 3],
+    ['`\\begin{equation}x\\end{equation}`', 18],
+    ['```tex\n\\begin{equation}x\\end{equation}\n```', 24],
     ['$oops\n```\n$x$\n```', 11],
     ['$oops `$x$`', 9],
   ] as const) {
@@ -130,6 +133,38 @@ test('switching LaTeX and Markdown rescans unchanged text and clears stale block
 })
 
 for (const [language, extension] of [['latex', latexMathPreview], ['markdown', markdownMathPreview]] as const) {
+  test(`${language}: display math remains anchored to the opening delimiter`, () => {
+    const doc = 'before\n\n$$\nx+1\ny-1\n$$\n\nafter'
+    let state = EditorState.create({ doc, selection: { anchor: doc.indexOf('x+1') }, extensions: [extension] })
+      .update({ effects: focusLatexMathPreview.of(true) }).state
+    const tooltip = state.facet(showTooltip).find(Boolean)!
+    assert.equal(tooltip.pos, doc.indexOf('$$'))
+    state = state.update({ selection: { anchor: doc.indexOf('y-1') } }).state
+    assert.equal(state.facet(showTooltip).find(Boolean), tooltip)
+    state = state.update({ selection: { anchor: doc.indexOf('after') } }).state
+    assert.equal(tooltipCount(state), 0)
+  })
+
+  test(`${language}: equation previews gathered math without rendering label metadata`, () => {
+    const body = String.raw`\begin{gathered}
+\mathcal I_n=\{i\in\mathcal I\mid \|\boldsymbol q_n-\boldsymbol q_i\|_2\le R_i\},\\
+\mathcal N_i=\{n\in\mathcal N\mid i\in\mathcal I_n\}.
+\end{gathered}
+\label{eq:coverage}`
+    for (const environment of ['equation', 'equation*']) {
+      const doc = `before\n\n\\begin{${environment}}\n${body}\n\\end{${environment}}\n\nafter`
+      const state = EditorState.create({ doc, selection: { anchor: doc.indexOf('\\label') }, extensions: [extension] })
+        .update({ effects: focusLatexMathPreview.of(true) }).state
+      assert.equal(state.facet(showTooltip).find(Boolean)?.pos, doc.indexOf('\\begin'))
+      const [range] = state.field(latexMathPreviewState).ranges
+      assert.equal(range.complete, true)
+      const rendered = katex.renderToString(range.source, { ...mathPreviewOptions(range), output: 'html' })
+      assert.match(rendered, /class="katex-display"/)
+      assert.doesNotMatch(rendered, /eq:coverage|eqn-num/)
+      assert.equal(state.doc.toString(), doc)
+    }
+  })
+
   test(`${language}: clicks within one formula reuse the tooltip renderer and update its anchor`, () => {
     let state = EditorState.create({ doc: '$x+1$ and $y$', selection: { anchor: 1 }, extensions: [extension] })
       .update({ effects: focusLatexMathPreview.of(true) }).state
