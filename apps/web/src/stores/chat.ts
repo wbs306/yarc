@@ -13,6 +13,12 @@ export interface Message {
 export interface Conversation { id: string; paperId: string | null; projectId: string | null; title: string; model: string | null; modelSettings?: ConversationModelSettings | null; createdAt: string; updatedAt: string }
 export interface ModelInfo { id: string; name: string; provider: string; model?: string; reasoning?: boolean; images?: boolean; contextWindow?: string; maxTokens?: string; thinkingLevels?: string[]; source?: string }
 export interface BranchInfo { id: string; branchName: string; parentBranchId: string | null; forkMessageId: string | null; thinkingLevel?: string | null }
+interface ConversationHistoryPreload {
+  conversationId: string
+  branchId: string
+  branches: Promise<BranchInfo[] | null>
+  messages: Promise<Message[] | null>
+}
 export type AgentInteractionKind = 'confirm' | 'select' | 'input' | 'editor' | 'questionnaire' | 'notification'
 export interface AgentInteractionRequest {
   type: 'agent_interaction_request'
@@ -733,6 +739,11 @@ export const useChatStore = defineStore('chat', () => {
     conversationScope.value = projectId
     conversationListScope = projectId
     saveConversationScope(projectId)
+    // On refresh we already know the last conversation/branch IDs. Start their
+    // read-only requests alongside the list, but do not display anything until
+    // the list confirms the conversation still belongs to this scope.
+    const preferredId = conversationPrefs.get(conversationScopeKey(projectId))
+    const preload = !currentConvId.value && preferredId ? preloadConversationHistory(preferredId) : undefined
     let res: { conversations: any[] }
     try {
       res = await api.getConversations(projectId)
@@ -770,11 +781,10 @@ export const useChatStore = defineStore('chat', () => {
 
     conversations.value = nextConversations
     if (conversations.value.length && !currentConvId.value) {
-      const preferredId = conversationPrefs.get(conversationScopeKey(projectId))
       const preferred = preferredId && conversations.value.some(conversation => conversation.id === preferredId)
         ? preferredId
         : conversations.value[0].id
-      await selectConversation(preferred)
+      await selectConversation(preferred, preload?.conversationId === preferred ? preload : undefined)
     } else if (!conversations.value.length) {
       conversationPrefs.delete(conversationScopeKey(projectId))
       saveConversationPrefs()
@@ -799,6 +809,22 @@ export const useChatStore = defineStore('chat', () => {
     modelsError.value = ''
     try { const r = await api.getModels(); models.value = r.models || []; ensureModel() }
     catch (e) { models.value = []; modelsError.value = (e as Error).message }
+  }
+
+  // No reactive writes here: speculative responses may belong to a removed
+  // conversation, a deleted branch, or a workspace the user has already left.
+  const preloadConversationHistory = (convId: string): ConversationHistoryPreload => {
+    const branchId = convBranchPrefs.get(convId) || 'main'
+    return {
+      conversationId: convId,
+      branchId,
+      branches: api.getBranches(convId).then(result => result.branches || []).catch(() => null),
+      messages: currentConvId.value === convId && branchCache.value.has(branchId)
+        ? Promise.resolve(null)
+        : api.switchBranch(convId, branchId)
+            .then(result => (result.messages || []).map(message => convertPiMessage(message, convId, branchId)))
+            .catch(() => null),
+    }
   }
 
   const loadBranches = async (convId: string): Promise<BranchInfo[]> => {
@@ -928,7 +954,7 @@ export const useChatStore = defineStore('chat', () => {
     await api.closePiTui(convId, surfaceId, { branchId, clientId: runtimeClientId }).catch(() => {})
   }
 
-  const selectConversation = async (id: string) => {
+  const selectConversation = async (id: string, preloaded?: ConversationHistoryPreload) => {
     if (!id) return
     conversationPrefs.set(conversationScopeKey(conversationScope.value), id)
     saveConversationPrefs()
@@ -984,34 +1010,41 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
     })()
-    await settingsLoad
+    // Model settings and history are independent. Keep send() waiting on
+    // settingsLoad, but do not hide messages behind a slow settings request.
+    const settingsForSelection = settingsLoad
+    const history = preloaded?.conversationId === id ? preloaded : preloadConversationHistory(id)
+    const loadedBranches = await history.branches ?? await loadBranches(id)
     if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
-
-    const loadedBranches = await loadBranches(id)
-    if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
+    branches.value = loadedBranches
 
     const pref = convBranchPrefs.get(id)
     const main = loadedBranches.find(b => b.branchName === 'main')
     const target = (pref && loadedBranches.find(b => b.id === pref)?.id) || main?.id || loadedBranches[0]?.id
 
     if (target) {
+      currentBranchId.value = target
+      const preloadedMessages = history.branchId === target ? await history.messages : null
+      if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
+      if (preloadedMessages !== null) setBranchMessages(target, preloadedMessages)
+      else await loadBranchMsgs(id, target)
+      if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
+      // History is already rendered. Both requests may wait for the same Pi
+      // Runtime to start, so issue them together instead of back to back.
+      // The runtime snapshot still finishes before attachStream because it
+      // resets runtime UI state that the stream replay then fills in.
+      await Promise.all([settingsForSelection, loadContextUsage(id, target), loadRuntimeSnapshot(id, target)])
+      if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
       if (!conversation?.modelSettings && revision === settingsRevision) {
         const level = loadedBranches.find(b => b.id === target)?.thinkingLevel
         if (level && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level)) {
           reasoningEffort.value = level as ChatThinkingLevel
         }
       }
-      currentBranchId.value = target
-      await loadBranchMsgs(id, target)
-      if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
-      // History is already rendered. Both requests may wait for the same Pi
-      // Runtime to start, so issue them together instead of back to back.
-      // The runtime snapshot still finishes before attachStream because it
-      // resets runtime UI state that the stream replay then fills in.
-      await Promise.all([loadContextUsage(id, target), loadRuntimeSnapshot(id, target)])
     } else {
       currentBranchId.value = null
       currentContextUsage.value = null
+      await settingsForSelection
     }
     if (selection !== conversationSelectionSeq || currentConvId.value !== id) return
 
@@ -1869,6 +1902,9 @@ export const useChatStore = defineStore('chat', () => {
 
     const bid = (sm as any).branchId || currentBranchId.value
     const replayEvents = Array.isArray(r.events) ? r.events : []
+    const excludedMessageIds = new Set<string>(Array.isArray(r.excludedMessageIds) ? r.excludedMessageIds : [])
+    const isExcludedEvent = (event: { messageId?: string; assistantMessageId?: string }) =>
+      excludedMessageIds.has(event.assistantMessageId || event.messageId || '')
     const recoveredUser = r.userMessage as Message | null | undefined
     const recoveredUserEntryId = recoveredUser?.id
       ? replayEvents.find((event: any) => event?.type === 'pi_user_entry' && event.messageId === recoveredUser.id)?.entryId
@@ -1902,17 +1938,19 @@ export const useChatStore = defineStore('chat', () => {
         textQueues.delete(messageId)
         assistantEntryAliases.delete(messageId)
       }
-      const retained = arr.filter(message => !replayAssistantIds.has(message.id))
+      const retained = arr.filter(message => !replayAssistantIds.has(message.id) && !excludedMessageIds.has(message.id))
 
       // The optimistic user message only lived in the old page. Restore it on
       // refresh unless Pi JSONL has already supplied its canonical entry.
-      if (recoveredUser?.id && !retained.some(m => m.id === recoveredUserEntryId)) {
+      if (recoveredUser?.id && !excludedMessageIds.has(recoveredUser.id) && !retained.some(m => m.id === recoveredUserEntryId)) {
         reconcilePendingUserMessage(retained, recoveredUser)
       }
 
-      retained.push(msgRef)
+      // context_compact may have abandoned the run's original assistant. The
+      // root ID still identifies the transport, but is no longer a display row.
+      if (!excludedMessageIds.has(sm.id)) retained.push(msgRef)
       branchCache.value.set(bid, [...retained])
-      msgRef = branchCache.value.get(bid)![retained.length - 1]!
+      msgRef = branchCache.value.get(bid)!.find(message => message.id === sm.id) || msgRef
     }
 
     // Hydrate everything already buffered in one synchronous pass, then attach
@@ -1922,6 +1960,9 @@ export const useChatStore = defineStore('chat', () => {
     if (convId === currentConvId.value) streamingContent.value = ''
     for (const event of replayEvents) {
       replaySequence = Math.max(replaySequence, Number(event?.eventSequence || 0))
+      // Advance the cursor even for discarded old-path messages; otherwise
+      // attaching the socket would replay them again below the compact summary.
+      if (isExcludedEvent(event)) continue
       if (event?.type === 'pi_user_entry') {
         applyPiUserEntry(event, bid)
       } else if (event?.type === 'pi_assistant_entry') {
@@ -1976,6 +2017,7 @@ export const useChatStore = defineStore('chat', () => {
           streamEventSequences.delete(sm.id)
           ws.close(); return
         }
+        if (isExcludedEvent(d)) return
         if (d.type === 'pi_user_entry') {
           applyPiUserEntry(d, bid)
           return

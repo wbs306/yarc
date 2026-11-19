@@ -187,10 +187,15 @@ conversations.get('/:id/streaming-message', async (c) => {
       metadata: { pending: true, segments: [], streamStatus: 'streaming' },
       createdAt: new Date(bufferedStream?.createdAt || activeStream.startedAt).toISOString(),
     }
+    // Capture the replay before reading the Session: every commit in this
+    // snapshot is already on disk, even if the producer continues meanwhile.
+    const events = streamBuffer.getEvents(activeStream.messageId)
+    const replayState = await piConversationService.getStreamReplayState(id, message.branchId || 'main', events)
     return c.json({
       message,
       userMessage: bufferedStream.userMessage || null,
-      events: streamBuffer.getEvents(activeStream.messageId),
+      events,
+      ...replayState,
       fromBuffer: true,
     })
   }

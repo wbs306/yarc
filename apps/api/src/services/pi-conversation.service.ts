@@ -6,6 +6,7 @@
  */
 
 import { prisma } from '@yarc/db'
+import type { ChatEvent, ChatStreamReplayState } from '@yarc/shared'
 import { writeFile } from 'node:fs/promises'
 import {
   type SessionEntry,
@@ -175,17 +176,57 @@ export class PiConversationService {
    * Get messages for a branch.
    */
   async getBranchMessages(conversationId: string, branchId: string): Promise<ConversationMessage[]> {
-    const sessionFile = await this.getSessionFile(conversationId, branchId)
-    if (!sessionFile) return []
-
     try {
-      const sm = SessionManager.open(sessionFile)
+      // The branch metadata already includes both the file and saved leaf.
+      // Reuse one snapshot instead of querying the same metadata twice on the
+      // history loading path. Keep legacy session-file fallback when needed.
       const branchMeta = await this.getBranchMeta(conversationId, branchId)
+      const sessionFile = branchMeta?.sessionFile || await this.getSessionFile(conversationId, branchId)
+      if (!sessionFile) return []
+      const sm = SessionManager.open(sessionFile)
       const branch = getSessionBranch(sm, branchMeta?.leafEntryId)
       return this.entriesToMessages(branch, branchMeta)
     } catch (err) {
       console.error('[PiConversationService] Failed to read branch messages:', err)
       return []
+    }
+  }
+
+  /**
+   * A run can survive context_compact/tree navigation. Its buffered events still
+   * include messages committed on the old path, which must not be replayed below
+   * the new path's summary. Only exclude verified off-path commits: a descendant
+   * of the saved leaf may simply be newer than the last metadata update.
+   */
+  async getStreamReplayState(conversationId: string, branchId: string, events: readonly unknown[]): Promise<ChatStreamReplayState> {
+    const commits = events.filter((event): event is Extract<ChatEvent, { type: 'pi_user_entry' | 'pi_assistant_entry' }> => {
+      if (!event || typeof event !== 'object') return false
+      const candidate = event as Record<string, unknown>
+      return (candidate.type === 'pi_user_entry' || candidate.type === 'pi_assistant_entry')
+        && candidate.conversationId === conversationId
+        && typeof candidate.messageId === 'string'
+        && typeof candidate.entryId === 'string'
+        && typeof candidate.sessionFile === 'string'
+    })
+    if (!commits.length) return { excludedMessageIds: [] }
+
+    try {
+      const branchMeta = await this.getBranchMeta(conversationId, branchId)
+      const sessionFile = branchMeta?.sessionFile || await this.getSessionFile(conversationId, branchId)
+      if (!sessionFile) return { excludedMessageIds: [] }
+      const manager = SessionManager.open(sessionFile)
+      const branch = getSessionBranch(manager, branchMeta?.leafEntryId)
+      const leafId = branch.at(-1)?.id
+      if (!leafId) return { excludedMessageIds: [] }
+      const activeIds = new Set(branch.map(entry => entry.id))
+      const excludedMessageIds = commits.filter(event => {
+        if (event.sessionFile !== sessionFile || activeIds.has(event.entryId) || !manager.getEntry(event.entryId)) return false
+        return !manager.getBranch(event.entryId).some(entry => entry.id === leafId)
+      }).map(event => event.messageId)
+      return { excludedMessageIds: [...new Set(excludedMessageIds)] }
+    } catch {
+      // An unreadable/missing Session is not evidence that messages are obsolete.
+      return { excludedMessageIds: [] }
     }
   }
 

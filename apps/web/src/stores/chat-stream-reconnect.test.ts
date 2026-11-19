@@ -285,3 +285,87 @@ test('a model-settings load failure prevents sending with another conversation�
   assert.match(store.chatError, /加载模型设置失败/)
   assert.equal(MockWebSocket.instances.length, 0)
 })
+
+test('reconnect after context_compact does not append the abandoned pre-compact turn below the summary', async t => {
+  setupBrowser()
+  MockWebSocket.instances = []
+  t.mock.method(globalThis, 'fetch', async input => {
+    const url = String(input)
+    if (url.endsWith('/model-settings')) return json({ model: null, modelSettings: null })
+    if (url.endsWith('/branches')) return json({ branches: [{ id: 'main', branchName: 'main' }] })
+    if (url.includes('/switch-branch/')) return json({ messages: [
+      { id: 'prefix', role: 'user', content: 'Earlier question' },
+      { id: 'summary', role: 'system', isBranchSummary: true, branchSummary: 'Handoff' },
+      { id: 'after-entry', role: 'assistant', content: 'After compact' },
+    ] })
+    if (url.includes('/context-usage?')) return json({ contextUsage: null })
+    if (url.includes('/agent-interactions/runtime/')) return json({ runtime: { commands: [], state: 'running', surfaces: [], uiEvents: [] } })
+    if (url.endsWith('/streaming-message')) return json({
+      message: { id: 'run-root', branchId: 'main', role: 'assistant' },
+      userMessage: { id: 'old-user', role: 'user', content: 'Summarize then continue', metadata: {} },
+      excludedMessageIds: ['old-user', 'run-root', 'old-tool-turn'],
+      events: [
+        { type: 'pi_user_entry', messageId: 'old-user', entryId: 'off-path-user', eventSequence: 1 },
+        { type: 'assistant_message_start', messageId: 'run-root', eventSequence: 2 },
+        { type: 'text', content: 'Before compact', assistantMessageId: 'run-root', eventSequence: 3 },
+        { type: 'pi_assistant_entry', messageId: 'run-root', entryId: 'off-path-assistant', eventSequence: 4 },
+        { type: 'assistant_message_start', messageId: 'old-tool-turn', eventSequence: 5 },
+        { type: 'tool_call', toolCallId: 'compact', toolName: 'context_compact', input: '{}', assistantMessageId: 'old-tool-turn', eventSequence: 6 },
+        { type: 'pi_assistant_entry', messageId: 'old-tool-turn', entryId: 'off-path-tool', eventSequence: 7 },
+        { type: 'assistant_message_start', messageId: 'after-temp', eventSequence: 8 },
+        { type: 'text', content: 'After compact', assistantMessageId: 'after-temp', eventSequence: 9 },
+        { type: 'pi_assistant_entry', messageId: 'after-temp', entryId: 'after-entry', eventSequence: 10 },
+        { type: 'assistant_message_start', messageId: 'live-tail', eventSequence: 11 },
+        { type: 'text', content: 'Continuing', assistantMessageId: 'live-tail', eventSequence: 12 },
+        { type: 'tool_result', toolCallId: 'compact', result: 'already compacted', assistantMessageId: 'old-tool-turn', eventSequence: 13 },
+      ],
+    })
+    throw new Error(`Unexpected API call: ${url}`)
+  })
+
+  const store = useChatStore(createPinia())
+  await store.selectConversation('compacted')
+  assert.deepEqual(store.messages.map(message => message.id), ['prefix', 'summary', 'after-entry', 'live-tail'])
+  assert.equal(store.messages[2].content, 'After compact')
+  assert.equal(store.messages[3].content, 'Continuing')
+  const socket = MockWebSocket.instances[0]
+  socket.open()
+  assert.equal(JSON.parse(socket.sent[0]).afterSequence, 13)
+  socket.onmessage?.({ data: JSON.stringify({ type: 'tool_result', toolCallId: 'compact', result: 'late old result', assistantMessageId: 'old-tool-turn', eventSequence: 14 }) })
+  socket.onmessage?.({ data: JSON.stringify({ type: 'text', content: ' live', assistantMessageId: 'live-tail', eventSequence: 15 }) })
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(store.messages.at(-1)?.content, 'Continuing live')
+  assert.deepEqual(store.messages.map(message => message.id), ['prefix', 'summary', 'after-entry', 'live-tail'])
+})
+
+test('conversation history renders before slow model settings without attaching the stream early', async t => {
+  setupBrowser()
+  MockWebSocket.instances = []
+  let resolveSettings!: (response: Response) => void
+  const settings = new Promise<Response>(resolve => { resolveSettings = resolve })
+  const calls: string[] = []
+  t.mock.method(globalThis, 'fetch', async input => {
+    const url = String(input)
+    calls.push(url)
+    if (url.endsWith('/model-settings')) return settings
+    if (url.endsWith('/branches')) return json({ branches: [{ id: 'main', branchName: 'main' }] })
+    if (url.includes('/switch-branch/')) return json({ messages: [{ id: 'history', role: 'user', content: 'History is ready' }] })
+    if (url.includes('/context-usage?')) return json({ contextUsage: null })
+    if (url.includes('/agent-interactions/runtime/')) return json({ runtime: { commands: [], state: 'idle', surfaces: [], uiEvents: [] } })
+    if (url.endsWith('/streaming-message')) return json({ message: null })
+    throw new Error(`Unexpected API call: ${url}`)
+  })
+  const store = useChatStore(createPinia())
+  const selected = store.selectConversation('slow-settings')
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(store.messages[0]?.content, 'History is ready')
+    assert.equal(calls.some(url => url.endsWith('/streaming-message')), false)
+  } finally {
+    resolveSettings(json({ model: 'provider/a', modelSettings: { model: 'provider/a', reasoningEffort: 'high' } }))
+    await selected
+  }
+  assert.equal(store.currentModel, 'provider/a')
+  assert.equal(store.reasoningEffort, 'high')
+  assert.equal(calls.some(url => url.endsWith('/streaming-message')), true)
+})

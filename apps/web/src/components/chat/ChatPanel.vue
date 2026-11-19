@@ -14,7 +14,7 @@ import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import type { CurrentChatResource, Project } from '@yarc/shared'
 import { requestJson } from '@/lib/api-request'
 import { isPublicSharedFilePath } from '@/lib/chat-scope'
-import { useProjectsStore } from '@/stores/projects'
+import { fetchActiveProjects, useProjectsStore } from '@/stores/projects'
 import { useRoute } from 'vue-router'
 
 const props = defineProps<{
@@ -53,7 +53,7 @@ const loadScopeProjects = async () => {
   scopeProjectsLoading.value = true
   scopeProjectsError.value = ''
   try {
-    const data = await requestJson<{ projects: Project[] }>('/api/projects')
+    const data = await fetchActiveProjects()
     if (request !== scopeProjectsRequest) return
     scopeProjects.value = data.projects.filter(project => !project.archivedAt)
     // A persisted scope may point at a project archived or deleted elsewhere.

@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { installLastPageRestoration } from '@/lib/last-page'
 
+const loadWorkbench = () => import('@/pages/PapersPage.vue')
+
 const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -69,6 +71,9 @@ installLastPageRestoration(router, {
 })
 
 router.beforeEach(async (to) => {
+  // Download public UI code while validating the session, not one RTT later.
+  // Protected components and their requests still wait for the auth result.
+  if (to.name !== 'login') void loadWorkbench().catch(() => {})
   const loggedIn = await hasValidSession()
 
   if (to.name === 'login') {

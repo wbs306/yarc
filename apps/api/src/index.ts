@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url'
 
 import { config } from './lib/config.js'
 import { corsMiddleware } from './lib/cors.js'
+import { staticCompression } from './lib/static-compression.js'
 import { authMiddleware } from './lib/auth.js'
 import { errorHandler } from './lib/errors.js'
 import { disposeModelServiceManagers } from './lib/model-service-manager.js'
@@ -492,6 +493,7 @@ const runtimeDir =
       : dirname(fileURLToPath(import.meta.url))
 const webDistDir = join(runtimeDir, '../../web/dist')
 
+app.use('/assets/*', staticCompression)
 app.use('/assets/*', serveStatic({
   root: webDistDir,
   onFound: (_path, c) => c.header('Cache-Control', 'public, max-age=31536000, immutable'),

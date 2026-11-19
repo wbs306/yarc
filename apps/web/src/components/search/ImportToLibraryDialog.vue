@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type { SearchPaper } from '@yarc/shared'
 import { useApi } from '@/composables/useApi'
 import { usePaperStore } from '@/stores/paper'
@@ -160,9 +160,11 @@ const importPapers = async () => {
   }
 }
 
-onMounted(() => {
-  loadCategories()
-})
+// Keep the component alive for import-job polling, but do not fetch data for
+// a closed dialog (including the global dialog rendered before login).
+watch(() => props.modelValue, (open) => {
+  if (open) void loadCategories()
+}, { immediate: true })
 
 onBeforeUnmount(() => {
   for (const timer of jobPollTimers.values()) window.clearTimeout(timer)

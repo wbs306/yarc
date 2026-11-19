@@ -39,7 +39,19 @@ app.mount('#app')
 const serviceWorkerSupportedHere = window.isSecureContext
   || ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)
 if (serviceWorkerSupportedHere && 'serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch((error: unknown) => {
+  navigator.serviceWorker.register('/sw.js').then(async () => {
+    // Initial route assets may have loaded before the new worker activated.
+    // Preserve offline access to what was opened without precaching all routes.
+    await router.isReady()
+    const registration = await navigator.serviceWorker.ready
+    const assets = performance.getEntriesByType('resource')
+      .map(entry => entry.name)
+      .filter(name => {
+        const url = new URL(name)
+        return url.origin === window.location.origin && url.pathname.startsWith('/assets/')
+      })
+    registration.active?.postMessage({ type: 'cache-visited-assets', assets })
+  }).catch((error: unknown) => {
     console.warn('[YARC] Service Worker registration failed:', error)
   })
 }

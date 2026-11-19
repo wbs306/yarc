@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, computed } from 'vue'
+import { defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePaperStore, type Paper } from '@/stores/paper'
 import { useChatStore } from '@/stores/chat'
@@ -24,8 +24,6 @@ import {
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
 import { useProjectsStore } from '@/stores/projects'
-import ProjectWorkspaceTools from '@/components/projects/ProjectWorkspaceTools.vue'
-import HistoryCompareEditor from '@/components/projects/HistoryCompareEditor.vue'
 import type {
   CurrentChatResource,
   FileNode,
@@ -37,14 +35,8 @@ import type {
   ReparsePaperInfo,
 } from '@yarc/shared'
 
-import PdfViewer from '@/components/pdf/PdfViewer.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
 import FileTree from '@/components/files/FileTree.vue'
-import CodeEditor from '@/components/files/CodeEditor.vue'
-import LatexBuildPanel from '@/components/files/LatexBuildPanel.vue'
-import OfficePreview from '@/components/files/OfficePreview.vue'
-import SettingsContent from '@/components/settings/SettingsContent.vue'
-import IeeeJournalBrowser from '@/components/ieee/IeeeJournalBrowser.vue'
 import UploadDialog from '@/components/papers/UploadDialog.vue'
 import TopSearchBar from '@/components/search/TopSearchBar.vue'
 import SaveToCategoryDialog from '@/components/search/SaveToCategoryDialog.vue'
@@ -54,9 +46,18 @@ import Modal from '@/components/ui/Modal.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import Select from '@/components/ui/Select.vue'
 import SortControl, { type SortOption } from '@/components/ui/SortControl.vue'
-import ProjectsPage from '@/pages/ProjectsPage.vue'
-import ProjectSettingsPage from '@/pages/ProjectSettingsPage.vue'
 import ProjectNavigation from '@/components/projects/ProjectNavigation.vue'
+
+const ProjectWorkspaceTools = defineAsyncComponent(() => import('@/components/projects/ProjectWorkspaceTools.vue'))
+const HistoryCompareEditor = defineAsyncComponent(() => import('@/components/projects/HistoryCompareEditor.vue'))
+const PdfViewer = defineAsyncComponent(() => import('@/components/pdf/PdfViewer.vue'))
+const CodeEditor = defineAsyncComponent(() => import('@/components/files/CodeEditor.vue'))
+const LatexBuildPanel = defineAsyncComponent(() => import('@/components/files/LatexBuildPanel.vue'))
+const OfficePreview = defineAsyncComponent(() => import('@/components/files/OfficePreview.vue'))
+const SettingsContent = defineAsyncComponent(() => import('@/components/settings/SettingsContent.vue'))
+const IeeeJournalBrowser = defineAsyncComponent(() => import('@/components/ieee/IeeeJournalBrowser.vue'))
+const ProjectsPage = defineAsyncComponent(() => import('@/pages/ProjectsPage.vue'))
+const ProjectSettingsPage = defineAsyncComponent(() => import('@/pages/ProjectSettingsPage.vue'))
 
 const route = useRoute()
 const router = useRouter()
@@ -141,6 +142,13 @@ const getInitialSidebarMode = (): 'library' | 'files' | 'settings' | 'ieee' | 'p
   return readPersistedLibraryView()?.kind === 'ieee_journal' ? 'ieee' : 'library'
 }
 const sidebarMode = ref<'library' | 'files' | 'settings' | 'ieee' | 'projects'>(getInitialSidebarMode())
+// Mount hidden workspaces only after their first visit, then retain form state.
+const settingsVisited = ref(false)
+const ieeeVisited = ref(false)
+watch(sidebarMode, (mode) => {
+  if (mode === 'settings') settingsVisited.value = true
+  if (mode === 'ieee') ieeeVisited.value = true
+}, { immediate: true })
 const isProjectMode = computed(() => route.name === 'projects' || route.name === 'project-workspace' || route.name === 'project-settings')
 const projectResource = ref<CurrentChatResource | null>(null)
 const projectPanel = ref<'files' | 'git' | 'history'>('files')
@@ -1398,6 +1406,28 @@ const loadWorkspaceFiles = async (silent = false) => {
   }
 }
 
+const loadWorkspaceFilesAndRestore = async () => {
+  // Run independently of library/model initialization. Late responses must not
+  // restore another scope's file or replace a file explicitly opened meanwhile.
+  const storageKey = workspaceFileStorageKey.value
+  const generation = workspaceLoadGeneration + 1
+  const canRestore = () => generation === workspaceLoadGeneration
+    && storageKey === workspaceFileStorageKey.value
+    && sidebarMode.value === 'files'
+    && !selectedWorkspaceFile.value
+  await loadWorkspaceFiles()
+  if (!canRestore()) return
+  const savedPath = localStorage.getItem(storageKey)
+  if (savedPath && workspaceFiles.value.length) {
+    try {
+      const node = await ensureWorkspaceNodeLoaded(savedPath)
+      if (canRestore() && node?.type === 'file') await selectWorkspaceFile(node)
+    } catch (err) {
+      if (canRestore()) filesError.value = (err as Error).message || '恢复文件失败'
+    }
+  }
+}
+
 const loadIeeeJournalPreferences = async () => {
   ieeeJournalLoading.value = true
   ieeeJournalError.value = ''
@@ -1609,7 +1639,7 @@ const setSidebarMode = (mode: 'library' | 'files' | 'settings' | 'ieee' | 'proje
   if (route.fullPath !== router.resolve(target).fullPath) {
     router.replace(target).catch(() => {})
   }
-  if (mode === 'files' && !filesLoading.value && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFiles()
+  if (mode === 'files' && !filesLoading.value && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFilesAndRestore()
   if (mode === 'ieee' && !ieeeJournalPreferences.value.journals.length && !ieeeJournalLoading.value) {
     void loadIeeeJournalPreferences()
   }
@@ -2283,7 +2313,7 @@ watch(
       }
       void projectsStore.fetchLatexTargets(projectId).catch(() => {})
       if (!projectsStore.projects.length && !projectsStore.loading) void projectsStore.fetchProjects().catch(() => {})
-      if (!filesLoading.value && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFiles()
+      if (!filesLoading.value && (!workspaceFiles.value.length || workspaceFilesStale)) void loadWorkspaceFilesAndRestore()
     } else if (name === 'projects') {
       projectResource.value = null
       setSidebarMode('projects')
@@ -2962,7 +2992,6 @@ const onDocumentKeydown = (event: KeyboardEvent) => {
 }
 
 onMounted(async () => {
-  webDavSyncStore.initialize()
   window.addEventListener('resize', onResize)
   window.addEventListener('yarc-open-chat', openChatPanel)
   window.addEventListener('yarc-open-temporary-pdf', onOpenTemporaryPdf)
@@ -2977,37 +3006,12 @@ onMounted(async () => {
   await Promise.all([
     paperStore.fetchPapers({ limit: 500 }),
     api.getCategories().then((res) => { categories.value = res.categories }).catch(() => {}),
-    isProjectWorkspace.value
-      ? projectsStore.fetchProject(projectWorkspaceId.value).catch(() => null)
-      : Promise.resolve(),
     chatStore.fetchModels(),
     fetchSearchCategories(),
     loadIeeeJournalPreferences(),
   ])
 
   if (route.name === 'home') await restorePersistedLibraryView()
-
-  // Restore only within the scope that requested the tree, and never replace
-  // a file the user opened while initialization was still pending.
-  if (sidebarMode.value === 'files') {
-    const storageKey = workspaceFileStorageKey.value
-    const generation = workspaceLoadGeneration + 1
-    const canRestore = () => generation === workspaceLoadGeneration
-      && storageKey === workspaceFileStorageKey.value
-      && sidebarMode.value === 'files'
-      && !selectedWorkspaceFile.value
-    await loadWorkspaceFiles()
-    if (!canRestore()) return
-    const savedPath = localStorage.getItem(storageKey)
-    if (savedPath && workspaceFiles.value.length) {
-      try {
-        const node = await ensureWorkspaceNodeLoaded(savedPath)
-        if (canRestore() && node?.type === 'file') await selectWorkspaceFile(node)
-      } catch (err) {
-        if (canRestore()) filesError.value = (err as Error).message || '恢复文件失败'
-      }
-    }
-  }
 })
 
 onBeforeUnmount(() => {
@@ -5318,6 +5322,7 @@ const showSearchPaperPopup = (paper: any) => {
 
         <section v-show="!hasPaper && sidebarMode === 'ieee'" class="paper-library workspace-panel ieee-workspace-panel">
           <IeeeJournalBrowser
+            v-if="ieeeVisited"
             :journals="ieeeJournalPreferences.journals"
             :selected-journal-id="selectedIeeeJournalId"
             :default-ranking-keywords="ieeeJournalPreferences.defaultRankingKeywords"
@@ -5335,7 +5340,7 @@ const showSearchPaperPopup = (paper: any) => {
               <p>{{ settingsSections.find(section => section.id === settingsSection)?.label }}</p>
             </div>
           </div>
-          <SettingsContent :active-tab="settingsSection" />
+          <SettingsContent v-if="settingsVisited" :active-tab="settingsSection" />
         </section>
           </div>
         </Transition>

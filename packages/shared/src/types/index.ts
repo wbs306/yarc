@@ -364,6 +364,11 @@ export interface ChatRequest {
   }
 }
 
+/** Replay messages committed on an abandoned Session path must not be restored. */
+export interface ChatStreamReplayState {
+  excludedMessageIds: string[]
+}
+
 export type ChatEvent =
   | { type: 'assistant_message_start'; messageId: string; runGroupId: string; source: 'user' | 'extension' | 'continuation'; conversationId: string; branchId: string }
   | { type: 'text'; content: string; conversationId?: string; branchId?: string; assistantMessageId?: string; runGroupId?: string }

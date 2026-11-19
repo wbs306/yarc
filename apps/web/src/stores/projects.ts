@@ -3,6 +3,17 @@ import { defineStore } from 'pinia'
 import type { Project, ProjectGitStatus, ProjectLatexTarget } from '@yarc/shared'
 import { requestJson } from '../lib/api-request'
 
+let activeProjectsRequest: Promise<{ projects: Project[] }> | null = null
+// Share only concurrent reads, not list state: the projects page can show
+// archived entries while the chat scope picker always needs active projects.
+export const fetchActiveProjects = () => {
+  if (!activeProjectsRequest) {
+    activeProjectsRequest = requestJson<{ projects: Project[] }>('/api/projects')
+      .finally(() => { activeProjectsRequest = null })
+  }
+  return activeProjectsRequest
+}
+
 // Lets the chat drop a project scope that can no longer host conversations.
 const notifyProjectRemoved = (projectId: string) => {
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('yarc-project-removed', { detail: { projectId } }))
@@ -23,7 +34,9 @@ export const useProjectsStore = defineStore('projects', () => {
     loading.value = true
     error.value = ''
     try {
-      const data = await requestJson<{ projects: Project[] }>(`/api/projects${archived ? '?archived=true' : ''}`)
+      const data = await (archived
+        ? requestJson<{ projects: Project[] }>('/api/projects?archived=true')
+        : fetchActiveProjects())
       projects.value = data.projects
       return data.projects
     } catch (err) {

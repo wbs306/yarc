@@ -110,6 +110,89 @@ describe('PiConversationService branch projection', () => {
     }
   })
 
+  it('excludes replay commits abandoned by context_compact but keeps newer descendants of the saved leaf', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yarc-compact-replay-'))
+    try {
+      const manager = SessionManager.create(directory, directory)
+      const root = manager.appendMessage({ role: 'user', content: 'prefix', timestamp: 1 })
+      const oldUser = manager.appendMessage({ role: 'user', content: 'compact and continue', timestamp: 2 })
+      const oldAssistant = manager.appendMessage(assistantEntry('unused', null, 'stop').message as any)
+      const summary = manager.branchWithSummary(root, 'handoff summary')
+      manager.branch(summary)
+      const after = manager.appendMessage(assistantEntry('unused', null, 'stop').message as any)
+      const newer = manager.appendMessage(assistantEntry('unused', null, 'stop').message as any)
+      const sessionFile = manager.getSessionFile()!
+      const service = new PiConversationService()
+      ;(service as any).getBranchMeta = async () => ({ sessionFile, leafEntryId: after })
+      const state = await service.getStreamReplayState('conversation-1', 'main', [
+        { type: 'pi_user_entry', conversationId: 'conversation-1', messageId: 'old-user', entryId: oldUser, sessionFile },
+        ...[
+          ['old-assistant', oldAssistant], ['after', after], ['newer', newer], ['unknown', 'missing-entry'],
+        ].map(([messageId, entryId]) => ({
+          type: 'pi_assistant_entry' as const, conversationId: 'conversation-1', messageId, entryId, sessionFile,
+        })),
+        { type: 'pi_assistant_entry', conversationId: 'conversation-1', messageId: 'other-session', entryId: oldAssistant, sessionFile: '/other/session.jsonl' },
+      ])
+      assert.deepEqual(state.excludedMessageIds, ['old-user', 'old-assistant'])
+      assert.deepEqual(getSessionBranch(SessionManager.open(sessionFile), after).map(entry => entry.id), [root, summary, after])
+      ;(service as any).getBranchMeta = async () => ({ sessionFile, leafEntryId: 'legacy-missing-leaf' })
+      const fallback = await service.getStreamReplayState('conversation-1', 'main', [
+        { type: 'pi_assistant_entry', conversationId: 'conversation-1', messageId: 'newer', entryId: newer, sessionFile },
+      ])
+      assert.deepEqual(fallback.excludedMessageIds, [])
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps pre-compact messages in chronological branch order for ordinary Pi compaction', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yarc-native-compact-'))
+    try {
+      const manager = SessionManager.create(directory, directory)
+      const root = manager.appendMessage({ role: 'user', content: 'question', timestamp: 1 })
+      const before = manager.appendMessage(assistantEntry('unused', null, 'stop').message as any)
+      const compact = manager.appendCompaction('summary', before, 1000)
+      const after = manager.appendMessage(assistantEntry('unused', null, 'stop').message as any)
+      const sessionFile = manager.getSessionFile()!
+      const service = new PiConversationService()
+      ;(service as any).getSessionFile = async () => sessionFile
+      ;(service as any).getBranchMeta = async () => ({ sessionFile, leafEntryId: after })
+      const messages = await service.getBranchMessages('conversation-1', 'main')
+      assert.deepEqual(messages.map(message => message.id), [root, before, compact, after])
+      assert.equal(messages[2].isCompaction, true)
+      const replay = await service.getStreamReplayState('conversation-1', 'main', [
+        { type: 'pi_assistant_entry', conversationId: 'conversation-1', messageId: 'before', entryId: before, sessionFile },
+      ])
+      assert.deepEqual(replay.excludedMessageIds, [])
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('loads history from one metadata snapshot and keeps the legacy session-file fallback', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yarc-history-metadata-'))
+    try {
+      const manager = SessionManager.create(directory, directory)
+      const root = manager.appendMessage({ role: 'user', content: 'root', timestamp: 1 })
+      const reply = manager.appendMessage(assistantEntry('unused', null, 'stop').message as any)
+      const sessionFile = manager.getSessionFile()!
+      const service = new PiConversationService()
+      let fileLookups = 0
+      let metadataReads = 0
+      ;(service as any).getSessionFile = async () => { fileLookups++; return sessionFile }
+      ;(service as any).getBranchMeta = async () => { metadataReads++; return { sessionFile, leafEntryId: root } }
+      assert.deepEqual((await service.getBranchMessages('conversation-1', 'main')).map(message => message.id), [root])
+      assert.equal(metadataReads, 1)
+      assert.equal(fileLookups, 0)
+
+      ;(service as any).getBranchMeta = async () => null
+      assert.deepEqual((await service.getBranchMessages('conversation-1', 'main')).map(message => message.id), [root, reply])
+      assert.equal(fileLookups, 1)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('prepares an exact in-place retry for the latest failed user turn', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'yarc-failed-retry-'))
     try {

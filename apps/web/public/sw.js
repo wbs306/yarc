@@ -23,36 +23,70 @@ const cacheResponse = async (cacheName, request, response) => {
   await cache.put(request, response.clone())
 }
 
+const cacheApplicationAssets = async (assets) => {
+  const cache = await caches.open(APP_CACHE)
+  // Small batches avoid flooding the connection; use the HTTP cache when
+  // the page has already downloaded a content-hashed asset.
+  for (let index = 0; index < assets.length; index += 2) {
+    await Promise.all(assets.slice(index, index + 2).map(async (asset) => {
+      try {
+        if (await cache.match(asset)) return
+        const response = await fetch(asset)
+        if (response.ok) await cache.put(asset, response)
+      } catch {
+        // Runtime requests can fill assets missed while offline/installing.
+      }
+    }))
+  }
+}
+
 const precacheApplicationShell = async () => {
   const cache = await caches.open(APP_CACHE)
   const shell = await fetch('/', { cache: 'no-cache' })
   if (shell.ok) await cache.put('/', shell.clone())
 
-  // Vite's manifest lists every eagerly and lazily loaded build asset, so an
-  // installed app can reopen offline instead of relying on a warm browser cache.
+  // Only warm the entry and its static imports. Fetching the entire manifest
+  // competes with the visible page for bandwidth (lazy editors, PDF WASM and
+  // unused font variants). Features actually visited are cached at runtime.
   try {
     const manifestResponse = await fetch('/.vite/manifest.json', { cache: 'no-cache' })
     if (!manifestResponse.ok) return
     const manifest = await manifestResponse.json()
     const assets = new Set()
-    for (const entry of Object.values(manifest)) {
+    const visited = new Set()
+    const visit = (key) => {
+      if (visited.has(key)) return
+      visited.add(key)
+      const entry = manifest[key]
+      if (!entry) return
       if (entry.file) assets.add(`/${entry.file}`)
       for (const css of entry.css || []) assets.add(`/${css}`)
-      for (const asset of entry.assets || []) assets.add(`/${asset}`)
+      for (const dependency of entry.imports || []) visit(dependency)
     }
-    await Promise.all([...assets].map(async (asset) => {
-      try {
-        const response = await fetch(asset, { cache: 'no-cache' })
-        if (response.ok) await cache.put(asset, response)
-      } catch {
-        // A later runtime request can fill any asset missed during install.
-      }
-    }))
+    for (const [key, entry] of Object.entries(manifest)) {
+      if (entry.isEntry) visit(key)
+    }
+    await cacheApplicationAssets([...assets])
   } catch {
     // Development builds may not contain a Vite manifest. Runtime caching still
     // makes a successfully opened application available on the next visit.
   }
 }
+
+// The first page can finish downloading before this worker takes control.
+// Warm just those already-viewed assets after routing, not every lazy feature.
+self.addEventListener('message', (event) => {
+  if (event.data?.type !== 'cache-visited-assets' || !Array.isArray(event.data.assets)) return
+  const assets = new Set()
+  for (const asset of event.data.assets.slice(0, 256)) {
+    if (typeof asset !== 'string') continue
+    try {
+      const url = new URL(asset, self.location.origin)
+      if (url.origin === self.location.origin && url.pathname.startsWith('/assets/')) assets.add(url.href)
+    } catch { /* Ignore malformed messages. */ }
+  }
+  event.waitUntil(cacheApplicationAssets([...assets]))
+})
 
 self.addEventListener('install', (event) => {
   event.waitUntil(precacheApplicationShell().catch(() => {}))
@@ -83,6 +117,11 @@ const networkFirst = async (event, cacheName, fallbackToShell = false) => {
       || (fallbackToShell ? await cache.match('/') : undefined)
       || appShellResponse()
   }
+}
+
+const cachedAssetFirst = async (event) => {
+  const cache = await caches.open(APP_CACHE)
+  return await cache.match(event.request) || networkFirst(event, APP_CACHE)
 }
 
 const parseRange = (header, totalLength) => {
@@ -169,6 +208,11 @@ self.addEventListener('fetch', (event) => {
 
   if (url.pathname === '/api/files' || /^\/api\/files\/(?:content|office\/view|image|download)$/.test(url.pathname)) {
     event.respondWith(networkFirst(event, FILE_CACHE))
+    return
+  }
+
+  if (url.pathname.startsWith('/assets/') && !request.headers.has('Range')) {
+    event.respondWith(cachedAssetFirst(event))
     return
   }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type { SearchPaper } from '@yarc/shared'
 import { useApi } from '@/composables/useApi'
 import Modal from '../ui/Modal.vue'
@@ -126,9 +126,9 @@ const savePapers = async () => {
   }
 }
 
-onMounted(() => {
-  loadCategories()
-})
+watch(() => props.modelValue, (open) => {
+  if (open) void loadCategories()
+}, { immediate: true })
 </script>
 
 <template>
