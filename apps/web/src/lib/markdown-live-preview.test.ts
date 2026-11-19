@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { Compartment, EditorSelection, EditorState } from '@codemirror/state'
+import { Compartment, EditorSelection, EditorState, type StateEffect, type TransactionSpec } from '@codemirror/state'
+import type { EditorView } from '@codemirror/view'
 import { markdownMathPreview } from './latex-math-preview'
 import { markdownLivePreview, markdownLivePreviewState } from './markdown-live-preview'
 
@@ -79,6 +80,61 @@ test('raw HTML and its contents stay source; mode changes preserve the exact doc
   state = state.update({ effects: compartment.reconfigure(markdownLivePreview) }).state
   assert.deepEqual(widgets(state).map(widget => widget.source), ['paragraph'])
   assert.equal(state.doc.toString(), doc)
+})
+
+test('block replacements include their boundaries without consuming real blank source lines', () => {
+  const doc = '\n\n# Title\n\n\nparagraph\n\n\n\n```js\n\ncode\n\n```\n\n'
+  let state = create(doc)
+  const blocks = widgets(state)
+  for (let number = 1; number <= state.doc.lines; number++) {
+    const line = state.doc.line(number)
+    if (line.text || blocks.some(block => line.from >= block.from && line.from <= block.to)) continue
+    state = state.update({ selection: { anchor: line.from } }).state
+    assert.equal(widgets(state).length, 3)
+    for (let cursor = state.field(markdownLivePreviewState).decorations.iter(); cursor.value; cursor.next()) {
+      assert.equal(cursor.value.spec.block, true)
+      assert.equal(cursor.value.spec.inclusive, true, 'exclusive block edges insert phantom text lines')
+      assert.equal(state.doc.lineAt(cursor.from).from, cursor.from)
+      assert.equal(state.doc.lineAt(cursor.to).to, cursor.to)
+    }
+    assert.equal(state.doc.toString(), doc)
+  }
+})
+
+test('widget activation anchors to its screen position instead of a generic scroll-to-caret request', () => {
+  const state = create('# Title\n\nparagraph')
+  const widget = state.field(markdownLivePreviewState).decorations.iter().value.spec.widget
+  const handlers = new Map<string, (event: MouseEvent) => void>()
+  const ownerDocument = { caretPositionFromPoint: () => null, caretRangeFromPoint: () => null }
+  const dom = {
+    ownerDocument, isConnected: true,
+    setAttribute: () => {},
+    addEventListener: (name: string, handler: (event: MouseEvent) => void) => { handlers.set(name, handler) },
+    getBoundingClientRect: () => ({ top: 240, height: 24 }),
+  }
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'document')
+  const dispatched: TransactionSpec[] = []
+  let focused = false
+  try {
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => dom } })
+    widget.toDOM({ state, composing: false, posAtDOM: () => 9,
+      scrollDOM: { clientHeight: 400, getBoundingClientRect: () => ({ top: 100 }) },
+      dispatch: (spec: TransactionSpec) => { dispatched.push(spec) },
+      focus: () => { focused = true },
+    } as unknown as EditorView)
+    handlers.get('mousedown')!({ button: 0, clientX: 20, clientY: 245, preventDefault: () => {} } as MouseEvent)
+    assert.equal(focused, true)
+    assert.equal(dispatched.length, 1)
+    assert.equal(dispatched[0].changes, undefined)
+    assert.notEqual(dispatched[0].scrollIntoView, true)
+    const target = (dispatched[0].effects as StateEffect<unknown>).value as { y: string; yMargin: number }
+    assert.equal(target.y, 'start')
+    assert.equal(target.yMargin, 140)
+    assert.equal(state.doc.toString(), '# Title\n\nparagraph')
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'document', previous)
+    else Reflect.deleteProperty(globalThis, 'document')
+  }
 })
 
 test('read-only state can reveal source without mutating it; no Markdown tree means no replacements', () => {

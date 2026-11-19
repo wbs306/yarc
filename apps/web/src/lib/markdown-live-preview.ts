@@ -33,23 +33,51 @@ class MarkdownBlockWidget extends WidgetType {
     dom.title = '点击或按 Enter 编辑此内容块'
     // Widgets are rendered only when CM draws them, not once per document edit.
     dom.innerHTML = renderMarkdown(`${this.source}\n\n${this.references}`)
-    const activate = (clientY?: number) => {
+    const activate = (point?: { x: number; y: number }) => {
       if (!dom.isConnected || view.composing) return
       // Resolve the current range from CM, not a closed-over document offset:
       // an equal widget may have moved after edits in a preceding block.
       const from = view.posAtDOM(dom)
       const lines = this.source.split('\n')
       const rect = dom.getBoundingClientRect()
-      const index = clientY === undefined ? 0 : Math.min(lines.length - 1,
-        Math.floor(Math.max(0, clientY - rect.top) / Math.max(1, rect.height) * lines.length))
-      const offset = lines.slice(0, index).reduce((length, line) => length + line.length + 1, 0)
-      view.dispatch({ selection: EditorSelection.cursor(Math.min(view.state.doc.length, from + offset)), scrollIntoView: true })
+      const index = point === undefined ? 0 : Math.min(lines.length - 1,
+        Math.floor(Math.max(0, point.y - rect.top) / Math.max(1, rect.height) * lines.length))
+      let offset = lines.slice(0, index).reduce((length, line) => length + line.length + 1, 0)
+      let anchorTop = rect.top + index / lines.length * rect.height
+      if (point) {
+        const document = dom.ownerDocument
+        const caret = document.caretPositionFromPoint?.(point.x, point.y)
+        const range = caret ? null : document.caretRangeFromPoint?.(point.x, point.y)
+        const node = caret?.offsetNode ?? range?.startContainer
+        const at = caret?.offset ?? range?.startOffset ?? 0
+        const text = node?.nodeType === 3 ? node.textContent : null
+        if (node && text && dom.contains(node)) {
+          const sourceOffset = this.source.indexOf(text)
+          // Direct text matches preserve click positions in wrapped prose and
+          // inline markup. Ambiguous/generated formula text uses the line fallback.
+          if (sourceOffset >= 0 && sourceOffset === this.source.lastIndexOf(text)) {
+            offset = sourceOffset + at
+            const character = document.createRange()
+            character.setStart(node, Math.min(at, text.length - 1))
+            character.setEnd(node, Math.min(at + 1, text.length))
+            const bounds = character.getBoundingClientRect()
+            if (bounds.height) anchorTop = bounds.top
+          }
+        }
+      }
+      const position = Math.min(view.state.doc.length, from + offset)
+      const scroller = view.scrollDOM
+      const margin = Math.max(0, Math.min(scroller.clientHeight - 1, anchorTop - scroller.getBoundingClientRect().top))
+      // Anchor the clicked text at its existing screen position. A generic
+      // scrollIntoView would jump to the start of a long, partly visible block.
+      view.dispatch({ selection: EditorSelection.cursor(position),
+        effects: EditorView.scrollIntoView(position, { y: 'start', yMargin: margin }) })
       view.focus()
     }
     dom.addEventListener('mousedown', event => {
       if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
       event.preventDefault()
-      activate(event.clientY)
+      activate({ x: event.clientX, y: event.clientY })
     })
     dom.addEventListener('keydown', event => {
       if (event.key !== 'Enter' && event.key !== ' ') return
@@ -89,7 +117,9 @@ function collectBlocks(state: EditorState) {
 function decorate(state: EditorState, blocks: PreviewBlock[], references: string) {
   return Decoration.set(blocks.filter(block => !state.selection.ranges.some(range =>
     range.from <= block.to && range.to >= block.from)).map(block =>
-    Decoration.replace({ widget: new MarkdownBlockWidget(block.source, references), block: true, inclusive: false })
+    // Inclusive block boundaries avoid phantom text lines on both sides of
+    // each widget. Real blank source lines remain untouched and editable.
+    Decoration.replace({ widget: new MarkdownBlockWidget(block.source, references), block: true, inclusive: true })
       .range(block.from, block.to)))
 }
 
@@ -116,7 +146,7 @@ export const markdownLivePreview = [
       lineHeight: '1.7',
       whiteSpace: 'normal',
       overflowWrap: 'anywhere',
-      padding: '4px 4px 8px',
+      padding: '0 4px',
       margin: '0',
       cursor: 'text',
     },
