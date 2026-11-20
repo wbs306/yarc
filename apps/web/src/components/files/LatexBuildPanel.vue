@@ -11,6 +11,8 @@ const props = withDefaults(defineProps<{
   sourceLine?: number
   sourceColumn?: number
   autoStart?: boolean
+  /** Reattach to a build started earlier; builds keep running on the server. */
+  resumeBuildId?: string
   engine?: LatexEngine
   targetId?: string
   buildApi?: Pick<ReturnType<typeof useApi>, 'compileLatex' | 'getLatexBuild' | 'getLatexBuildLog' | 'cancelLatexBuild' | 'getLatexPdfUrl' | 'getLatexSyncTex'>
@@ -22,7 +24,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   close: []
   openSource: [position: { file: string; line: number; column: number }]
-  status: [state: { active: boolean; loading: boolean; completed: boolean; synctexAvailable: boolean }]
+  status: [state: { active: boolean; loading: boolean; completed: boolean; synctexAvailable: boolean; buildId: string }]
   'update:engine': [engine: LatexEngine]
 }>()
 
@@ -71,6 +73,7 @@ const emitBuildStatus = () => {
     loading: loading.value,
     completed: build.value?.status === 'completed',
     synctexAvailable: !!build.value?.synctexAvailable,
+    buildId: build.value?.id || '',
   })
 }
 
@@ -170,6 +173,19 @@ const pollBuild = async (id: string, sequence: number) => {
   } catch (err) {
     if (sequence !== requestSequence) return
     error.value = (err as Error).message || '读取编译状态失败'
+  }
+}
+
+const resumeBuild = async (id: string) => {
+  if (loading.value || isActive.value) return
+  clearPoll()
+  const sequence = ++requestSequence
+  loading.value = true
+  error.value = ''
+  try {
+    await pollBuild(id, sequence)
+  } finally {
+    if (sequence === requestSequence) loading.value = false
   }
 }
 
@@ -292,11 +308,14 @@ watch(() => props.path, () => {
   syncedBuildId = ''
   // Changing the active source file must not trigger a new build. The build
   // entry is controlled by the parent, and users can explicitly rebuild from
-  // this panel after changing it.
+  // this panel after changing it. A build that already exists for the new
+  // entry is only shown again.
+  if (props.resumeBuildId) void resumeBuild(props.resumeBuildId)
 })
 
 onMounted(() => {
   if (props.autoStart) void startBuild()
+  else if (props.resumeBuildId) void resumeBuild(props.resumeBuildId)
 })
 
 defineExpose({ startBuild, cancelBuild, locateCurrentSource })

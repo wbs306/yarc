@@ -21,6 +21,18 @@ import {
   workspaceFileKey,
   type WorkspaceRecentFile,
 } from '@/lib/workspace-recent-files'
+import {
+  LIBRARY_TAB_KEY,
+  fileTabHints,
+  fileTabKey,
+  paperTabKey,
+  parseTabOrder,
+  pickTabAfterClose,
+  projectBadge,
+  rememberActiveTab,
+  stableTabOrder,
+  type WorkbenchTab,
+} from '@/lib/workbench-tabs'
 import { confirm, confirmChoice } from '@/composables/useConfirm'
 import { usePrefsStore } from '@/stores/prefs'
 import { useProjectsStore } from '@/stores/projects'
@@ -47,6 +59,8 @@ import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import Select from '@/components/ui/Select.vue'
 import SortControl, { type SortOption } from '@/components/ui/SortControl.vue'
 import ProjectNavigation from '@/components/projects/ProjectNavigation.vue'
+import WorkbenchTabs from '@/components/layout/WorkbenchTabs.vue'
+import ToolIcon from '@/components/ui/ToolIcon.vue'
 
 const ProjectWorkspaceTools = defineAsyncComponent(() => import('@/components/projects/ProjectWorkspaceTools.vue'))
 const HistoryCompareEditor = defineAsyncComponent(() => import('@/components/projects/HistoryCompareEditor.vue'))
@@ -76,16 +90,6 @@ const chatOpen = ref(true)
 const mobileSidebar = ref(false)
 const mobileChat = ref(false)
 const showUpload = ref(false)
-// Open-papers switcher: a header dropdown listing every open paper.
-const tabsMenuOpen = ref(false)
-const tabsMenuRef = ref<HTMLElement>()
-const onTabsMenuDocClick = (e: MouseEvent) => {
-  if (!tabsMenuRef.value?.contains(e.target as Node)) tabsMenuOpen.value = false
-}
-watch(tabsMenuOpen, (open) => {
-  if (open) document.addEventListener('mousedown', onTabsMenuDocClick)
-  else document.removeEventListener('mousedown', onTabsMenuDocClick)
-})
 // Library header shrinks to a compact bar once the paper list is scrolled.
 const libraryScrolled = ref(false)
 const onLibraryScroll = (e: Event) => { libraryScrolled.value = (e.target as HTMLElement).scrollTop > 12 }
@@ -366,7 +370,17 @@ type LatexBuildStatus = {
   loading: boolean
   completed: boolean
   synctexAvailable: boolean
+  buildId?: string
 }
+// Builds run on the server, so leaving a .tex file must not lose its build:
+// each file remembers its entry, last build and whether the PDF was shown,
+// and the panel reattaches to that build when the file is opened again.
+type LatexSession = { entryPath: string; buildId: string; visible: boolean; engine: LatexEngine }
+const latexSessions = new Map<string, LatexSession>()
+const latexResumeBuildId = ref('')
+let latexBuildId = ''
+// Set when a build was requested before the lazily loaded panel was mounted.
+let latexBuildStartPending = false
 const latexBuildStatus = ref<LatexBuildStatus>({
   active: false,
   loading: false,
@@ -375,7 +389,7 @@ const latexBuildStatus = ref<LatexBuildStatus>({
 })
 const latexEntryPath = ref('')
 const latexPdfToggleLabel = computed(() => {
-  if (!latexEntryPath.value) return '编译 LaTeX'
+  if (!latexEntryPath.value) return '编译'
   return latexBuildVisible.value ? '隐藏 PDF' : '显示 PDF'
 })
 const latexPdfToggleTitle = computed(() => {
@@ -957,6 +971,14 @@ const removeRecentWorkspacePath = (path: string) => {
 const snapshotCurrentWorkspaceTab = () => {
   const file = selectedWorkspaceFile.value
   if (!isWorkspaceFile(file)) return
+  if (workspaceIsLatex.value && latexEntryPath.value) {
+    latexSessions.set(fileTabKey({ projectId: currentWorkspaceProjectId.value, path: file.path }), {
+      entryPath: latexEntryPath.value,
+      buildId: latexBuildId,
+      visible: latexBuildVisible.value,
+      engine: latexEngine.value,
+    })
+  }
   const tab: WorkspaceFileTab = {
     file: { ...file, children: undefined },
     content: workspaceContent.value,
@@ -1298,6 +1320,9 @@ const clearWorkspaceEditor = () => {
   currentLiveClient.value = null
   latexBuildVisible.value = false
   latexEntryPath.value = ''
+  latexResumeBuildId.value = ''
+  latexBuildId = ''
+  latexBuildStartPending = false
   workspaceContent.value = ''
   workspaceSavedContent.value = ''
   workspaceLanguage.value = 'plaintext'
@@ -1700,9 +1725,24 @@ const selectWorkspaceFile = async (node: FileNode) => {
   // discard the current build result before the target cursor is applied.
   const keepLatexBuild = latexBuildVisible.value && nodeIsLatex && !!latexEntryPath.value
 
+  const latexSession = !keepLatexBuild && nodeIsLatex
+    ? latexSessions.get(fileTabKey({ projectId: currentWorkspaceProjectId.value, path: node.path }))
+    : undefined
+
   selectedWorkspaceFile.value = node
-  latexBuildVisible.value = keepLatexBuild
-  if (!keepLatexBuild) latexEntryPath.value = ''
+  latexBuildVisible.value = keepLatexBuild || !!latexSession?.visible
+  if (latexSession) {
+    latexEntryPath.value = latexSession.entryPath
+    latexEngine.value = latexSession.engine
+    latexBuildId = latexSession.buildId
+    latexResumeBuildId.value = latexSession.buildId
+    latexBuildStartPending = false
+  } else if (!keepLatexBuild) {
+    latexEntryPath.value = ''
+    latexBuildId = ''
+    latexResumeBuildId.value = ''
+    latexBuildStartPending = false
+  }
   touchWorkspaceFile(node)
   localStorage.setItem(workspaceFileStorageKey.value, node.path)
   filesError.value = ''
@@ -1865,14 +1905,29 @@ const openLatexBuild = async () => {
     await saveWorkspaceFile()
     if (workspaceDirty.value) return
   }
+  latexResumeBuildId.value = ''
+  latexBuildId = ''
   latexEntryPath.value = file.path
   latexSourceLine.value = cursor?.line || 1
   latexSourceColumn.value = cursor?.column || 1
   filesError.value = ''
   latexBuildVisible.value = true
-  await nextTick()
-  void latexBuildPanelRef.value?.startBuild()
+  await startLatexBuildWhenReady()
 }
+
+// The build panel is loaded on demand, so on first use it is not mounted yet
+// when the build is requested; the build then starts as soon as it is.
+const startLatexBuildWhenReady = async () => {
+  await nextTick()
+  const panel = latexBuildPanelRef.value
+  latexBuildStartPending = !panel
+  if (panel) void panel.startBuild()
+}
+watch(latexBuildPanelRef, (panel) => {
+  if (!panel || !latexBuildStartPending) return
+  latexBuildStartPending = false
+  void panel.startBuild()
+})
 
 const onWorkspaceEditorCursor = (line: number, column: number) => {
   if (!workspaceIsLatex.value) return
@@ -1926,8 +1981,7 @@ const rebuildLatex = async () => {
     await saveWorkspaceFile()
     if (workspaceDirty.value) return
   }
-  await nextTick()
-  void latexBuildPanelRef.value?.startBuild()
+  await startLatexBuildWhenReady()
 }
 
 const cancelLatexBuild = () => {
@@ -1940,6 +1994,8 @@ const locateLatexSource = () => {
 
 const onLatexBuildStatus = (status: LatexBuildStatus) => {
   latexBuildStatus.value = status
+  // A freshly mounted panel reports no build before it has reattached.
+  if (status.buildId) latexBuildId = status.buildId
 }
 
 const toggleLatexBuild = async () => {
@@ -2003,8 +2059,7 @@ const openWorkspaceFileWithSystemApp = async (node: FileNode) => {
   }
 }
 
-const closeWorkspaceTab = async (event: Event, path: string) => {
-  event.stopPropagation()
+const closeWorkspaceTab = async (path: string) => {
   if (selectedWorkspacePath.value === path) snapshotCurrentWorkspaceTab()
 
   const isCurrent = selectedWorkspacePath.value === path
@@ -2066,6 +2121,13 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
 
   await liveFiles.release(path)
 
+  // Choose the next tab while the closing one still has its place in the
+  // strip. Without a previously used tab, stay within this workspace.
+  const tabKey = fileTabKey({ projectId: currentWorkspaceProjectId.value, path })
+  latexSessions.delete(tabKey)
+  const wasActiveTab = activeTabKey.value === tabKey
+  const nextTabKey = wasActiveTab ? tabAfterClosing(tabKey, currentScopeFileTabKeys.value) : null
+
   recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter((item) => !isCurrentWorkspaceFile(item) || item.path !== path)
   openWorkspaceTabs.value = openWorkspaceTabs.value.filter((item) => item.file.path !== path)
   persistRecentWorkspaceFiles()
@@ -2080,6 +2142,12 @@ const closeWorkspaceTab = async (event: Event, path: string) => {
   localStorage.removeItem(workspaceFileStorageKey.value)
   clearWorkspaceEditor()
 
+  if (nextTabKey) {
+    await selectWorkbenchTab(nextTabKey)
+    return
+  }
+  if (wasActiveTab) return
+  // Closed while another view is shown: keep a file ready for the file view.
   const nextTab = [...openWorkspaceTabs.value].filter((tab) => isWorkspaceFile(tab.file)).sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)[0]
   if (nextTab) {
     const node = findWorkspaceNode(workspaceFiles.value, nextTab.file.path) || nextTab.file
@@ -2563,31 +2631,10 @@ const closeProjectHistoryCompare = () => {
   projectHistoryCompareLoading.value = false
 }
 
-const workSwitcherLabel = computed(() => {
-  if (hasPaper.value) return activePaper.value?.title || `${readerTabs.value.length} 篇已打开`
-  if (isProjectWorkspace.value) {
-    const name = projectsStore.currentProject?.id === projectWorkspaceId.value ? projectsStore.currentProject.name : '科研项目'
-    return selectedWorkspaceFile.value ? `${name} / ${selectedWorkspaceFile.value.name}` : name
-  }
-  if (isProjectMode.value) return '项目工作区'
-  if (sidebarMode.value === 'files' && selectedWorkspaceFile.value) return `${workspaceDirty.value ? '• ' : ''}${selectedWorkspaceFile.value.name}`
-  if (readerTabs.value.length) return `${readerTabs.value.length} 篇已打开`
-  if (selectedWorkspaceFile.value) return `${workspaceDirty.value ? '• ' : ''}${selectedWorkspaceFile.value.name}`
-  return '工作区'
-})
-const workSwitcherTitle = computed(() => {
-  if (hasPaper.value) return activePaper.value?.title || '切换工作项'
-  if (selectedWorkspaceFile.value) return selectedWorkspaceFile.value.path || selectedWorkspaceFile.value.name
-  return '切换工作项'
-})
-
 const switchingWorkspaceTab = ref(false)
-const isActiveWorkspaceEntry = (file: WorkspaceRecentFile) =>
-  !hasPaper.value && sidebarMode.value === 'files' && isCurrentWorkspaceFile(file) && file.path === selectedWorkspacePath.value
-
-const closeWorkspaceEntry = async (event: Event, file: WorkspaceRecentFile) => {
+const closeWorkspaceEntry = async (file: WorkspaceRecentFile) => {
   if (switchingWorkspaceTab.value) return
-  if (isCurrentWorkspaceFile(file)) return closeWorkspaceTab(event, file.path)
+  if (isCurrentWorkspaceFile(file)) return closeWorkspaceTab(file.path)
   recentWorkspaceFiles.value = recentWorkspaceFiles.value.filter(item => workspaceFileKey(item) !== workspaceFileKey(file))
   persistRecentWorkspaceFiles()
 }
@@ -2595,7 +2642,6 @@ const closeWorkspaceEntry = async (event: Event, file: WorkspaceRecentFile) => {
 const switchWorkspaceTab = async (file: WorkspaceRecentFile) => {
   if (switchingWorkspaceTab.value) return
   switchingWorkspaceTab.value = true
-  tabsMenuOpen.value = false
   try {
     const scopeChanged = !isCurrentWorkspaceFile(file)
     if (selectedWorkspaceFile.value && !(await prepareWorkspaceSwitch())) return
@@ -2921,21 +2967,190 @@ const switchReaderTab = async (paperId: string) => {
   if (!hasPaper.value && sidebarMode.value === 'files' && selectedWorkspaceFile.value && !(await prepareWorkspaceSwitch())) return
   const tab = readerTabs.value.find((item) => item.paper.id === paperId)
   if (tab) tab.lastAccessedAt = Date.now()
-  void router.push(`/paper/${paperId}`)
+  await router.push(`/paper/${paperId}`)
 }
 
-const closeReaderTab = (event: Event, paperId: string) => {
-  event.stopPropagation()
+const closeReaderTab = (paperId: string) => {
   const idx = readerTabs.value.findIndex((tab) => tab.paper.id === paperId)
   if (idx < 0) return
-  const wasActive = activePaperId.value === paperId
+  const tabKey = paperTabKey(paperId)
+  const wasActive = activeTabKey.value === tabKey
+  // Without a previously used tab, fall back to a neighbouring paper or the library.
+  const nextTabKey = wasActive ? tabAfterClosing(tabKey, paperWorkbenchTabs.value.map(tab => tab.key)) : null
   cleanupTemporaryReaderTab(readerTabs.value[idx])
   readerTabs.value.splice(idx, 1)
   if (!wasActive) return
-  const next = readerTabs.value[Math.min(idx, readerTabs.value.length - 1)] || readerTabs.value[idx - 1]
-  if (next) void router.push(`/paper/${next.paper.id}`)
+  if (nextTabKey) void selectWorkbenchTab(nextTabKey)
   else void router.push('/')
 }
+
+// ── Workbench tabs ───────────────────────────────────────────────────────────
+// One strip above the main view: the library and open papers on the left,
+// workspace files on the right. Papers and files keep their own state
+// (readerTabs / recent workspace files); the strip only presents them.
+
+const LIBRARY_TAB_STORAGE_KEY = 'yarc_library_tab_open'
+const FILE_TAB_ORDER_STORAGE_KEY = 'yarc_workbench_file_tab_order'
+
+// Project list and project settings replace the workbench; no tab is active there.
+const workbenchViewVisible = computed(() => route.name !== 'projects' && route.name !== 'project-settings')
+const libraryViewVisible = computed(() => workbenchViewVisible.value && !hasPaper.value
+  && (sidebarMode.value === 'library' || sidebarMode.value === 'ieee'))
+const fileViewVisible = computed(() => workbenchViewVisible.value && !hasPaper.value && sidebarMode.value === 'files')
+
+// The library becomes a tab once it has been opened and stays until closed.
+const libraryTabOpen = ref(localStorage.getItem(LIBRARY_TAB_STORAGE_KEY) === '1')
+const setLibraryTabOpen = (open: boolean) => {
+  libraryTabOpen.value = open
+  try { localStorage.setItem(LIBRARY_TAB_STORAGE_KEY, open ? '1' : '0') } catch { /* Storage is optional. */ }
+}
+watch(libraryViewVisible, (visible) => {
+  if (visible && !libraryTabOpen.value) setLibraryTabOpen(true)
+}, { immediate: true })
+
+const activeTabKey = computed(() => {
+  if (!workbenchViewVisible.value) return ''
+  if (hasPaper.value) return paperTabKey(activePaperId.value)
+  if (libraryViewVisible.value) return LIBRARY_TAB_KEY
+  if (fileViewVisible.value && isWorkspaceFile(selectedWorkspaceFile.value)) {
+    return fileTabKey({ projectId: currentWorkspaceProjectId.value, path: selectedWorkspaceFile.value.path })
+  }
+  return ''
+})
+
+// The recent-file list is ordered by last use; tabs must stay where they are.
+const fileTabOrder = ref(parseTabOrder(localStorage.getItem(FILE_TAB_ORDER_STORAGE_KEY)))
+watch(workspaceSwitcherItems, (files) => {
+  const order = stableTabOrder(fileTabOrder.value, files.map(fileTabKey))
+  if (order === fileTabOrder.value) return
+  fileTabOrder.value = order
+  try { localStorage.setItem(FILE_TAB_ORDER_STORAGE_KEY, JSON.stringify(order)) } catch { /* Storage is optional. */ }
+}, { immediate: true })
+const workspaceTabFiles = computed(() => {
+  const position = new Map(fileTabOrder.value.map((key, index) => [key, index]))
+  const rank = (file: WorkspaceRecentFile) => position.get(fileTabKey(file)) ?? Number.MAX_SAFE_INTEGER
+  return [...workspaceSwitcherItems.value].sort((a, b) => rank(a) - rank(b))
+})
+const currentScopeFileTabKeys = computed(() => workspaceTabFiles.value.filter(isCurrentWorkspaceFile).map(fileTabKey))
+
+const workspaceTabStatus = (file: WorkspaceRecentFile): Pick<WorkbenchTab, 'status' | 'statusTitle'> => {
+  // Unsaved state is only known for files of the workspace that is loaded.
+  if (!isCurrentWorkspaceFile(file)) return {}
+  const isCurrent = file.path === selectedWorkspacePath.value
+  const live = isCurrent ? currentLiveClient.value : liveFiles.get(file.path)
+  if (live?.conflict.value) return { status: 'conflict', statusTitle: '有外部修改冲突' }
+  const snapshot = openWorkspaceTabs.value.find(tab => tab.file.path === file.path)
+  const dirty = isCurrent
+    ? workspaceDirty.value
+    : live ? live.dirty.value || live.saving.value : !!snapshot && snapshot.content !== snapshot.savedContent
+  if (!dirty) return {}
+  return { status: 'dirty', statusTitle: live?.saving.value ? '同步保存中' : live ? '等待同步' : '有未保存修改' }
+}
+
+const paperWorkbenchTabs = computed<WorkbenchTab[]>(() => {
+  const tabs: WorkbenchTab[] = readerTabs.value.map(tab => ({
+    key: paperTabKey(tab.paper.id),
+    kind: 'paper',
+    title: tab.paper.title,
+    tooltip: tab.paper.title,
+    active: activeTabKey.value === paperTabKey(tab.paper.id),
+  }))
+  if (libraryTabOpen.value) {
+    tabs.unshift({
+      key: LIBRARY_TAB_KEY,
+      kind: 'library',
+      title: '文献库',
+      tooltip: sidebarMode.value === 'ieee' ? '文献库 · 期刊浏览' : `文献库 · ${currentCategoryLabel.value}`,
+      active: activeTabKey.value === LIBRARY_TAB_KEY,
+    })
+  }
+  return tabs
+})
+const fileWorkbenchTabs = computed<WorkbenchTab[]>(() => {
+  const files = workspaceTabFiles.value
+  const hints = fileTabHints(files)
+  return files.map((file) => {
+    const key = fileTabKey(file)
+    return {
+      key,
+      kind: 'file',
+      title: file.name,
+      tooltip: `${workspaceFileProjectName(file)} / ${file.path}`,
+      // Project files carry a one-letter badge; the full name is in the tooltip.
+      badge: file.projectId ? projectBadge(workspaceFileProjectName(file)) : undefined,
+      hint: hints.get(key),
+      active: activeTabKey.value === key,
+      ...workspaceTabStatus(file),
+    }
+  })
+})
+// The library alone has nothing to switch to, so it does not get a strip.
+const workbenchTabsVisible = computed(() => readerTabs.value.length > 0 || fileWorkbenchTabs.value.length > 0)
+
+// Most recently shown tabs, used to return to the previous one after a close.
+let tabHistory: string[] = []
+watch(activeTabKey, (key) => {
+  if (key) tabHistory = rememberActiveTab(tabHistory, key)
+}, { immediate: true })
+const tabAfterClosing = (key: string, fallbackKeys: string[]) => pickTabAfterClose(
+  tabHistory,
+  [...paperWorkbenchTabs.value, ...fileWorkbenchTabs.value].map(tab => tab.key),
+  key,
+  fallbackKeys,
+)
+
+const openLibraryTab = async () => {
+  if (fileViewVisible.value && selectedWorkspaceFile.value && !(await prepareWorkspaceSwitch())) return
+  await router.push('/')
+}
+
+const selectWorkbenchTab = async (key: string) => {
+  if (key === activeTabKey.value) return
+  if (key === LIBRARY_TAB_KEY) return openLibraryTab()
+  const reader = readerTabs.value.find(tab => paperTabKey(tab.paper.id) === key)
+  if (reader) return switchReaderTab(reader.paper.id)
+  const file = workspaceSwitcherItems.value.find(item => fileTabKey(item) === key)
+  if (file) await switchWorkspaceTab(file)
+}
+
+const closeLibraryTab = async () => {
+  if (activeTabKey.value !== LIBRARY_TAB_KEY) {
+    setLibraryTabOpen(false)
+    return
+  }
+  // Prefer a paper or a file of the workspace on screen over another project.
+  const nearbyKeys = [...paperWorkbenchTabs.value.map(tab => tab.key), ...currentScopeFileTabKeys.value]
+  const nextTabKey = tabAfterClosing(LIBRARY_TAB_KEY, nearbyKeys)
+    ?? fileWorkbenchTabs.value[0]?.key
+  if (!nextTabKey) return
+  setLibraryTabOpen(false)
+  await selectWorkbenchTab(nextTabKey)
+  // The library is still on screen if the other tab could not be shown.
+  if (libraryViewVisible.value) setLibraryTabOpen(true)
+}
+
+const closeWorkbenchTab = (key: string) => {
+  if (key === LIBRARY_TAB_KEY) return void closeLibraryTab()
+  const reader = readerTabs.value.find(tab => paperTabKey(tab.paper.id) === key)
+  if (reader) return closeReaderTab(reader.paper.id)
+  const file = workspaceSwitcherItems.value.find(item => fileTabKey(item) === key)
+  if (file) void closeWorkspaceEntry(file)
+}
+
+// Editor actions shown at the right end of the tab strip for the active file.
+const workspaceToolbarFile = computed(() => fileViewVisible.value && selectedWorkspaceFile.value?.type === 'file'
+  ? selectedWorkspaceFile.value
+  : null)
+const workspaceFileSize = computed(() => formatWorkspaceSize(selectedWorkspaceFile.value?.size))
+// Shown in the editor status bar; files without an editor only show their size.
+const workspaceFileInfo = computed(() => [workspaceLanguage.value, workspaceFileSize.value].filter(Boolean).join(' · '))
+const latexBuildBusy = computed(() => latexBuildStatus.value.active || latexBuildStatus.value.loading)
+const markdownViewModes: Array<{ mode: MarkdownViewMode; icon: 'edit' | 'preview' | 'split' | 'live'; label: string; title: string }> = [
+  { mode: 'edit', icon: 'edit', label: '编辑', title: '编辑' },
+  { mode: 'preview', icon: 'preview', label: '预览', title: '预览' },
+  { mode: 'split', icon: 'split', label: '双栏', title: '双栏：编辑与预览并排' },
+  { mode: 'live', icon: 'live', label: '即时（实验）', title: '即时（实验）：点击内容块显示源码，移开光标后恢复渲染；HTML 块等复杂内容保留源码' },
+]
 
 // ── Responsive ───────────────────────────────────────────────────────────────
 
@@ -4100,55 +4315,6 @@ const showSearchPaperPopup = (paper: any) => {
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
         </button>
         <span class="brand">YARC</span>
-        <div v-if="readerTabs.length || workspaceSwitcherItems.length" ref="tabsMenuRef" class="tabs-menu" :class="{ reading: hasPaper }">
-          <button class="tabs-menu-trigger" :class="{ open: tabsMenuOpen }" @click="tabsMenuOpen = !tabsMenuOpen" title="切换工作项">
-            <svg class="tabs-menu-doc" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            <span class="tabs-menu-label" :title="workSwitcherTitle">{{ workSwitcherLabel }}</span>
-            <svg class="tabs-menu-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </button>
-          <Transition name="dropdown">
-            <div v-if="tabsMenuOpen" class="tabs-menu-dropdown" role="listbox" aria-label="工作项切换">
-              <template v-if="readerTabs.length">
-                <div class="tabs-menu-section">已打开论文</div>
-                <button
-                  v-for="tab in readerTabs"
-                  :key="tab.paper.id"
-                  type="button"
-                  class="tabs-menu-item"
-                  :class="{ active: tab.paper.id === activePaperId }"
-                  role="option"
-                  :aria-selected="tab.paper.id === activePaperId"
-                  @click="switchReaderTab(tab.paper.id); tabsMenuOpen = false"
-                >
-                  <span v-if="tab.paper.id === activePaperId" class="tabs-menu-dot" />
-                  <span class="tabs-menu-item-title" :title="tab.paper.title">{{ tab.paper.title }}</span>
-                  <span class="tabs-menu-item-close" title="关闭" @click.stop="closeReaderTab($event, tab.paper.id)">×</span>
-                </button>
-              </template>
-              <template v-if="workspaceSwitcherItems.length">
-                <div class="tabs-menu-section" :class="{ separated: readerTabs.length }">文件</div>
-                <button
-                  v-for="file in workspaceSwitcherItems"
-                  :key="workspaceFileKey(file)"
-                  type="button"
-                  class="tabs-menu-item"
-                  :class="{ active: isActiveWorkspaceEntry(file) }"
-                  :disabled="switchingWorkspaceTab"
-                  role="option"
-                  :aria-selected="isActiveWorkspaceEntry(file)"
-                  @click="switchWorkspaceTab(file)"
-                >
-                  <span v-if="isActiveWorkspaceEntry(file)" class="tabs-menu-dot" />
-                  <span class="tabs-menu-file-icon">📄</span>
-                  <span class="tabs-menu-item-title" :title="`${workspaceFileProjectName(file)} / ${file.path}`">{{ file.name }}</span>
-                  <span class="tabs-menu-project-name" :title="workspaceFileProjectName(file)">{{ workspaceFileProjectName(file) }}</span>
-                  <span v-if="isActiveWorkspaceEntry(file) && workspaceDirty" class="tabs-menu-dirty" title="有未保存修改" />
-                  <span class="tabs-menu-item-close" title="关闭文件" @click.stop="closeWorkspaceEntry($event, file)">×</span>
-                </button>
-              </template>
-            </div>
-          </Transition>
-        </div>
       </div>
 
       <div class="header-center">
@@ -4727,6 +4893,104 @@ const showSearchPaperPopup = (paper: any) => {
 
       <!-- Center: paper list page or PDF page -->
       <main class="app-main">
+        <WorkbenchTabs
+          v-if="workbenchTabsVisible"
+          :papers="paperWorkbenchTabs"
+          :files="fileWorkbenchTabs"
+          @select="selectWorkbenchTab"
+          @close="closeWorkbenchTab"
+        >
+          <template v-if="workspaceToolbarFile" #actions>
+            <span
+              v-if="workspaceIsOfflineCopy"
+              class="tab-tool-flag"
+              role="img"
+              aria-label="离线副本"
+              :title="workspaceOfflineCachedAt ? `离线副本 · 缓存于 ${workspaceOfflineCachedAt}` : '离线副本 · 正在使用本地缓存'"
+            ><ToolIcon name="offline" :size="14" /></span>
+            <span v-if="workspaceToolbarFile.readonly" class="tab-tool-flag" role="img" aria-label="受保护" title="受保护：只读"><ToolIcon name="lock" :size="14" /></span>
+            <span v-if="!workspaceToolbarFile.editable && workspaceFileSize" class="tab-tool-info" :title="workspaceToolbarFile.path">{{ workspaceFileSize }}</span>
+            <template v-if="workspaceToolbarFile.editable && !workspaceContentLoading">
+              <!-- Placed before the mode buttons so they stay put when it appears. -->
+              <button
+                v-if="markdownIsSplit"
+                type="button"
+                class="tab-tool-btn"
+                title="交换编辑区和预览区位置"
+                aria-label="交换编辑区和预览区位置"
+                @click="swapMarkdownSplitPanes"
+              ><ToolIcon name="swap" /></button>
+              <div v-if="workspaceIsMarkdown" class="tab-tool-segment" role="tablist" aria-label="Markdown 显示模式">
+                <button
+                  v-for="item in markdownViewModes"
+                  :key="item.mode"
+                  type="button"
+                  role="tab"
+                  class="tab-tool-btn"
+                  :class="{ active: markdownViewMode === item.mode }"
+                  :aria-selected="markdownViewMode === item.mode"
+                  :aria-label="item.label"
+                  :title="item.title"
+                  @click="setMarkdownViewMode(item.mode)"
+                ><ToolIcon :name="item.icon" /></button>
+              </div>
+              <template v-if="workspaceIsLatex && latexBuildVisible">
+                <select
+                  v-model="latexEngine"
+                  class="tab-tool-select"
+                  :disabled="latexBuildBusy"
+                  aria-label="LaTeX 编译引擎"
+                  title="LaTeX 编译引擎"
+                >
+                  <option value="xelatex">XeLaTeX</option>
+                  <option value="pdflatex">pdfLaTeX</option>
+                  <option value="lualatex">LuaLaTeX</option>
+                </select>
+                <button
+                  type="button"
+                  class="tab-tool-btn labeled"
+                  :disabled="latexBuildBusy || !workspaceCanCompileLatex"
+                  title="重新编译当前 LaTeX 文件"
+                  @click="rebuildLatex"
+                ><ToolIcon name="refresh" :size="13" :class="{ 'tab-tool-spin': latexBuildBusy }" /><span>{{ latexBuildBusy ? '编译中…' : '重新编译' }}</span></button>
+                <button
+                  v-if="latexBuildStatus.active"
+                  type="button"
+                  class="tab-tool-btn labeled danger"
+                  title="取消当前编译"
+                  @click="cancelLatexBuild"
+                ><ToolIcon name="stop" :size="13" /><span>取消</span></button>
+                <button
+                  v-if="latexBuildStatus.completed && latexBuildStatus.synctexAvailable"
+                  type="button"
+                  class="tab-tool-btn labeled"
+                  title="将当前编辑器位置定位到 PDF"
+                  @click="locateLatexSource"
+                ><ToolIcon name="locate" :size="13" /><span>定位</span></button>
+              </template>
+            </template>
+            <button
+              v-if="workspaceIsLatex && !workspaceContentLoading"
+              type="button"
+              class="tab-tool-btn labeled"
+              :class="{ active: latexEntryPath && latexBuildVisible, primary: !latexEntryPath }"
+              :disabled="!workspaceCanCompileLatex"
+              :aria-pressed="latexEntryPath ? latexBuildVisible : undefined"
+              :title="latexPdfToggleTitle"
+              @click="toggleLatexBuild"
+            ><ToolIcon :name="latexEntryPath ? 'panel-right' : 'play'" :size="13" /><span>{{ latexPdfToggleLabel }}</span></button>
+            <button
+              v-if="!workspaceCanEdit"
+              type="button"
+              class="tab-tool-btn"
+              :disabled="workspaceOpeningSystem"
+              :title="workspaceOpeningSystem ? '打开中…' : '用系统应用打开'"
+              aria-label="用系统应用打开"
+              @click="openWorkspaceFileWithSystemApp(workspaceToolbarFile)"
+            ><ToolIcon name="external" /></button>
+          </template>
+        </WorkbenchTabs>
+        <div class="app-main-view">
         <Transition name="workspace-view">
           <ProjectsPage v-if="route.name === 'projects'" key="projects-view" embedded />
           <ProjectSettingsPage v-else-if="route.name === 'project-settings'" :key="`project-settings-${String(route.params.id || '')}`" embedded />
@@ -4906,123 +5170,6 @@ const showSearchPaperPopup = (paper: any) => {
           </div>
 
           <section v-else class="workspace-editor-shell">
-            <div class="workspace-editor-head">
-              <div class="workspace-file-summary">
-                <h2>{{ selectedWorkspaceFile.name }}</h2>
-                <p>{{ selectedWorkspaceFile.path || 'data/' }}</p>
-              </div>
-              <div class="workspace-file-meta">
-                <span v-if="workspaceIsOfflineCopy" class="readonly-pill" :title="workspaceOfflineCachedAt ? `缓存于 ${workspaceOfflineCachedAt}` : '正在使用本地缓存'">离线副本</span>
-                <span v-if="selectedWorkspaceFile.readonly" class="readonly-pill">受保护</span>
-                <span v-if="selectedWorkspaceFile.type === 'file'">{{ formatWorkspaceSize(selectedWorkspaceFile.size) }}</span>
-                <span v-if="selectedWorkspaceFile.type === 'file'">{{ workspaceLanguage }}</span>
-                <template v-if="selectedWorkspaceFile.type === 'file' && selectedWorkspaceFile.editable && !workspaceContentLoading">
-                  <div v-if="workspaceIsMarkdown" class="md-view-controls">
-                    <div class="md-view-toggle" role="tablist" aria-label="Markdown 显示模式">
-                      <button
-                        type="button"
-                        role="tab"
-                        :class="{ active: markdownViewMode === 'edit' }"
-                        :aria-selected="markdownViewMode === 'edit'"
-                        @click="setMarkdownViewMode('edit')"
-                      >编辑</button>
-                      <button
-                        type="button"
-                        role="tab"
-                        :class="{ active: markdownViewMode === 'preview' }"
-                        :aria-selected="markdownViewMode === 'preview'"
-                        @click="setMarkdownViewMode('preview')"
-                      >预览</button>
-                      <button
-                        type="button"
-                        role="tab"
-                        :class="{ active: markdownViewMode === 'split' }"
-                        :aria-selected="markdownViewMode === 'split'"
-                        @click="setMarkdownViewMode('split')"
-                      >双栏</button>
-                      <button
-                        type="button"
-                        role="tab"
-                        :class="{ active: markdownViewMode === 'live' }"
-                        :aria-selected="markdownViewMode === 'live'"
-                        title="实验模式：点击内容块显示源码，移开光标后恢复渲染；HTML 块等复杂内容保留源码"
-                        @click="setMarkdownViewMode('live')"
-                      >即时（实验）</button>
-                    </div>
-                    <button
-                      v-if="markdownIsSplit"
-                      type="button"
-                      class="md-view-swap"
-                      title="交换编辑区和预览区位置"
-                      aria-label="交换编辑区和预览区位置"
-                      @click="swapMarkdownSplitPanes"
-                    >↔ 换位</button>
-                  </div>
-                  <span
-                    :class="['dirty-dot', { active: workspaceDirty, conflict: currentLiveClient?.conflict.value }]"
-                    :title="currentLiveClient?.conflict.value ? '有外部修改冲突' : currentLiveClient?.saving.value ? '同步保存中' : workspaceDirty ? '等待同步' : '已同步'"
-                  />
-                  <button class="save-workspace-btn" :disabled="(!workspaceDirty && !currentLiveClient) || !workspaceCanEdit || workspaceSaving" title="立即保存（Ctrl/⌘+S）" @click="saveWorkspaceFile">
-                    {{ workspaceSaving || currentLiveClient?.saving.value ? '保存中…' : currentLiveClient?.conflict.value ? '有冲突' : currentLiveClient ? '立即保存' : '保存' }}
-                  </button>
-                  <template v-if="workspaceIsLatex && latexBuildVisible">
-                    <select
-                      v-model="latexEngine"
-                      class="latex-engine-workspace-select"
-                      :disabled="latexBuildStatus.active || latexBuildStatus.loading"
-                      aria-label="LaTeX 编译引擎"
-                      title="LaTeX 编译引擎"
-                    >
-                      <option value="xelatex">XeLaTeX</option>
-                      <option value="pdflatex">pdfLaTeX</option>
-                      <option value="lualatex">LuaLaTeX</option>
-                    </select>
-                    <button
-                      type="button"
-                      class="latex-workspace-tool-btn"
-                      :disabled="latexBuildStatus.active || latexBuildStatus.loading || !workspaceCanCompileLatex"
-                      title="重新编译当前 LaTeX 文件"
-                      @click="rebuildLatex"
-                    >
-                      {{ latexBuildStatus.loading ? '编译中…' : '重新编译' }}
-                    </button>
-                    <button
-                      v-if="latexBuildStatus.active"
-                      type="button"
-                      class="latex-workspace-tool-btn danger"
-                      title="取消当前编译"
-                      @click="cancelLatexBuild"
-                    >取消</button>
-                    <button
-                      v-if="latexBuildStatus.completed && latexBuildStatus.synctexAvailable"
-                      type="button"
-                      class="latex-workspace-tool-btn primary"
-                      title="将当前编辑器位置定位到 PDF"
-                      @click="locateLatexSource"
-                    >定位当前行</button>
-                  </template>
-                </template>
-                <button
-                  v-if="workspaceIsLatex && !workspaceContentLoading"
-                  class="latex-pdf-toggle-btn"
-                  :disabled="!workspaceCanCompileLatex"
-                  :aria-pressed="latexEntryPath ? latexBuildVisible : undefined"
-                  :title="latexPdfToggleTitle"
-                  @click="toggleLatexBuild"
-                >
-                  {{ latexPdfToggleLabel }}
-                </button>
-                <button
-                  v-if="selectedWorkspaceFile.type === 'file' && !workspaceCanEdit"
-                  class="open-system-btn"
-                  :disabled="workspaceOpeningSystem"
-                  @click="openWorkspaceFileWithSystemApp(selectedWorkspaceFile)"
-                >
-                  {{ workspaceOpeningSystem ? '打开中…' : '系统打开' }}
-                </button>
-              </div>
-            </div>
-
             <div v-if="selectedWorkspaceFile.type === 'directory'" class="workspace-empty compact">
               <div class="empty-icon">📂</div>
               <h2>{{ selectedWorkspaceFile.name }}</h2>
@@ -5101,6 +5248,7 @@ const showSearchPaperPopup = (paper: any) => {
                       <span>{{ workspaceDocStats.lines }} 行</span>
                       <span class="status-spacer" />
                       <span>{{ markdownPreviewHeadings.length }} 个标题</span>
+                      <span v-if="markdownViewMode === 'preview' && workspaceFileInfo">{{ workspaceFileInfo }}</span>
                       <span class="status-hint">Ctrl+F 查找</span>
                     </footer>
                   </div>
@@ -5186,6 +5334,7 @@ const showSearchPaperPopup = (paper: any) => {
                     <span class="status-spacer" />
                     <span v-if="selected" class="status-selection">已选 {{ selectedWords }} 词 · {{ selected }} 字符</span>
                     <span>行 {{ line }}，列 {{ column }}</span>
+                    <span v-if="workspaceFileInfo">{{ workspaceFileInfo }}</span>
                     <span class="status-hint">Ctrl+F 查找 · Ctrl+H 替换</span>
                   </footer>
                 </template>
@@ -5219,6 +5368,7 @@ const showSearchPaperPopup = (paper: any) => {
                 ref="latexBuildPanelRef"
                 class="workspace-latex-preview-pane"
                 :auto-start="false"
+                :resume-build-id="latexResumeBuildId"
                 v-model:engine="latexEngine"
                 :path="latexEntryPath || selectedWorkspaceFile.path"
                 :name="latexEntryPath.split('/').pop() || selectedWorkspaceFile.name"
@@ -5344,6 +5494,7 @@ const showSearchPaperPopup = (paper: any) => {
         </section>
           </div>
         </Transition>
+        </div>
       </main>
 
       <div v-if="!isMobile && chatOpen" class="resizer side-resizer" :class="{ active: resizing === 'right' }" @mousedown="startResize('right', $event)" />
@@ -5732,154 +5883,6 @@ const showSearchPaperPopup = (paper: any) => {
   background: var(--color-primary-soft);
 }
 
-/* ── Open-papers dropdown (header) ─────────────────────────────────────────── */
-.tabs-menu {
-  position: absolute;
-  left: 84px;
-  top: 50%;
-  transform: translateY(-50%);
-  flex: none;
-  margin-left: 0;
-  min-width: 0;
-  max-width: min(320px, calc(100% - 84px));
-  z-index: 2;
-}
-.tabs-menu-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: auto;
-  max-width: 100%;
-  height: 30px;
-  padding: 0 8px 0 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  background: var(--color-bg-muted);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: background var(--transition), border-color var(--transition), color var(--transition);
-}
-.tabs-menu-trigger:hover { background: var(--color-bg-hover); color: var(--color-text); }
-.tabs-menu-trigger.open {
-  background: var(--color-bg-card);
-  border-color: var(--color-border-hover);
-  color: var(--color-text);
-}
-.tabs-menu-doc { flex-shrink: 0; color: var(--color-primary); }
-.tabs-menu-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 500;
-}
-.tabs-menu-caret { flex-shrink: 0; color: var(--color-text-muted); transition: transform var(--transition); }
-.tabs-menu-trigger.open .tabs-menu-caret { transform: rotate(180deg); }
-
-.tabs-menu-dropdown {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 60;
-  width: max-content;
-  min-width: 240px;
-  max-width: 360px;
-  max-height: 60vh;
-  overflow-y: auto;
-  padding: 5px;
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-lg);
-}
-.tabs-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 8px 7px 10px;
-  border: none;
-  background: transparent;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  text-align: left;
-  transition: background var(--transition), color var(--transition);
-}
-.tabs-menu-item:hover { background: var(--color-bg-muted); color: var(--color-text); }
-.tabs-menu-item.active { color: var(--color-text); }
-.tabs-menu-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-primary);
-  flex-shrink: 0;
-}
-.tabs-menu-item:not(.active) > .tabs-menu-item-title:first-child { margin-left: 14px; }
-.tabs-menu-section {
-  padding: 5px 8px 4px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-text-muted);
-  letter-spacing: 0.03em;
-}
-.tabs-menu-section.separated {
-  margin-top: 5px;
-  padding-top: 8px;
-  border-top: 1px solid var(--color-border);
-}
-.tabs-menu-file-icon {
-  width: 16px;
-  flex-shrink: 0;
-  font-size: 13px;
-  line-height: 1;
-}
-.tabs-menu-project-name {
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 0;
-  color: var(--color-text-muted);
-  font-size: 11px;
-}
-.tabs-menu-dirty {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-warning);
-  flex-shrink: 0;
-}
-.tabs-menu-item-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 500;
-}
-.tabs-menu-item-close {
-  width: 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  color: var(--color-text-muted);
-  font-size: 15px;
-  line-height: 1;
-  flex-shrink: 0;
-  opacity: 0.6;
-  transition: background var(--transition), color var(--transition), opacity var(--transition);
-}
-.tabs-menu-item:hover .tabs-menu-item-close { opacity: 1; }
-.tabs-menu-item-close:hover { background: var(--color-error); color: #fff; opacity: 1; }
-
-.dropdown-enter-active, .dropdown-leave-active { transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.34, 1.4, 0.64, 1); transform-origin: top left; }
-.dropdown-enter-from, .dropdown-leave-to { opacity: 0; transform: translateY(-6px) scale(0.97); }
-
 /* ── Body ─────────────────────────────────────────────────────────────────── */
 
 .app-body {
@@ -5925,7 +5928,91 @@ const showSearchPaperPopup = (paper: any) => {
   overflow: hidden;
   min-width: 0;
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
+/* The view below the tab strip; leaving views are positioned against it. */
+.app-main-view {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ── Editor actions at the right end of the tab strip ─────────────────────── */
+.tab-tool-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.tab-tool-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-text) 9%, transparent);
+  color: var(--color-text);
+}
+.tab-tool-btn.active { background: var(--color-primary-soft); color: var(--color-primary); }
+.tab-tool-btn.labeled {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.tab-tool-btn.labeled.active { border-color: rgba(var(--color-primary-rgb), 0.35); background: var(--color-primary-soft); }
+.tab-tool-btn.labeled.primary { border-color: var(--color-primary); background: var(--color-primary); color: #fff; }
+.tab-tool-btn.labeled.primary:hover:not(:disabled) { background: var(--color-primary-hover); color: #fff; }
+.tab-tool-btn.danger { color: var(--color-error); }
+.tab-tool-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.tab-tool-segment {
+  display: flex;
+  flex: none;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+.tab-tool-segment .tab-tool-btn { width: 30px; height: 22px; border-radius: 4px; }
+.tab-tool-select {
+  flex: none;
+  height: 24px;
+  max-width: 92px;
+  padding: 0 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.tab-tool-select:disabled { opacity: 0.5; cursor: wait; }
+.tab-tool-flag { display: grid; place-items: center; flex: none; width: 22px; height: 24px; color: var(--color-warning); }
+.tab-tool-info {
+  flex: none;
+  margin: 0 4px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.tab-tool-spin { animation: tab-tool-spin 0.9s linear infinite; }
+@keyframes tab-tool-spin { to { transform: rotate(360deg); } }
+/* The size is secondary: it gives way to the tabs on a narrow strip. */
+@container workbench-tabs (max-width: 520px) { .tab-tool-info { display: none; } }
 
 .app-main-workbench {
   height: 100%;
@@ -6339,20 +6426,6 @@ const showSearchPaperPopup = (paper: any) => {
   font-size: 13px;
 }
 .workspace-editor-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.workspace-editor-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-card);
-}
-.workspace-file-summary { min-width: 0; }
-.workspace-file-summary h2 { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-file-summary p { margin-top: 2px; color: var(--color-text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-file-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; color: var(--color-text-muted); font-size: 12px; }
-.readonly-pill { color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 999px; padding: 2px 8px; }
 .workspace-offline-notice {
   flex: 0 0 auto;
   padding: 7px 14px;
@@ -6363,46 +6436,6 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .workspace-offline-tree-note { color: var(--color-warning); }
 .workspace-text-editor-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-card); }
-.latex-pdf-toggle-btn {
-  min-height: 28px;
-  padding: 4px 10px;
-  border: 1px solid rgba(var(--color-primary-rgb), 0.42);
-  border-radius: 8px;
-  background: rgba(var(--color-primary-rgb), 0.10);
-  color: var(--color-primary);
-  font-size: 12px;
-  cursor: pointer;
-}
-.latex-pdf-toggle-btn:hover:not(:disabled) { background: rgba(var(--color-primary-rgb), 0.18); }
-.latex-pdf-toggle-btn:disabled { cursor: not-allowed; opacity: 0.5; }
-.latex-engine-workspace-select,
-.latex-workspace-tool-btn {
-  min-height: 28px;
-  padding: 4px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-bg);
-  color: var(--color-text-secondary);
-  font: inherit;
-  font-size: 11px;
-}
-.latex-engine-workspace-select {
-  max-width: 96px;
-  cursor: pointer;
-}
-.latex-workspace-tool-btn { cursor: pointer; }
-.latex-workspace-tool-btn:hover:not(:disabled) {
-  border-color: rgba(var(--color-primary-rgb), 0.35);
-  color: var(--color-primary);
-  background: rgba(var(--color-primary-rgb), 0.08);
-}
-.latex-workspace-tool-btn.primary {
-  border-color: rgba(var(--color-primary-rgb), 0.35);
-  color: var(--color-primary);
-}
-.latex-workspace-tool-btn.danger { color: var(--color-error); }
-.latex-engine-workspace-select:disabled,
-.latex-workspace-tool-btn:disabled { cursor: wait; opacity: 0.5; }
 .workspace-editor-content {
   flex: 1;
   min-width: 0;
@@ -6568,9 +6601,6 @@ const showSearchPaperPopup = (paper: any) => {
 }
 .md-find-btn:disabled { opacity: 0.4; cursor: default; }
 .md-find-btn.close:hover { background: rgba(239, 68, 68, 0.1); color: var(--color-error); }
-.dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-border-hover); flex-shrink: 0; }
-.dirty-dot.active { background: var(--color-warning); }
-.dirty-dot.conflict { background: var(--color-error); }
 .workspace-live-conflict {
   display: flex;
   align-items: center;
@@ -6589,51 +6619,7 @@ const showSearchPaperPopup = (paper: any) => {
   padding: 3px 8px;
   cursor: pointer;
 }
-.save-workspace-btn {
-  padding: 5px 12px;
-  border: none;
-  background: var(--color-primary);
-  color: #fff;
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  cursor: pointer;
-}
-.save-workspace-btn:hover:not(:disabled) { background: var(--color-primary-hover); }
-.save-workspace-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.open-system-btn {
-  padding: 5px 12px;
-  border: 1px solid var(--color-border);
-  background: var(--color-bg);
-  color: var(--color-text-secondary);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  cursor: pointer;
-}
-.open-system-btn:hover:not(:disabled) { border-color: rgba(var(--color-primary-rgb), 0.35); color: var(--color-primary); background: rgba(var(--color-primary-rgb), 0.08); }
-.open-system-btn:disabled { opacity: 0.5; cursor: wait; }
 .workspace-code-editor { flex: 1; min-height: 0; }
-.md-view-controls { display: flex; align-items: center; gap: 4px; }
-.md-view-toggle { display: flex; gap: 2px; padding: 2px; border-radius: var(--radius-sm); background: var(--color-bg-muted); }
-.md-view-toggle button {
-  padding: 3px 12px;
-  border: none;
-  background: transparent;
-  color: var(--color-text-muted);
-  font-size: 12px;
-  border-radius: calc(var(--radius-sm) - 2px);
-  cursor: pointer;
-}
-.md-view-toggle button.active { background: var(--color-bg-card); color: var(--color-text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
-.md-view-swap {
-  padding: 4px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-card);
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-}
-.md-view-swap:hover { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-soft); }
 .workspace-md-preview-shell { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: hidden; }
 .markdown-split-divider,
 .latex-split-divider {
@@ -7672,8 +7658,6 @@ const showSearchPaperPopup = (paper: any) => {
   .brand { display: none; }
   .header-left { width: auto; gap: 0; }
   .header-right { width: auto; gap: 0; }
-  .tabs-menu { left: 36px; max-width: 160px; }
-  .tabs-menu-trigger { max-width: 100%; }
   .library-header {
     padding: 18px 16px 12px;
     align-items: flex-start;
