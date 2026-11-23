@@ -362,7 +362,18 @@ const workspaceImageVersion = computed(() => {
 })
 const workspaceIsOffice = computed(() => isOfficeFile(selectedWorkspaceFile.value))
 const workspaceIsLegacyOffice = computed(() => isLegacyOfficeFile(selectedWorkspaceFile.value))
-const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension === '.pdf')
+const workspaceIsPdf = computed(() => selectedWorkspaceFile.value?.type === 'file'
+  && (selectedWorkspaceFile.value.extension?.toLowerCase() === '.pdf' || selectedWorkspaceFile.value.mime === 'application/pdf'))
+const workspacePdfDocumentId = computed(() => `workspace-pdf:${fileTabKey({
+  projectId: currentWorkspaceProjectId.value,
+  path: selectedWorkspacePath.value,
+})}:${workspaceImageVersion.value}`)
+const workspacePdfUrl = computed(() => {
+  if (!workspaceIsPdf.value) return ''
+  // Pass the scope explicitly: an empty ID means global files, not the current route.
+  const url = api.getFileDownloadUrl(selectedWorkspacePath.value, currentWorkspaceProjectId.value ?? '')
+  return `${url}&v=${encodeURIComponent(workspaceImageVersion.value)}`
+})
 const workspaceIsLatex = computed(() => selectedWorkspaceFile.value?.type === 'file' && selectedWorkspaceFile.value.extension?.toLowerCase() === '.tex')
 const workspaceCanCompileLatex = computed(() => workspaceIsLatex.value && !workspaceIsOfflineCopy.value)
 const latexBuildVisible = ref(false)
@@ -5207,6 +5218,16 @@ const showSearchPaperPopup = (paper: any) => {
 
             <div v-else-if="workspaceContentLoading && !latexBuildVisible" class="workspace-empty compact">正在读取文件…</div>
 
+            <div v-else-if="workspaceIsPdf" class="workspace-pdf-preview">
+              <PdfViewer
+                :key="workspacePdfDocumentId"
+                :source-url="workspacePdfUrl"
+                :document-id="workspacePdfDocumentId"
+                :title="selectedWorkspaceFile.name"
+                :show-back-button="false"
+              />
+            </div>
+
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
               <div v-if="workspaceIsOfflineCopy" class="workspace-offline-notice">
                 当前显示的是{{ workspaceOfflineCachedAt ? ` ${workspaceOfflineCachedAt} 保存的` : '' }}本地副本；恢复连接后会自动刷新，离线期间仅可阅读。
@@ -5436,9 +5457,9 @@ const showSearchPaperPopup = (paper: any) => {
             </div>
 
             <div v-else class="workspace-empty compact">
-              <div class="empty-icon">{{ workspaceIsPdf ? '📕' : '📄' }}</div>
+              <div class="empty-icon">📄</div>
               <h2>此文件不能直接编辑</h2>
-              <p>支持直接编辑常见文本文件。二进制文件、PDF 和超过大小限制的文件请下载后处理。</p>
+              <p>支持直接编辑常见文本文件。其他不支持预览的二进制文件和超过大小限制的文件请下载后处理。</p>
               <button v-if="selectedWorkspaceFile?.type === 'file'" class="primary-btn" @click="selectedWorkspaceFile && downloadWorkspaceFile(selectedWorkspaceFile)">下载文件</button>
             </div>
           </section>
@@ -6464,6 +6485,7 @@ const showSearchPaperPopup = (paper: any) => {
   font-size: 13px;
 }
 .workspace-editor-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.workspace-pdf-preview { flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .workspace-offline-notice {
   flex: 0 0 auto;
   padding: 7px 14px;
