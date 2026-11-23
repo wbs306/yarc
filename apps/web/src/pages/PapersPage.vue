@@ -12,6 +12,9 @@ import { useLiveFiles, type LiveFileClient } from '@/composables/useLiveFiles'
 import { getOfflineWorkspaceTree, putOfflineWorkspaceTree } from '@/lib/offline-workspace-cache'
 import { normalizeFileReferencePath } from '@/lib/workspace-file-reference'
 import { scopeChatResource } from '@/lib/chat-scope'
+import { retainPdfReader, missingTemporaryReaderMessage, type CachedPdfReader } from '@/lib/pdf-reader-cache'
+import { LATEX_PREVIEW_STORAGE_KEY, parseLatexPreviewSessions, rememberLatexPreviewSession, serializeLatexPreviewSessions, type LatexPreviewSession } from '@/lib/latex-preview-session'
+import LatexPreviewSurface from '@/components/files/LatexPreviewSurface.vue'
 import {
   WORKSPACE_RECENT_FILES_KEY,
   WORKSPACE_RECENT_FILES_LIMIT,
@@ -388,8 +391,26 @@ type LatexBuildStatus = {
 // Builds run on the server, so leaving a .tex file must not lose its build:
 // each file remembers its entry, last build and whether the PDF was shown,
 // and the panel reattaches to that build when the file is opened again.
-type LatexSession = { entryPath: string; buildId: string; visible: boolean; engine: LatexEngine }
-const latexSessions = new Map<string, LatexSession>()
+const latexSessions = (() => {
+  try { return parseLatexPreviewSessions(localStorage.getItem(LATEX_PREVIEW_STORAGE_KEY)) }
+  catch { return new Map<string, LatexPreviewSession>() }
+})()
+const persistLatexSessions = () => {
+  try { localStorage.setItem(LATEX_PREVIEW_STORAGE_KEY, serializeLatexPreviewSessions(latexSessions)) }
+  catch { /* Browser storage is optional; in-memory previews still work. */ }
+}
+type LatexPanel = {
+  key: string
+  projectId: string | null
+  entryPath: string
+  buildId: string
+  engine: LatexEngine
+  targetId?: string
+  status: LatexBuildStatus
+}
+const latexPanels = ref<LatexPanel[]>([])
+const latexPanelInstances = new Map<string, InstanceType<typeof LatexBuildPanel>>()
+const latexPreviewSlot = ref<HTMLElement | null>(null)
 const latexResumeBuildId = ref('')
 let latexBuildId = ''
 // Set when a build was requested before the lazily loaded panel was mounted.
@@ -432,6 +453,8 @@ const latexCompileTargetId = computed(() => {
   const target = projectsStore.latexTargets.find(item => item.id === targetId)
   return target?.entry === latexEntryPath.value ? target.id : undefined
 })
+const activeLatexPanelKey = computed(() => workspaceIsLatex.value && latexEntryPath.value
+  ? fileTabKey({ projectId: currentWorkspaceProjectId.value, path: latexEntryPath.value }) : '')
 const workspaceIsHtml = computed(() => workspaceLanguage.value === 'html')
 const htmlPreviewOpen = ref(false)
 const htmlPreviewVisible = computed(() => workspaceIsHtml.value && htmlPreviewOpen.value)
@@ -981,6 +1004,12 @@ const removeRecentWorkspacePath = (path: string) => {
   }
   recentWorkspaceFiles.value = removeRecentWorkspaceFiles(recentWorkspaceFiles.value, currentWorkspaceProjectId.value, path)
   openWorkspaceTabs.value = openWorkspaceTabs.value.filter((tab) => tab.file.path !== path && !tab.file.path.startsWith(`${path}/`))
+  const affected = (candidate: string) => candidate === path || candidate.startsWith(`${path}/`)
+  for (const [key, session] of latexSessions) {
+    if (session.projectId === currentWorkspaceProjectId.value && (affected(session.path) || affected(session.entryPath))) latexSessions.delete(key)
+  }
+  latexPanels.value = latexPanels.value.filter(panel => panel.projectId !== currentWorkspaceProjectId.value || !affected(panel.entryPath))
+  persistLatexSessions()
   persistRecentWorkspaceFiles()
 }
 
@@ -988,12 +1017,15 @@ const snapshotCurrentWorkspaceTab = () => {
   const file = selectedWorkspaceFile.value
   if (!isWorkspaceFile(file)) return
   if (workspaceIsLatex.value && latexEntryPath.value) {
-    latexSessions.set(fileTabKey({ projectId: currentWorkspaceProjectId.value, path: file.path }), {
+    rememberLatexPreviewSession(latexSessions, {
+      projectId: currentWorkspaceProjectId.value,
+      path: file.path,
       entryPath: latexEntryPath.value,
       buildId: latexBuildId,
       visible: latexBuildVisible.value,
       engine: latexEngine.value,
     })
+    persistLatexSessions()
   }
   const tab: WorkspaceFileTab = {
     file: { ...file, children: undefined },
@@ -1742,11 +1774,13 @@ const selectWorkspaceFile = async (node: FileNode) => {
   // switching between source `.tex` files. SyncTeX may legitimately navigate
   // from main.tex to an included file, and unmounting the panel here would
   // discard the current build result before the target cursor is applied.
-  const keepLatexBuild = latexBuildVisible.value && nodeIsLatex && !!latexEntryPath.value
-
-  const latexSession = !keepLatexBuild && nodeIsLatex
+  const savedLatexSession = nodeIsLatex
     ? latexSessions.get(fileTabKey({ projectId: currentWorkspaceProjectId.value, path: node.path }))
     : undefined
+  // Known entries keep their own build; unknown included .tex files inherit
+  // the current one so SyncTeX can navigate without changing the build entry.
+  const keepLatexBuild = nodeIsLatex && !!latexEntryPath.value && !savedLatexSession
+  const latexSession = savedLatexSession
 
   selectedWorkspaceFile.value = node
   latexBuildVisible.value = keepLatexBuild || !!latexSession?.visible
@@ -1919,12 +1953,14 @@ const openLatexBuild = async () => {
     return
   }
 
+  const projectId = currentWorkspaceProjectId.value
   const cursor = workspaceEditorRef.value?.getCursorPosition()
   if (isProjectWorkspace.value) await projectsStore.fetchLatexTargets(projectWorkspaceId.value).catch(() => {})
   if (workspaceDirty.value) {
     await saveWorkspaceFile()
     if (workspaceDirty.value) return
   }
+  if (currentWorkspaceProjectId.value !== projectId || selectedWorkspacePath.value !== file.path) return
   latexResumeBuildId.value = ''
   latexBuildId = ''
   latexEntryPath.value = file.path
@@ -1959,6 +1995,9 @@ type LatexSourcePosition = { file: string; line?: number; column?: number }
 
 const openLatexSourcePosition = async (position: LatexSourcePosition) => {
   const entryPath = latexEntryPath.value
+  const projectId = currentWorkspaceProjectId.value
+  const buildId = latexBuildId
+  const engine = latexEngine.value
   if (!entryPath) return
   const sourceFile = normalizeWorkspaceFilePath(position.file)
     .split('/')
@@ -1983,6 +2022,10 @@ const openLatexSourcePosition = async (position: LatexSourcePosition) => {
       filesError.value = `SyncTeX 源文件不存在：${targetPath}`
       return
     }
+    if (currentWorkspaceProjectId.value !== projectId || latexEntryPath.value !== entryPath) return
+    rememberLatexPreviewSession(latexSessions, {
+      projectId, path: node.path, entryPath, buildId, engine, visible: true,
+    })
     await selectWorkspaceFile(node)
     // Keep the compiled main entry independent from the source file opened by
     // SyncTeX. Selecting intro.tex must not turn it into a new build entry.
@@ -1997,10 +2040,12 @@ const openLatexSourcePosition = async (position: LatexSourcePosition) => {
 
 const rebuildLatex = async () => {
   if (!workspaceIsLatex.value || !latexBuildVisible.value || !workspaceCanCompileLatex.value) return
+  const key = activeLatexPanelKey.value
   if (workspaceDirty.value) {
     await saveWorkspaceFile()
     if (workspaceDirty.value) return
   }
+  if (activeLatexPanelKey.value !== key) return
   await startLatexBuildWhenReady()
 }
 
@@ -2012,10 +2057,34 @@ const locateLatexSource = () => {
   latexBuildPanelRef.value?.locateCurrentSource()
 }
 
-const onLatexBuildStatus = (status: LatexBuildStatus) => {
-  latexBuildStatus.value = status
-  // A freshly mounted panel reports no build before it has reattached.
-  if (status.buildId) latexBuildId = status.buildId
+const onLatexBuildStatus = (panel: LatexPanel, status: LatexBuildStatus) => {
+  panel.status = status
+  if (status.buildId) panel.buildId = status.buildId
+  // Background events belong to their captured workspace, never the route.
+  for (const session of latexSessions.values()) {
+    if (session.projectId === panel.projectId && session.entryPath === panel.entryPath && panel.buildId) {
+      session.buildId = panel.buildId
+      session.engine = panel.engine
+    }
+  }
+  if (panel.key === activeLatexPanelKey.value) {
+    latexBuildStatus.value = status
+    if (panel.buildId) latexBuildId = panel.buildId
+    if (selectedWorkspacePath.value) {
+      rememberLatexPreviewSession(latexSessions, {
+        projectId: panel.projectId, path: selectedWorkspacePath.value, entryPath: panel.entryPath,
+        buildId: panel.buildId, engine: panel.engine, visible: latexBuildVisible.value,
+      })
+    }
+  }
+  persistLatexSessions()
+}
+
+const setLatexPanelInstance = (key: string, value: unknown) => {
+  const panel = value as InstanceType<typeof LatexBuildPanel> | null
+  if (panel) latexPanelInstances.set(key, panel)
+  else latexPanelInstances.delete(key)
+  if (key === activeLatexPanelKey.value) latexBuildPanelRef.value = panel
 }
 
 const toggleLatexBuild = async () => {
@@ -2145,6 +2214,9 @@ const closeWorkspaceTab = async (path: string) => {
   // strip. Without a previously used tab, stay within this workspace.
   const tabKey = fileTabKey({ projectId: currentWorkspaceProjectId.value, path })
   latexSessions.delete(tabKey)
+  persistLatexSessions()
+  latexPanels.value = latexPanels.value.filter(panel =>
+    [...latexSessions.values()].some(session => session.projectId === panel.projectId && session.entryPath === panel.entryPath))
   const wasActiveTab = activeTabKey.value === tabKey
   const nextTabKey = wasActiveTab ? tabAfterClosing(tabKey, currentScopeFileTabKeys.value) : null
 
@@ -2508,6 +2580,7 @@ type ReaderTab = {
 }
 
 const readerTabs = ref<ReaderTab[]>([])
+const readerLoadError = ref<{ paperId: string; message: string } | null>(null)
 const temporaryPdfPollTimers = new Map<string, number>()
 const readerTabLimit = computed(() => (isMobile.value ? 4 : 6))
 const activeReaderTab = computed(() => readerTabs.value.find((tab) => tab.paper.id === activePaperId.value) || null)
@@ -3018,6 +3091,47 @@ const libraryViewVisible = computed(() => workbenchViewVisible.value && !hasPape
   && (sidebarMode.value === 'library' || sidebarMode.value === 'ieee'))
 const fileViewVisible = computed(() => workbenchViewVisible.value && !hasPaper.value && sidebarMode.value === 'files')
 
+// Mount PDFs outside the selected-file branch so text/file/workspace switches
+// do not destroy their document, scroll position, zoom or rendered pages.
+const workspacePdfReaders = ref<CachedPdfReader[]>([])
+watch([workspacePdfDocumentId, workspacePdfUrl, () => recentWorkspaceFiles.value], () => {
+  const current = workspaceIsPdf.value ? {
+    key: fileTabKey({ projectId: currentWorkspaceProjectId.value, path: selectedWorkspacePath.value }),
+    documentId: workspacePdfDocumentId.value,
+    sourceUrl: workspacePdfUrl.value,
+    title: selectedWorkspaceFile.value?.name || 'PDF',
+  } : null
+  workspacePdfReaders.value = retainPdfReader(workspacePdfReaders.value, current,
+    new Set(recentWorkspaceFiles.value.map(fileTabKey)), WORKSPACE_RECENT_FILES_LIMIT)
+})
+
+watch(activeLatexPanelKey, (key) => {
+  let panel = latexPanels.value.find(item => item.key === key)
+  if (key && !panel) {
+    panel = {
+      key, projectId: currentWorkspaceProjectId.value, entryPath: latexEntryPath.value,
+      buildId: latexResumeBuildId.value, engine: latexEngine.value, targetId: latexCompileTargetId.value,
+      status: { active: false, loading: false, completed: false, synctexAvailable: false },
+    }
+    latexPanels.value.push(panel)
+    // Keep the pool bounded; evict idle readers before running compilations.
+    while (latexPanels.value.length > WORKSPACE_RECENT_FILES_LIMIT) {
+      const index = latexPanels.value.findIndex(item => item.key !== key && !item.status.active && !item.status.loading)
+      if (index < 0) break
+      latexPanels.value.splice(index, 1)
+    }
+  }
+  latexBuildStatus.value = panel?.status || { active: false, loading: false, completed: false, synctexAvailable: false }
+  latexBuildPanelRef.value = latexPanelInstances.get(key) || null
+})
+watch(latexEngine, (engine) => {
+  const panel = latexPanels.value.find(item => item.key === activeLatexPanelKey.value)
+  if (panel) panel.engine = engine
+})
+watch(latexBuildVisible, () => {
+  if (workspaceIsLatex.value && latexEntryPath.value) snapshotCurrentWorkspaceTab()
+})
+
 // The library becomes a tab once it has been opened and stays until closed.
 const libraryTabOpen = ref(localStorage.getItem(LIBRARY_TAB_STORAGE_KEY) === '1')
 const setLibraryTabOpen = (open: boolean) => {
@@ -3259,6 +3373,7 @@ onBeforeUnmount(() => {
   markdownPreviewResizeObserver?.disconnect()
   markdownPreviewRef.value?.removeEventListener('load', invalidateMarkdownAnchors, true)
   void liveFiles.releaseAll()
+  persistLatexSessions()
   for (const paperId of temporaryPdfPollTimers.keys()) clearTemporaryPdfPoll(paperId)
   window.removeEventListener('resize', onResize)
   window.removeEventListener('yarc-open-chat', openChatPanel)
@@ -3340,8 +3455,18 @@ const stopResize = () => {
 // ── Paper / note selection ──────────────────────────────────────────────────
 
 watch(() => [route.name, route.params.id], async ([name, id]) => {
+  readerLoadError.value = null
   if (name === 'paper-detail' && id && typeof id === 'string') {
-    if (readerTabs.value.find((tab) => tab.paper.id === id)?.temporaryPdfUrl) {
+    const existing = readerTabs.value.find((tab) => tab.paper.id === id)
+    // Temporary IDs are browser-session identities, not library paper IDs.
+    // A refreshed/old link must show an actionable notice, not query /papers/:id.
+    if (!existing && id.startsWith('preview-')) {
+      paperStore.currentPaper = null
+      noteStore.notes = []
+      readerLoadError.value = { paperId: id, message: missingTemporaryReaderMessage }
+      return
+    }
+    if (existing?.temporaryPdfUrl) {
       paperStore.currentPaper = null
       noteStore.notes = []
       notesDraft.value = ''
@@ -3349,9 +3474,21 @@ watch(() => [route.name, route.params.id], async ([name, id]) => {
       if (isMobile.value) mobileSidebar.value = false
       return
     }
-    await paperStore.fetchPaper(id)
-    if (paperStore.currentPaper) touchReaderTab(paperStore.currentPaper)
-    await noteStore.fetchNotes(id)
+    // Re-selecting an open tab should show its existing reader immediately.
+    if (existing) {
+      existing.lastAccessedAt = Date.now()
+      paperStore.currentPaper = existing.paper
+    }
+    try {
+      if (!existing) await paperStore.fetchPaper(id)
+      if (activePaperId.value !== id) return
+      if (paperStore.currentPaper?.id === id) touchReaderTab(paperStore.currentPaper)
+      await noteStore.fetchNotes(id)
+    } catch (err) {
+      if (activePaperId.value === id && !existing) {
+        readerLoadError.value = { paperId: id, message: (err as Error).message || '无法打开论文，请返回文献库重试。' }
+      }
+    }
     if (isMobile.value) mobileSidebar.value = false
   } else {
     paperStore.currentPaper = null
@@ -5034,17 +5171,75 @@ const showSearchPaperPopup = (paper: any) => {
         <Transition name="workspace-view">
           <ProjectsPage v-if="route.name === 'projects'" key="projects-view" embedded />
           <ProjectSettingsPage v-else-if="route.name === 'project-settings'" :key="`project-settings-${String(route.params.id || '')}`" embedded />
-          <div v-else key="workbench-view" class="app-main-workbench">
+        </Transition>
+          <div
+            class="app-main-workbench"
+            :class="{ 'pdf-reader-background': !workbenchViewVisible }"
+            :inert="!workbenchViewVisible"
+            :aria-hidden="!workbenchViewVisible"
+          >
           <PdfViewer
             v-for="tab in readerTabs"
             :key="tab.paper.id"
             :ref="(viewer) => setPdfViewer(tab.paper.id, viewer)"
-            v-show="hasPaper && tab.paper.id === activePaperId"
+            class="persistent-pdf-reader"
+            :class="{ 'pdf-reader-background': !hasPaper || tab.paper.id !== activePaperId }"
+            :inert="!hasPaper || tab.paper.id !== activePaperId"
+            :aria-hidden="!hasPaper || tab.paper.id !== activePaperId"
+            :active="workbenchViewVisible && hasPaper && tab.paper.id === activePaperId"
             :paper="tab.paper"
             :source-url="tab.temporaryPdfUrl"
             @back="backToLibrary"
             @show-details="showPaperDetails"
           />
+
+          <PdfViewer
+            v-for="reader in workspacePdfReaders"
+            :key="reader.documentId"
+            class="persistent-pdf-reader"
+            :class="{ 'pdf-reader-background': !fileViewVisible || reader.documentId !== workspacePdfDocumentId }"
+            :inert="!fileViewVisible || reader.documentId !== workspacePdfDocumentId"
+            :aria-hidden="!fileViewVisible || reader.documentId !== workspacePdfDocumentId"
+            :active="fileViewVisible && reader.documentId === workspacePdfDocumentId"
+            :source-url="reader.sourceUrl"
+            :document-id="reader.documentId"
+            :title="reader.title"
+            :show-back-button="false"
+          />
+
+          <LatexPreviewSurface
+            v-for="panel in latexPanels"
+            :key="panel.key"
+            :target="panel.key === activeLatexPanelKey ? latexPreviewSlot : null"
+            :active="fileViewVisible && latexBuildVisible && panel.key === activeLatexPanelKey"
+          >
+            <LatexBuildPanel
+              :ref="value => setLatexPanelInstance(panel.key, value)"
+              :path="panel.entryPath"
+              :name="panel.entryPath.split('/').pop() || ''"
+              :project-id="panel.projectId"
+              :active="fileViewVisible && latexBuildVisible && panel.key === activeLatexPanelKey"
+              :auto-start="false"
+              :resume-build-id="panel.buildId"
+              :engine="panel.engine"
+              :target-id="panel.targetId"
+              :source-file="panel.key === activeLatexPanelKey ? latexSourceFile : undefined"
+              :source-line="panel.key === activeLatexPanelKey ? latexSourceLine : undefined"
+              :source-column="panel.key === activeLatexPanelKey ? latexSourceColumn : undefined"
+              @update:engine="value => { panel.engine = value; if (panel.key === activeLatexPanelKey) latexEngine = value }"
+              @status="status => onLatexBuildStatus(panel, status)"
+              @open-source="position => { if (panel.key === activeLatexPanelKey) openLatexSourcePosition(position) }"
+            />
+          </LatexPreviewSurface>
+
+          <section v-if="hasPaper && !activeReaderTab" class="workspace-empty" role="status">
+            <template v-if="readerLoadError?.paperId === activePaperId">
+              <h2>{{ activePaperId.startsWith('preview-') ? '临时阅读已失效' : '无法打开论文' }}</h2>
+              <p>{{ readerLoadError.message }}</p>
+              <button class="primary-btn" @click="backToLibrary">返回文献库</button>
+            </template>
+            <p v-else>正在打开论文…</p>
+          </section>
 
         <section v-show="!hasPaper && sidebarMode === 'library'" class="paper-library">
           <div class="library-header" :class="{ condensed: libraryScrolled }">
@@ -5200,7 +5395,7 @@ const showSearchPaperPopup = (paper: any) => {
           </div>
         </section>
 
-        <section v-show="!hasPaper && sidebarMode === 'files'" class="paper-library workspace-panel">
+        <section v-show="!hasPaper && sidebarMode === 'files' && !workspaceIsPdf" class="paper-library workspace-panel">
           <div v-if="filesError" class="workspace-error">{{ filesError }}</div>
 
           <div v-if="!selectedWorkspaceFile" class="workspace-empty">
@@ -5217,16 +5412,6 @@ const showSearchPaperPopup = (paper: any) => {
             </div>
 
             <div v-else-if="workspaceContentLoading && !latexBuildVisible" class="workspace-empty compact">正在读取文件…</div>
-
-            <div v-else-if="workspaceIsPdf" class="workspace-pdf-preview">
-              <PdfViewer
-                :key="workspacePdfDocumentId"
-                :source-url="workspacePdfUrl"
-                :document-id="workspacePdfDocumentId"
-                :title="selectedWorkspaceFile.name"
-                :show-back-button="false"
-              />
-            </div>
 
             <div v-else-if="selectedWorkspaceFile.editable" class="workspace-text-editor-wrap">
               <div v-if="workspaceIsOfflineCopy" class="workspace-offline-notice">
@@ -5420,23 +5605,11 @@ const showSearchPaperPopup = (paper: any) => {
               >
                 <span class="latex-split-divider-grip" aria-hidden="true" />
               </div>
-              <LatexBuildPanel
-                v-if="workspaceIsLatex && latexEntryPath"
-                v-show="latexBuildVisible"
-                ref="latexBuildPanelRef"
+              <div
+                v-if="workspaceIsLatex && latexEntryPath && latexBuildVisible"
+                ref="latexPreviewSlot"
                 class="workspace-latex-preview-pane"
-                :auto-start="false"
-                :resume-build-id="latexResumeBuildId"
-                v-model:engine="latexEngine"
-                :path="latexEntryPath || selectedWorkspaceFile.path"
-                :name="latexEntryPath.split('/').pop() || selectedWorkspaceFile.name"
-                :source-file="latexSourceFile"
-                :target-id="latexCompileTargetId"
-                :source-line="latexSourceLine"
-                :source-column="latexSourceColumn"
-                @close="latexBuildVisible = false"
-                @open-source="openLatexSourcePosition"
-                @status="onLatexBuildStatus"
+                aria-hidden="true"
               />
                 </div>
               </div>
@@ -5551,7 +5724,6 @@ const showSearchPaperPopup = (paper: any) => {
           <SettingsContent v-if="settingsVisited" :active-tab="settingsSection" />
         </section>
           </div>
-        </Transition>
         </div>
       </main>
 
@@ -6074,6 +6246,7 @@ const showSearchPaperPopup = (paper: any) => {
 @container workbench-tabs (max-width: 520px) { .tab-tool-info { display: none; } }
 
 .app-main-workbench {
+  position: relative;
   height: 100%;
   min-height: 0;
   min-width: 0;
@@ -6485,7 +6658,10 @@ const showSearchPaperPopup = (paper: any) => {
   font-size: 13px;
 }
 .workspace-editor-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.workspace-pdf-preview { flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+/* Unlike display:none, visibility preserves viewport geometry and rendered PDF
+   pages. Background readers are inert and cannot intercept input or selection. */
+.persistent-pdf-reader { position: absolute; inset: 0; min-width: 0; min-height: 0; }
+.pdf-reader-background { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
 .workspace-offline-notice {
   flex: 0 0 auto;
   padding: 7px 14px;

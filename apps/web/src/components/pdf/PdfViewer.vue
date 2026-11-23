@@ -36,6 +36,7 @@ const props = defineProps<{
   title?: string
   sourceHighlights?: LatexSyncTexRect[]
   showBackButton?: boolean
+  active?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -809,7 +810,7 @@ const hasPdfSelection = () => {
 
 const handlePdfCopyKeydown = (event: KeyboardEvent) => {
   if (event.key.toLowerCase() !== 'c' || (!event.ctrlKey && !event.metaKey) || event.altKey) return
-  if (!viewerRootRef.value || viewerRootRef.value.offsetParent === null) return
+  if (props.active === false || !viewerRootRef.value || viewerRootRef.value.offsetParent === null) return
   if (isEditableCopyTarget(event.target) || !hasPdfSelection()) return
 
   event.preventDefault()
@@ -1561,7 +1562,8 @@ defineExpose({ scrollToNote, goToPage, goToPosition })
               <div v-if="isDocLoading || (loadingDocument && !isLoaded)" class="pdf-empty">加载 PDF…</div>
               <div v-else-if="isError || documentError" class="pdf-empty pdf-error">
                 <div class="pdf-empty-stack">
-                  <strong>PDF 加载失败</strong>
+                  <strong>{{ paper?.parseStatus === 'temporary' ? '临时论文无法打开' : 'PDF 加载失败' }}</strong>
+                  <span v-if="paper?.parseStatus === 'temporary'">临时论文文件可能已失效、被清理或暂时无法访问。请从搜索结果或原始链接重新打开；需要长期保留请导入文献库。</span>
                   <span>{{ documentError || documentState?.error || 'PDF 加载失败' }}</span>
                   <a v-if="pdfUrl" class="pdf-fallback-link" :href="pdfUrl" target="_blank" rel="noopener">打开原始 PDF</a>
                 </div>

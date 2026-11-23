@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useApi } from '@/composables/useApi'
+import { createLatexBuildApi } from '@/composables/useApi'
 import PdfViewer from '@/components/pdf/PdfViewer.vue'
 import type { LatexBuild, LatexDiagnostic, LatexEngine, LatexSyncTexRect } from '@yarc/shared'
 
 const props = withDefaults(defineProps<{
   path: string
   name: string
+  projectId?: string | null
+  active?: boolean
   sourceFile?: string
   sourceLine?: number
   sourceColumn?: number
@@ -15,9 +17,10 @@ const props = withDefaults(defineProps<{
   resumeBuildId?: string
   engine?: LatexEngine
   targetId?: string
-  buildApi?: Pick<ReturnType<typeof useApi>, 'compileLatex' | 'getLatexBuild' | 'getLatexBuildLog' | 'cancelLatexBuild' | 'getLatexPdfUrl' | 'getLatexSyncTex'>
+  buildApi?: ReturnType<typeof createLatexBuildApi>
 }>(), {
   autoStart: false,
+  active: true,
   engine: 'xelatex',
 })
 
@@ -28,8 +31,7 @@ const emit = defineEmits<{
   'update:engine': [engine: LatexEngine]
 }>()
 
-const defaultApi = useApi()
-const api = computed(() => props.buildApi || defaultApi)
+const api = computed(() => props.buildApi || createLatexBuildApi(props.projectId))
 const engine = computed({
   get: () => props.engine || 'xelatex',
   set: (value: LatexEngine) => emit('update:engine', value),
@@ -130,7 +132,7 @@ const syncToCurrentSource = async (id: string, sequence: number, highlight = fal
       line: props.sourceLine || 1,
       column: props.sourceColumn || 1,
     })
-    if (sequence !== requestSequence) return
+    if (sequence !== requestSequence || !props.active) return
     const page = Number(result.page)
     const x = Number(result.x)
     const y = Number(result.y)
@@ -156,23 +158,26 @@ const syncToCurrentSource = async (id: string, sequence: number, highlight = fal
   }
 }
 
-const pollBuild = async (id: string, sequence: number) => {
+const pollBuild = async (id: string, sequence: number, syncAfterBuild = true) => {
   try {
     const result = await api.value.getLatexBuild(id)
     if (sequence !== requestSequence) return
     build.value = result.build
     await loadLog(id, sequence)
     if (sequence !== requestSequence) return
-    if (result.build.status === 'completed' && result.build.synctexAvailable) {
+    if (syncAfterBuild && props.active && result.build.status === 'completed' && result.build.synctexAvailable) {
       await syncToCurrentSource(id, sequence)
     }
     if (sequence !== requestSequence) return
     if (result.build.status === 'queued' || result.build.status === 'running') {
-      pollTimer = window.setTimeout(() => { void pollBuild(id, sequence) }, 700)
+      pollTimer = window.setTimeout(() => { void pollBuild(id, sequence, syncAfterBuild) }, 700)
     }
   } catch (err) {
     if (sequence !== requestSequence) return
-    error.value = (err as Error).message || '读取编译状态失败'
+    error.value = syncAfterBuild
+      ? ((err as Error).message || '读取编译状态失败')
+      : `无法恢复上次编译结果，构建记录或产物可能已失效（如服务重启或文件被清理）。未自动重新编译，请点击“重新编译”重试。${(err as Error).message || ''}`
+    buildInfoOpen.value = true
   }
 }
 
@@ -183,7 +188,7 @@ const resumeBuild = async (id: string) => {
   loading.value = true
   error.value = ''
   try {
-    await pollBuild(id, sequence)
+    await pollBuild(id, sequence, false)
   } finally {
     if (sequence === requestSequence) loading.value = false
   }
@@ -250,7 +255,7 @@ watch(pdfViewer, (viewer) => {
 
 const handlePdfPosition = async (position: { page: number; x: number; y: number }) => {
   const current = build.value
-  if (!current?.synctexAvailable || syncLoading.value) return
+  if (!props.active || !current?.synctexAvailable || syncLoading.value) return
   syncLoading.value = true
   syncError.value = ''
   clearPdfHighlight()
@@ -262,7 +267,7 @@ const handlePdfPosition = async (position: { page: number; x: number; y: number 
       x: position.x,
       y: position.y,
     })
-    if (sequence !== requestSequence) return
+    if (sequence !== requestSequence || !props.active) return
     const file = typeof result.file === 'string' ? result.file : ''
     const line = Number(result.line)
     const column = Number(result.column)
@@ -387,6 +392,7 @@ onBeforeUnmount(() => {
         :title="`${name} 编译结果`"
         :source-highlights="pdfHighlights"
         :show-back-button="false"
+        :active="active"
         @pdf-position="handlePdfPosition"
         @navigation-complete="handlePdfNavigationComplete"
         @navigation-cancelled="clearPdfHighlight"

@@ -55,8 +55,7 @@ const filesEndpoint = (suffix = '', projectId = currentProjectId()) => {
     : `/files${suffix}`
 }
 
-const latexBuildsEndpoint = (suffix = '') => {
-  const projectId = currentProjectId()
+const latexBuildsEndpoint = (suffix = '', projectId = currentProjectId()) => {
   return projectId
     ? `/projects/${encodeURIComponent(projectId)}/latex/builds${suffix}`
     : `/latex/builds${suffix}`
@@ -100,6 +99,31 @@ async function request<T>(endpoint: string, options: RequestInitExt = {}): Promi
   }
 
   return res.json()
+}
+
+// A background panel must keep its owning scope even after the route changes.
+// undefined preserves the route-derived behavior for existing callers; null is global.
+export function createLatexBuildApi(projectId?: string | null) {
+  const endpoint = (suffix = '') => latexBuildsEndpoint(suffix, projectId === undefined ? currentProjectId() : projectId)
+  return {
+    compileLatex: (path: string, engine: LatexEngine = 'xelatex', targetId?: string) =>
+      request<{ build: LatexBuild }>(endpoint(), {
+        method: 'POST',
+        body: JSON.stringify({ path, engine, ...(targetId ? { targetId } : {}) }),
+      }),
+    getLatexBuild: (id: string) => request<{ build: LatexBuild }>(endpoint(`/${encodeURIComponent(id)}`)),
+    getLatexBuildLog: (id: string) => request<LatexBuildLog>(endpoint(`/${encodeURIComponent(id)}/log`)),
+    cancelLatexBuild: (id: string) =>
+      request<{ build: LatexBuild }>(endpoint(`/${encodeURIComponent(id)}/cancel`), { method: 'POST' }),
+    getLatexPdfUrl: (id: string, version?: string | number) => {
+      const versionParam = version === undefined || version === '' ? '' : `?v=${encodeURIComponent(String(version))}`
+      return `${API_BASE}${endpoint(`/${encodeURIComponent(id)}/pdf`)}${versionParam}`
+    },
+    getLatexSyncTex: <T extends 'forward' | 'backward'>(id: string, params: Record<string, string | number> & { direction: T }) =>
+      request<Extract<LatexSyncTexForwardResult | LatexSyncTexBackwardResult, { direction: T }>>(endpoint(`/${encodeURIComponent(id)}/synctex`), {
+        params: Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)])),
+      }),
+  }
 }
 
 export function useApi() {
@@ -599,32 +623,7 @@ export function useApi() {
     getOfficeView: (path: string, mode: OfficeViewMode) =>
       request<{ mode: OfficeViewMode; content: string }>(filesEndpoint('/office/view'), { params: { path, mode } }),
 
-    // LaTeX builds. Project routes are selected from the current /projects/:id URL;
-    // the same panel can therefore serve both the global Files workspace and a Project.
-    compileLatex: (path: string, engine: LatexEngine = 'xelatex', targetId?: string) =>
-      request<{ build: LatexBuild }>(latexBuildsEndpoint(), {
-        method: 'POST',
-        body: JSON.stringify({ path, engine, ...(targetId ? { targetId } : {}) }),
-      }),
-
-    getLatexBuild: (id: string) =>
-      request<{ build: LatexBuild }>(latexBuildsEndpoint(`/${encodeURIComponent(id)}`)),
-
-    getLatexBuildLog: (id: string) =>
-      request<LatexBuildLog>(latexBuildsEndpoint(`/${encodeURIComponent(id)}/log`)),
-
-    cancelLatexBuild: (id: string) =>
-      request<{ build: LatexBuild }>(latexBuildsEndpoint(`/${encodeURIComponent(id)}/cancel`), { method: 'POST' }),
-
-    getLatexPdfUrl: (id: string, version?: string | number) => {
-      const versionParam = version === undefined || version === '' ? '' : `?v=${encodeURIComponent(String(version))}`
-      return `${API_BASE}${latexBuildsEndpoint(`/${encodeURIComponent(id)}/pdf`)}${versionParam}`
-    },
-
-    getLatexSyncTex: <T extends 'forward' | 'backward'>(id: string, params: Record<string, string | number> & { direction: T }) =>
-      request<Extract<LatexSyncTexForwardResult | LatexSyncTexBackwardResult, { direction: T }>>(latexBuildsEndpoint(`/${encodeURIComponent(id)}/synctex`), {
-        params: Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)])),
-      }),
+    ...createLatexBuildApi(),
 
     // Settings
     getSettings: () => request<{ settings: Record<string, any> }>('/settings'),
