@@ -66,6 +66,7 @@ const ProjectWorkspaceTools = defineAsyncComponent(() => import('@/components/pr
 const HistoryCompareEditor = defineAsyncComponent(() => import('@/components/projects/HistoryCompareEditor.vue'))
 const PdfViewer = defineAsyncComponent(() => import('@/components/pdf/PdfViewer.vue'))
 const CodeEditor = defineAsyncComponent(() => import('@/components/files/CodeEditor.vue'))
+const HtmlPreview = defineAsyncComponent(() => import('@/components/files/HtmlPreview.vue'))
 const LatexBuildPanel = defineAsyncComponent(() => import('@/components/files/LatexBuildPanel.vue'))
 const OfficePreview = defineAsyncComponent(() => import('@/components/files/OfficePreview.vue'))
 const SettingsContent = defineAsyncComponent(() => import('@/components/settings/SettingsContent.vue'))
@@ -266,6 +267,7 @@ interface WorkspaceFileTab {
   markdownScrollLine: number
   markdownSplitRatio: number
   markdownSplitEditorOnLeft: boolean
+  htmlPreviewOpen: boolean
   lastAccessedAt: number
 }
 
@@ -419,6 +421,9 @@ const latexCompileTargetId = computed(() => {
   const target = projectsStore.latexTargets.find(item => item.id === targetId)
   return target?.entry === latexEntryPath.value ? target.id : undefined
 })
+const workspaceIsHtml = computed(() => workspaceLanguage.value === 'html')
+const htmlPreviewOpen = ref(false)
+const htmlPreviewVisible = computed(() => workspaceIsHtml.value && htmlPreviewOpen.value)
 const workspaceIsMarkdown = computed(() => workspaceLanguage.value === 'markdown')
 const markdownViewMode = ref<MarkdownViewMode>('edit')
 const markdownPreviewRef = ref<HTMLElement | null>(null)
@@ -989,6 +994,7 @@ const snapshotCurrentWorkspaceTab = () => {
     markdownScrollLine: workspaceIsMarkdown.value ? getActiveMarkdownScrollLine() : 1,
     markdownSplitRatio: markdownSplitRatio.value,
     markdownSplitEditorOnLeft: markdownSplitEditorOnLeft.value,
+    htmlPreviewOpen: htmlPreviewVisible.value,
     lastAccessedAt: Date.now(),
   }
   openWorkspaceTabs.value = [tab, ...openWorkspaceTabs.value.filter((item) => item.file.path !== file.path)].slice(0, 8)
@@ -1006,6 +1012,7 @@ const restoreWorkspaceTab = (tab: WorkspaceFileTab, node: FileNode) => {
   markdownScrollLine.value = restoredLine
   markdownSplitRatio.value = clampMarkdownSplitRatio(tab.markdownSplitRatio ?? 50)
   markdownSplitEditorOnLeft.value = tab.markdownSplitEditorOnLeft ?? defaultMarkdownSplitEditorOnLeft()
+  htmlPreviewOpen.value = tab.htmlPreviewOpen
   workspaceContentLoading.value = false
   tab.lastAccessedAt = Date.now()
   void nextTick(() => restoreMarkdownScrollPosition(restoredLine))
@@ -1332,6 +1339,7 @@ const clearWorkspaceEditor = () => {
   markdownScrollPercent.value = 0
   markdownSplitRatio.value = 50
   markdownSplitEditorOnLeft.value = defaultMarkdownSplitEditorOnLeft()
+  htmlPreviewOpen.value = false
   pendingMarkdownScroll.clear()
 }
 
@@ -1752,6 +1760,7 @@ const selectWorkspaceFile = async (node: FileNode) => {
   markdownScrollLine.value = existingTab?.markdownScrollLine ?? 1
   markdownSplitRatio.value = clampMarkdownSplitRatio(existingTab?.markdownSplitRatio ?? 50)
   markdownSplitEditorOnLeft.value = existingTab?.markdownSplitEditorOnLeft ?? defaultMarkdownSplitEditorOnLeft()
+  htmlPreviewOpen.value = existingTab?.htmlPreviewOpen ?? false
   pendingMarkdownScroll.clear()
 
   if (node.type !== 'file' || !node.editable) {
@@ -3174,7 +3183,7 @@ const isReplaceShortcut = (event: KeyboardEvent) =>
 
 const onDocumentKeydown = (event: KeyboardEvent) => {
   if (isFindShortcut(event) || isReplaceShortcut(event)) {
-    if (hasPaper.value || sidebarMode.value !== 'files' || !selectedWorkspaceFile.value?.editable) return
+    if (hasPaper.value || sidebarMode.value !== 'files' || !selectedWorkspaceFile.value?.editable || htmlPreviewVisible.value) return
     // Inside CodeMirror the editor keymap already owns Mod-f / Mod-h.
     if ((event.target as HTMLElement | null)?.closest('.cm-editor')) return
 
@@ -4934,6 +4943,26 @@ const showSearchPaperPopup = (paper: any) => {
                   @click="setMarkdownViewMode(item.mode)"
                 ><ToolIcon :name="item.icon" /></button>
               </div>
+              <div v-else-if="workspaceIsHtml" class="tab-tool-segment" role="group" aria-label="HTML 显示模式">
+                <button
+                  type="button"
+                  class="tab-tool-btn labeled"
+                  :class="{ active: !htmlPreviewOpen }"
+                  :aria-pressed="!htmlPreviewOpen"
+                  aria-label="源码"
+                  title="查看 HTML 源码"
+                  @click="htmlPreviewOpen = false"
+                ><ToolIcon name="edit" /><span>源码</span></button>
+                <button
+                  type="button"
+                  class="tab-tool-btn labeled"
+                  :class="{ active: htmlPreviewOpen }"
+                  :aria-pressed="htmlPreviewOpen"
+                  aria-label="预览"
+                  title="静态预览 HTML（不运行 JavaScript）"
+                  @click="htmlPreviewOpen = true"
+                ><ToolIcon name="preview" /><span>预览</span></button>
+              </div>
               <template v-if="workspaceIsLatex && latexBuildVisible">
                 <select
                   v-model="latexEngine"
@@ -5308,10 +5337,18 @@ const showSearchPaperPopup = (paper: any) => {
               >
                 <span class="markdown-split-divider-grip" aria-hidden="true" />
               </div>
+              <HtmlPreview
+                v-if="htmlPreviewVisible"
+                :key="`html-preview:${fileTabKey({ projectId: currentWorkspaceProjectId, path: selectedWorkspacePath })}`"
+                :content="workspaceContent"
+                :name="selectedWorkspaceFile.name"
+                :path="selectedWorkspacePath"
+                :project-id="currentWorkspaceProjectId"
+              />
               <CodeEditor
                 ref="workspaceEditorRef"
                 :key="selectedWorkspacePath"
-                v-show="markdownEditorVisible"
+                v-show="markdownEditorVisible && !htmlPreviewVisible"
                 v-model="workspaceContent"
                 :language="workspaceLanguage"
                 :markdown-live="workspaceIsMarkdown && markdownViewMode === 'live'"
@@ -5985,7 +6022,8 @@ const showSearchPaperPopup = (paper: any) => {
   border: 1px solid var(--color-border);
   border-radius: 6px;
 }
-.tab-tool-segment .tab-tool-btn { width: 30px; height: 22px; border-radius: 4px; }
+.tab-tool-segment .tab-tool-btn { height: 22px; border-radius: 4px; }
+.tab-tool-segment .tab-tool-btn.labeled { border: 0; }
 .tab-tool-select {
   flex: none;
   height: 24px;

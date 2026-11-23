@@ -49,8 +49,7 @@ const currentProjectId = () => {
   try { return decodeURIComponent(match[1]) } catch { return match[1] }
 }
 
-const filesEndpoint = (suffix = '') => {
-  const projectId = currentProjectId()
+const filesEndpoint = (suffix = '', projectId = currentProjectId()) => {
   return projectId
     ? `/projects/${encodeURIComponent(projectId)}/files${suffix}`
     : `/files${suffix}`
@@ -588,7 +587,8 @@ export function useApi() {
       })
     },
 
-    getFileDownloadUrl: (path: string) => `${API_BASE}${filesEndpoint('/download')}?path=${encodeURIComponent(path)}`,
+    getFileDownloadUrl: (path: string, projectId?: string) =>
+      `${API_BASE}${filesEndpoint('/download', projectId)}?path=${encodeURIComponent(path)}`,
     getFileImageUrl: (path: string, version?: string | number) => {
       const versionParam = version === undefined || version === ''
         ? ''
