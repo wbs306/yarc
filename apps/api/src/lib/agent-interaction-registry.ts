@@ -42,7 +42,9 @@ class AgentInteractionRegistry {
 
   create(input: CreateInteractionInput): Promise<AgentInteractionResponse> {
     const requestId = randomUUID()
-    const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    // Questionnaires wait for the user, matching Pi's ask_user_question behavior.
+    // Keep explicit timeouts and the default for other interaction kinds.
+    const timeoutMs = input.timeoutMs ?? (input.kind === 'questionnaire' ? 0 : DEFAULT_TIMEOUT_MS)
     const request: AgentInteractionRequest = {
       type: 'agent_interaction_request',
       requestId,
