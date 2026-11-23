@@ -50,6 +50,7 @@ import tasksRoutes from './routes/tasks.js'
 import filesRoutes from './routes/files.js'
 import projectsRoutes from './routes/projects.js'
 import latexRoutes from './routes/latex.js'
+import { latexService } from './services/latex.service.js'
 import settingsRoutes from './routes/settings.js'
 import rankingsRoutes from './routes/rankings.js'
 import searchCategoriesRoutes from './routes/search-categories.js'
@@ -613,6 +614,7 @@ const server = serve(
     console.log(`   Database: ${config.databaseUrl.replace(/\/\/.*@/, '//***@')}`)
 
     recoverJobs()
+    latexService.startCleanupScheduler()
     fileService.startWatcher()
     projectWorkspaceWatcherService.start().catch((err) => {
       console.warn('[Startup] Project workspace watcher failed to start:', err)

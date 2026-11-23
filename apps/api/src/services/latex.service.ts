@@ -6,6 +6,7 @@ import { config } from '../lib/config.js'
 import { AppError } from '../lib/errors.js'
 import { fileService } from './file.service.js'
 import { liveFileService } from './live-file.service.js'
+import { cleanupLatexBuilds, markSettledLatexBuild } from './latex-build-retention.js'
 import type {
   LatexBuild,
   LatexBuildLog,
@@ -47,11 +48,14 @@ export interface LatexWorkspaceCompileOptions {
   entryName: string
   engine: LatexEngine
   onSettled?: (build: LatexBuild) => Promise<void>
+  onPruned?: (id: string) => void
 }
 
 interface LatexBuildJob extends LatexBuild {
   projectId?: string
   onSettled?: (build: LatexBuild) => Promise<void>
+  onPruned?: (id: string) => void
+  lastAccessedAt?: number
   jobDir: string
   sourceDir: string
   outputDir: string
@@ -261,6 +265,42 @@ export class LatexService {
   private readonly jobs = new Map<string, LatexBuildJob>()
   private readonly pendingJobIds: string[] = []
   private runningJobs = 0
+  private readonly pruning = new Set<string>()
+  private cleanupInProgress = false
+  private cleanupTimer?: ReturnType<typeof setInterval>
+
+  startCleanupScheduler() {
+    if (!config.latexEnabled || !config.latexCleanupEnabled || this.cleanupTimer) return
+    void this.pruneBuilds()
+    this.cleanupTimer = setInterval(() => { void this.pruneBuilds() }, 60 * 60 * 1000)
+    this.cleanupTimer.unref()
+  }
+
+  private async pruneBuilds() {
+    if (!config.latexCleanupEnabled || this.cleanupInProgress) return
+    this.cleanupInProgress = true
+    const warn = (error: unknown) => console.warn('[LaTeX] Build cleanup failed:', error)
+    try {
+      await cleanupLatexBuilds(config.latexOutputDir, {
+        claim: id => {
+          const job = this.jobs.get(id)
+          if (job && (job.status === 'queued' || job.status === 'running'
+            || Date.now() - Math.max(job.lastAccessedAt || 0, Date.parse(job.completedAt || '')) < 15 * 60 * 1000)) return false
+          this.pruning.add(id)
+          return true
+        },
+        finish: (id, removed) => {
+          this.pruning.delete(id)
+          if (!removed) return
+          const job = this.jobs.get(id)
+          this.jobs.delete(id)
+          job?.onPruned?.(id)
+        },
+        onError: warn,
+      })
+    } catch (error) { warn(error) }
+    finally { this.cleanupInProgress = false }
+  }
 
   private maxConcurrent() {
     return positiveInt(config.latexMaxConcurrent, 2, 1)
@@ -447,6 +487,7 @@ export class LatexService {
       id,
       projectId: options.projectId,
       onSettled: options.onSettled,
+      onPruned: options.onPruned,
       path: options.path,
       entry: entryName,
       engine: options.engine,
@@ -579,11 +620,20 @@ export class LatexService {
     job.onSettled = undefined
     try { await callback?.(this.buildView(job)) }
     catch { console.warn('[LaTeX] Could not update build history metadata') }
+    if (!job.completedAt) return
+    try {
+      await markSettledLatexBuild(config.latexOutputDir, {
+        id: job.id, projectId: job.projectId ?? null,
+        finishedAt: Date.parse(job.completedAt), success: job.status === 'completed',
+      })
+    } catch (error) { console.warn('[LaTeX] Could not mark build for retention:', error) }
+    void this.pruneBuilds()
   }
 
   private jobForScope(id: string, projectId?: string) {
     const job = this.jobs.get(id)
-    if (!job || job.projectId !== projectId) throw new AppError('NOT_FOUND', 'LaTeX build not found', 404)
+    if (!job || job.projectId !== projectId || this.pruning.has(id)) throw new AppError('NOT_FOUND', 'LaTeX build not found', 404)
+    job.lastAccessedAt = Date.now()
     return job
   }
 

@@ -49,6 +49,7 @@ export const config = {
   piExtensionUiTimeoutMs: parseInt(process.env.PI_EXTENSION_UI_TIMEOUT_MS || '300000'),
   piSessionDurability: process.env.PI_SESSION_DURABILITY === 'normal' ? 'normal' : 'strict',
   latexEnabled: process.env.LATEX_ENABLED !== 'false',
+  latexCleanupEnabled: process.env.LATEX_CLEANUP_ENABLED !== 'false',
   latexDockerCommand: process.env.LATEX_DOCKER_COMMAND || 'docker',
   latexDockerImage: process.env.LATEX_DOCKER_IMAGE || 'texlive/texlive:latest',
   latexBuildTimeoutMs: parseInt(process.env.LATEX_BUILD_TIMEOUT_MS || '120000'),

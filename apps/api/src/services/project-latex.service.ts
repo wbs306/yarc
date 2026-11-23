@@ -63,6 +63,7 @@ export class ProjectLatexService {
         sourceRoot: input.sourceRootFullPath,
         entryName: input.entryName,
         engine: input.engine,
+        onPruned: id => { this.builds.delete(id) },
         onSettled: async result => {
           if (checkpoint) await projectHistoryService.updateCheckpointMetadata(input.projectId, checkpoint.id, {
             buildId: result.id,
